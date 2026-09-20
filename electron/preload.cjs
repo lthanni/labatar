@@ -5,5 +5,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   replays: {
     getFolder: () => ipcRenderer.invoke("replays:get-folder"),
     selectFolder: () => ipcRenderer.invoke("replays:select-folder"),
+    scanFolder: (folder) => ipcRenderer.invoke("replays:scan-folder", folder),
   },
 });

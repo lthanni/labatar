@@ -2,36 +2,44 @@ import { useMemo } from "react";
 import type { ColDef } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 
-export type AvatarRow = {
-  name: string;
-  role: string;
-  status: "Active" | "Away" | "Offline";
-  lastSeen: string;
+export type ReplayRow = {
+  id: string;
+  timestamp: string | null;
+  player1: string;
+  player2: string;
+  player1Character: string;
+  player2Character: string;
+  winner: string;
+  player1Support: string;
+  player2Support: string;
+  roundScore: string;
+  stage: string;
 };
 
-const rowData: AvatarRow[] = [
-  { name: "Nova", role: "Explorer", status: "Active", lastSeen: "Just now" },
-  { name: "Atlas", role: "Builder", status: "Away", lastSeen: "5 min ago" },
-  { name: "Echo", role: "Guide", status: "Offline", lastSeen: "Yesterday" },
-];
-
-export function AvatarGrid() {
-  const columnDefs = useMemo<ColDef<AvatarRow>[]>(
+export function AvatarGrid({ rowData }: { rowData: ReplayRow[] }) {
+  const columnDefs = useMemo<ColDef<ReplayRow>[]>(
     () => [
-      { field: "name", headerName: "Avatar", flex: 1 },
-      { field: "role", headerName: "Role", flex: 1 },
-      { field: "status", headerName: "Status", flex: 1 },
-      { field: "lastSeen", headerName: "Last seen", flex: 1 },
+      { field: "timestamp", headerName: "Timestamp", flex: 1 },
+      { field: "player1Character", headerName: "P1 character", flex: 1 },
+      { field: "player2Character", headerName: "P2 character", flex: 1 },
+      { field: "player1", headerName: "P1", flex: 1 },
+      { field: "player2", headerName: "P2", flex: 1 },
+      { field: "winner", headerName: "Winner", flex: 1 },
+      { field: "player1Support", headerName: "P1 support", flex: 1 },
+      { field: "player2Support", headerName: "P2 support", flex: 1 },
+      { field: "roundScore", headerName: "Round score", flex: 1 },
+      { field: "stage", headerName: "Stage", flex: 1 },
     ],
     [],
   );
 
   return (
     <div className="ag-theme-quartz" style={{ height: 360, width: "100%" }}>
-      <AgGridReact<AvatarRow>
+      <AgGridReact<ReplayRow>
         columnDefs={columnDefs}
         rowData={rowData}
         defaultColDef={{ sortable: true, filter: true, resizable: true }}
+        getRowId={({ data }) => data.id}
       />
     </div>
   );
