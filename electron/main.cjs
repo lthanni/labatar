@@ -5,6 +5,21 @@ const fs = require("node:fs");
 const isDev = !app.isPackaged;
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
 
+function watchElectronFiles() {
+  if (!isDev) return;
+
+  const watchedFiles = [__filename, path.join(__dirname, "preload.cjs")];
+  let restarting = false;
+  for (const file of watchedFiles) {
+    fs.watchFile(file, { interval: 250 }, (current, previous) => {
+      if (restarting || current.mtimeMs === previous.mtimeMs) return;
+      restarting = true;
+      app.relaunch();
+      app.exit(0);
+    });
+  }
+}
+
 function readSettings() {
   try {
     return JSON.parse(fs.readFileSync(settingsFile(), "utf8"));
@@ -126,6 +141,7 @@ function createWindow() {
 }
 
 void app.whenReady().then(() => {
+  watchElectronFiles();
   createWindow();
 
   app.on("activate", () => {
