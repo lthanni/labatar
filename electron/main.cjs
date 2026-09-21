@@ -1,8 +1,23 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  screen,
+  session,
+  desktopCapturer,
+} = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const supportMap = require("./support-map.json");
 const characterMap = require("./character-map.json");
+let overlayWindow = null;
+let overlayMonitor = null;
+let gameDisplayId = null;
+let onlyShowWhenGameFocused = true;
+let lastGameBounds = null;
+let overlayEnabled = false;
+const getActiveWindow = async () => (await import("active-win")).activeWindow();
 
 const isDev = !app.isPackaged;
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
@@ -137,6 +152,102 @@ ipcMain.handle("replays:scan-folder", (_, folder) => {
   return { games, playerCounts };
 });
 
+function createOverlayWindow() {
+  overlayEnabled = true;
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.show();
+    return;
+  }
+  const display = screen.getPrimaryDisplay();
+  const width = Math.min(900, display.workAreaSize.width - 80);
+  overlayWindow = new BrowserWindow({
+    width,
+    height: display.workAreaSize.height,
+    x: Math.round((display.workAreaSize.width - width) / 2),
+    y: display.bounds.y,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    hasShadow: false,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  overlayWindow.setVisibleOnAllWorkspaces(false);
+  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+  overlayWindow.on("closed", () => {
+    overlayEnabled = false;
+    if (overlayMonitor) clearInterval(overlayMonitor);
+    overlayMonitor = null;
+    overlayWindow = null;
+  });
+  if (isDev) void overlayWindow.loadURL("http://localhost:5173/?overlay=1");
+  else
+    void overlayWindow.loadFile(path.join(__dirname, "../dist/index.html"), {
+      search: "?overlay=1",
+    });
+  overlayMonitor = setInterval(async () => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) return;
+    if (!overlayEnabled) {
+      overlayWindow.hide();
+      return;
+    }
+    const active = await getActiveWindow().catch(() => null);
+    const processName = active?.owner?.name?.toLowerCase() ?? "";
+    const processPath = active?.owner?.path?.toLowerCase() ?? "";
+    const isGame =
+      processName === "Atla.exe" ||
+      processName === "Avatar Legends: The Fighting Game" ||
+      processPath.endsWith("\\atla.exe") ||
+      processPath.endsWith("/atla.exe");
+    if (isDev && active && overlayWindow._lastActiveWindow !== isGame) {
+      console.log("Active window:", {
+        title: active.title,
+        process: active.owner?.name,
+        path: active.owner?.path,
+      });
+    }
+    if (overlayWindow) overlayWindow._lastActiveWindow = isGame;
+    if (!isGame) {
+      if (onlyShowWhenGameFocused) overlayWindow.hide();
+      else if (lastGameBounds) {
+        overlayWindow.setBounds(lastGameBounds);
+        overlayWindow.showInactive();
+      }
+      return;
+    }
+    const { x, y, width, height } = active.bounds;
+    lastGameBounds = { x, y, width, height };
+    const gameDisplay = screen.getDisplayMatching(active.bounds);
+    gameDisplayId = gameDisplay.id;
+    overlayWindow.setAlwaysOnTop(true, "floating");
+    overlayWindow.setBounds({ x, y, width, height });
+    overlayWindow.setPosition(Math.max(gameDisplay.bounds.x, x), Math.max(gameDisplay.bounds.y, y));
+    overlayWindow.showInactive();
+  }, 500);
+}
+
+ipcMain.handle("overlay:show", () => createOverlayWindow());
+ipcMain.handle("overlay:hide", () => {
+  overlayEnabled = false;
+  overlayWindow?.hide();
+});
+ipcMain.handle("overlay:is-visible", () =>
+  Boolean(overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible()),
+);
+ipcMain.handle("overlay:set-focus-mode", (_, enabled) => {
+  onlyShowWhenGameFocused = Boolean(enabled);
+  if (!onlyShowWhenGameFocused && lastGameBounds && overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.setBounds(lastGameBounds);
+    overlayWindow.showInactive();
+  }
+  return onlyShowWhenGameFocused;
+});
+
 ipcMain.handle("replays:get-folder", () => readSettings().replaysFolder ?? null);
 
 ipcMain.handle("replays:select-folder", async () => {
@@ -170,8 +281,39 @@ function createWindow() {
   }
 }
 
+async function getGameCaptureSource() {
+  const sources = await desktopCapturer.getSources({ types: ["screen"] });
+  const displays = screen.getAllDisplays();
+  const matchingIndex = displays.findIndex((display) => display.id === gameDisplayId);
+  const source =
+    sources.find((candidate) => candidate.display_id === String(gameDisplayId)) ??
+    sources[matchingIndex] ??
+    sources[0];
+  if (isDev) {
+    console.log("Capture source:", {
+      gameDisplayId,
+      sourceId: source?.id,
+      sourceDisplayId: source?.display_id,
+      availableSources: sources.map((candidate) => ({
+        id: candidate.id,
+        displayId: candidate.display_id,
+      })),
+      displays: displays.map((display) => display.id),
+    });
+  }
+  return source ?? null;
+}
+
 void app.whenReady().then(() => {
   watchElectronFiles();
+  session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
+    const source = await getGameCaptureSource();
+    callback({ video: source });
+  });
+  ipcMain.handle("overlay:get-capture-source", async () => {
+    const source = await getGameCaptureSource();
+    return source ? { id: source.id } : null;
+  });
   createWindow();
 
   app.on("activate", () => {

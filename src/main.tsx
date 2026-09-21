@@ -23,6 +23,7 @@ import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-quartz.css";
 import { AvatarGrid, type ReplayRow } from "./AvatarGrid";
 import { useCallback } from "react";
+import { OverlaySurface, VisualOverlay } from "./Overlay";
 
 declare global {
   interface Window {
@@ -33,6 +34,13 @@ declare global {
         scanFolder: (
           folder: string,
         ) => Promise<{ games: ReplayRow[]; playerCounts: Record<string, number> }>;
+      };
+      overlay: {
+        show: () => Promise<void>;
+        hide: () => Promise<void>;
+        isVisible: () => Promise<boolean>;
+        setFocusMode: (enabled: boolean) => Promise<boolean>;
+        getCaptureSource: () => Promise<{ id: string } | null>;
       };
     };
   }
@@ -175,16 +183,7 @@ function App() {
         <Tab label="Replay analysis" />
         <Tab label="Visual overlay" />
       </Tabs>
-      {tab === 0 ? (
-        <ReplayAnalysis />
-      ) : (
-        <Paper variant="outlined" sx={{ p: 3, textAlign: "left" }}>
-          <Typography variant="h6">Visual overlay</Typography>
-          <Typography color="text.secondary">
-            Overlay processing and gameplay feedback will appear here.
-          </Typography>
-        </Paper>
-      )}
+      {tab === 0 ? <ReplayAnalysis /> : <VisualOverlay />}
     </>
   );
 }
@@ -193,13 +192,26 @@ if (!root) {
   throw new Error("Root element not found");
 }
 
+const isOverlay = new URLSearchParams(window.location.search).has("overlay");
+if (isOverlay) document.documentElement.classList.add("overlay-mode");
 createRoot(root).render(
   <StrictMode>
     <ThemeProvider theme={darkTheme}>
-      <Box sx={{ minHeight: "100vh", width: "100%", p: 2, backgroundColor: "background.default" }}>
-        <AgGridProvider modules={agGridModules}>
-          <App />
-        </AgGridProvider>
+      <Box
+        sx={{
+          minHeight: "100vh",
+          width: "100%",
+          p: isOverlay ? 0 : 2,
+          backgroundColor: isOverlay ? "transparent" : "background.default",
+        }}
+      >
+        {isOverlay ? (
+          <OverlaySurface />
+        ) : (
+          <AgGridProvider modules={agGridModules}>
+            <App />
+          </AgGridProvider>
+        )}
       </Box>
     </ThemeProvider>
   </StrictMode>,
