@@ -10,6 +10,8 @@ import {
   Paper,
   Select,
   Stack,
+  Tab,
+  Tabs,
   ThemeProvider,
   Typography,
   createTheme,
@@ -100,7 +102,7 @@ const darkTheme = createTheme({
   },
 });
 
-function App() {
+function ReplayAnalysis() {
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
   const [overridePlayer, setOverridePlayer] = useState<string | null>(null);
@@ -160,6 +162,29 @@ function App() {
         </Typography>
       </Stack>
       <AvatarGrid rowData={relevantGames} playerOfInterest={playerOfInterest} />
+    </>
+  );
+}
+
+function App() {
+  const [tab, setTab] = useState(0);
+
+  return (
+    <>
+      <Tabs value={tab} onChange={(_, nextTab: number) => setTab(nextTab)} sx={{ mb: 2 }}>
+        <Tab label="Replay analysis" />
+        <Tab label="Visual overlay" />
+      </Tabs>
+      {tab === 0 ? (
+        <ReplayAnalysis />
+      ) : (
+        <Paper variant="outlined" sx={{ p: 3, textAlign: "left" }}>
+          <Typography variant="h6">Visual overlay</Typography>
+          <Typography color="text.secondary">
+            Overlay processing and gameplay feedback will appear here.
+          </Typography>
+        </Paper>
+      )}
     </>
   );
 }
