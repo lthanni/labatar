@@ -1,6 +1,8 @@
 const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
+const supportMap = require("./support-map.json");
+const characterMap = require("./character-map.json");
 
 const isDev = !app.isPackaged;
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
@@ -8,7 +10,12 @@ const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
 function watchElectronFiles() {
   if (!isDev) return;
 
-  const watchedFiles = [__filename, path.join(__dirname, "preload.cjs")];
+  const watchedFiles = [
+    __filename,
+    path.join(__dirname, "preload.cjs"),
+    path.join(__dirname, "support-map.json"),
+    path.join(__dirname, "character-map.json"),
+  ];
   let restarting = false;
   for (const file of watchedFiles) {
     fs.watchFile(file, { interval: 250 }, (current, previous) => {
@@ -41,6 +48,36 @@ function cleanReplayName(value) {
     .trim();
 }
 
+function formatSupport(character, supportId) {
+  if (!supportId || supportId === "0") return "None";
+  const aliases = {
+    korra_nightmare: "Nightmare Korra",
+    aang_avchar: "Aang",
+    avatar_aang: "Avatar Aang",
+  };
+  const normalized = character
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+  const mappedCharacter =
+    aliases[character.trim().toLowerCase()] ??
+    Object.keys(supportMap).find(
+      (name) => name.toLowerCase().replace(/[^a-z0-9]/g, "") === normalized,
+    );
+  return supportMap[mappedCharacter]?.[supportId] || `Support #${supportId}`;
+}
+
+function formatCharacter(character) {
+  return (
+    characterMap[character] ??
+    characterMap[character.toUpperCase()] ??
+    characterMap[
+      Object.keys(characterMap).find((key) => key.toLowerCase() === character.toLowerCase())
+    ] ??
+    character
+  );
+}
+
 function parseReplayFile(filePath) {
   const content = fs.readFileSync(filePath).toString("latin1");
   const fields = {};
@@ -55,8 +92,8 @@ function parseReplayFile(filePath) {
     player2: cleanReplayName(fields.ReplayInfo_P2Name ?? "Player 2"),
   };
   const characters = {
-    player1: fields["P1"] ?? fields.PreFight_MainChar ?? "Unknown",
-    player2: fields["P2"] ?? "Unknown",
+    player1: formatCharacter(fields["P1"] ?? fields.PreFight_MainChar ?? "Unknown"),
+    player2: formatCharacter(fields["P2"] ?? "Unknown"),
   };
   const winner =
     fields.ReplayInfo_Winner === "1"
@@ -77,19 +114,12 @@ function parseReplayFile(filePath) {
     player1Character: characters.player1,
     player2Character: characters.player2,
     winner,
-    player1Support:
-      fields.P1_SupportCharId && fields.P1_SupportCharId !== "0"
-        ? `Support #${fields.P1_SupportCharId}`
-        : "None",
-    player2Support:
-      fields.P2_SupportCharId && fields.P2_SupportCharId !== "0"
-        ? `Support #${fields.P2_SupportCharId}`
-        : "None",
+    player1Support: formatSupport(characters.player1, fields.P1_SupportCharId),
+    player2Support: formatSupport(characters.player2, fields.P2_SupportCharId),
     roundScore:
       fields.TM_WinsT1 && fields.TM_WinsT2
         ? `${fields.TM_WinsT1} - ${fields.TM_WinsT2}`
         : "Unknown",
-    stage: fields.ReplayInfo_Stage ?? "Unknown",
   };
 }
 

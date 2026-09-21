@@ -1,8 +1,20 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
-import { Box, Button, Paper, Stack, Typography } from "@mui/material";
-import { useEffect, useState } from "react";
+import {
+  Box,
+  Button,
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Paper,
+  Select,
+  Stack,
+  ThemeProvider,
+  Typography,
+  createTheme,
+} from "@mui/material";
+import { useEffect, useMemo, useState } from "react";
 import { AgGridProvider } from "ag-grid-react";
 import { AllCommunityModule } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
@@ -80,15 +92,32 @@ function ReplayFolderPicker({
 const root = document.getElementById("app");
 
 const agGridModules = [AllCommunityModule];
+const darkTheme = createTheme({
+  palette: {
+    mode: "dark",
+    background: { default: "#121318", paper: "#1d2028" },
+    primary: { main: "#90caf9" },
+  },
+});
 
 function App() {
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
+  const [overridePlayer, setOverridePlayer] = useState<string | null>(null);
   const onData = useCallback((nextGames: ReplayRow[], counts: Record<string, number>) => {
     setGames(nextGames);
     setPlayerCounts(counts);
+    setOverridePlayer(null);
   }, []);
-  const playerOfInterest = Object.entries(playerCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  const automaticPlayer = Object.entries(playerCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  const playerOfInterest = overridePlayer ?? automaticPlayer;
+  const relevantGames = useMemo(
+    () =>
+      games.filter(
+        (game) => game.player1 === playerOfInterest || game.player2 === playerOfInterest,
+      ),
+    [games, playerOfInterest],
+  );
 
   return (
     <>
@@ -98,7 +127,39 @@ function App() {
           ? `Player of interest: ${playerOfInterest} (${playerCounts[playerOfInterest]} appearances)`
           : "No replay data loaded"}
       </Typography>
-      <AvatarGrid rowData={games} />
+      <Stack direction="row" spacing={2} sx={{ mb: 1, alignItems: "center" }}>
+        <FormControl
+          size="small"
+          sx={{ minWidth: 240, backgroundColor: "background.paper", borderRadius: 1 }}
+        >
+          <InputLabel id="player-override-label">Player of interest</InputLabel>
+          <Select
+            labelId="player-override-label"
+            value={playerOfInterest ?? ""}
+            label="Player of interest"
+            onChange={(event) => setOverridePlayer(event.target.value)}
+          >
+            {Object.entries(playerCounts)
+              .sort((a, b) => b[1] - a[1])
+              .map(([name, count]) => (
+                <MenuItem key={name} value={name}>
+                  {name} ({count})
+                </MenuItem>
+              ))}
+          </Select>
+        </FormControl>
+        <Button
+          variant="outlined"
+          disabled={!overridePlayer}
+          onClick={() => setOverridePlayer(null)}
+        >
+          Use auto-detected
+        </Button>
+        <Typography variant="caption" color="text.secondary">
+          {overridePlayer ? "Overridden" : "Auto-determined"}
+        </Typography>
+      </Stack>
+      <AvatarGrid rowData={relevantGames} playerOfInterest={playerOfInterest} />
     </>
   );
 }
@@ -109,16 +170,12 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <Box
-      sx={{
-        minHeight: "100vh",
-        width: "100%",
-        p: 3,
-      }}
-    >
-      <AgGridProvider modules={agGridModules}>
-        <App />
-      </AgGridProvider>
-    </Box>
+    <ThemeProvider theme={darkTheme}>
+      <Box sx={{ minHeight: "100vh", width: "100%", p: 2, backgroundColor: "background.default" }}>
+        <AgGridProvider modules={agGridModules}>
+          <App />
+        </AgGridProvider>
+      </Box>
+    </ThemeProvider>
   </StrictMode>,
 );
