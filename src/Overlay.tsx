@@ -1848,17 +1848,19 @@ export function OverlaySurface() {
             context.clearRect(0, 0, width, height);
             // P2 is sampled directly from the raw game-window video. The
             // mirrored copy below is output only and is never used as input.
-            context.drawImage(
-              video,
-              sourceX,
-              sourceY,
-              sourceWidth,
-              sourceHeight,
-              targetX,
-              targetY,
-              targetWidth,
-              targetHeight,
-            );
+            if (trainingMeterRef.current.state === "training") {
+              context.drawImage(
+                video,
+                sourceX,
+                sourceY,
+                sourceWidth,
+                sourceHeight,
+                targetX,
+                targetY,
+                targetWidth,
+                targetHeight,
+              );
+            }
 
             if (
               inputAnalysisContext &&
