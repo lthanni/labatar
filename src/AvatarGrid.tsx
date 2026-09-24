@@ -39,6 +39,15 @@ type DisplayRow =
   | (SessionRow & { kind: "session" })
   | (ReplayRow & { kind: "game"; sessionId: string });
 
+function formatReplayTimestamp(timestamp: string | null) {
+  if (!timestamp) return "";
+  const match = timestamp.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/);
+  if (!match) return timestamp;
+  const [, year, month, day, hour, minute] = match;
+  const currentYear = new Date().getFullYear().toString();
+  return `${year === currentYear ? "" : `${year} `}${month}/${day} ${hour}:${minute}`;
+}
+
 function SetFilter({
   label,
   values,
@@ -146,6 +155,7 @@ export function AvatarGrid({
   const [filters, setFilters] = useState({
     opponent: [] as string[],
     poi: [] as string[],
+    poiSupport: [] as string[],
     opponentCharacter: [] as string[],
     opponentSupport: [] as string[],
   });
@@ -160,6 +170,9 @@ export function AvatarGrid({
     (ignored === "poi" ||
       filters.poi.length === 0 ||
       filters.poi.some((value) => session.playerCharacters.split(", ").includes(value))) &&
+    (ignored === "poiSupport" ||
+      filters.poiSupport.length === 0 ||
+      filters.poiSupport.some((value) => session.playerSupports.split(", ").includes(value))) &&
     (ignored === "opponentCharacter" ||
       filters.opponentCharacter.length === 0 ||
       filters.opponentCharacter.some((value) =>
@@ -183,6 +196,7 @@ export function AvatarGrid({
     return {
       opponent: valuesFor("opponent", (session) => [session.opponent]),
       poi: valuesFor("poi", (session) => session.playerCharacters.split(", ")),
+      poiSupport: valuesFor("poiSupport", (session) => session.playerSupports.split(", ")),
       opponentCharacter: valuesFor("opponentCharacter", (session) =>
         session.opponentCharacters.split(", "),
       ),
@@ -198,6 +212,10 @@ export function AvatarGrid({
           (filters.opponent.length === 0 || filters.opponent.includes(session.opponent)) &&
           (filters.poi.length === 0 ||
             filters.poi.some((value) => session.playerCharacters.split(", ").includes(value))) &&
+          (filters.poiSupport.length === 0 ||
+            filters.poiSupport.some((value) =>
+              session.playerSupports.split(", ").includes(value),
+            )) &&
           (filters.opponentCharacter.length === 0 ||
             filters.opponentCharacter.some((value) =>
               session.opponentCharacters.split(", ").includes(value),
@@ -249,13 +267,17 @@ export function AvatarGrid({
       {
         headerName: "Session started / time",
         valueGetter: ({ data }) =>
-          data?.kind === "session" ? data.started : (data?.timestamp ?? ""),
+          data?.kind === "session"
+            ? formatReplayTimestamp(data.started)
+            : formatReplayTimestamp(data?.timestamp ?? null),
         flex: 1,
       },
       {
         headerName: "Session finished / time",
         valueGetter: ({ data }) =>
-          data?.kind === "session" ? data.finished : (data?.timestamp ?? ""),
+          data?.kind === "session"
+            ? formatReplayTimestamp(data.finished)
+            : formatReplayTimestamp(data?.timestamp ?? null),
         flex: 1,
       },
       {
@@ -352,6 +374,12 @@ export function AvatarGrid({
           onChange={(value) => setFilters((current) => ({ ...current, poi: value }))}
         />
         <SetFilter
+          label="POI support"
+          values={filterValues.poiSupport}
+          selected={filters.poiSupport}
+          onChange={(value) => setFilters((current) => ({ ...current, poiSupport: value }))}
+        />
+        <SetFilter
           label="Opponent character"
           values={filterValues.opponentCharacter}
           selected={filters.opponentCharacter}
@@ -371,7 +399,7 @@ export function AvatarGrid({
           columnDefs={columnDefs}
           rowData={displayRows}
           defaultColDef={{ sortable: true, filter: true, resizable: true }}
-          autoSizeStrategy={{ type: "fitCellContents" }}
+          autoSizeStrategy={{ type: "fitGridWidth" }}
           getRowId={({ data }) => data.id}
         />
       </div>

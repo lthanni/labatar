@@ -40,7 +40,11 @@ declare global {
         hide: () => Promise<void>;
         isVisible: () => Promise<boolean>;
         setFocusMode: (enabled: boolean) => Promise<boolean>;
-        getCaptureSource: () => Promise<{ id: string } | null>;
+        getCaptureSource: () => Promise<{
+          id: string;
+          mode?: "game-window" | "unavailable";
+          name?: string;
+        } | null>;
       };
     };
   }
@@ -175,11 +179,18 @@ function ReplayAnalysis() {
 }
 
 function App() {
-  const [tab, setTab] = useState(0);
+  const [tab, setTab] = useState(() => {
+    const savedTab = Number(localStorage.getItem("avatar-app-last-tab"));
+    return savedTab === 1 ? 1 : 0;
+  });
+  const changeTab = (nextTab: number) => {
+    setTab(nextTab);
+    localStorage.setItem("avatar-app-last-tab", String(nextTab));
+  };
 
   return (
     <>
-      <Tabs value={tab} onChange={(_, nextTab: number) => setTab(nextTab)} sx={{ mb: 2 }}>
+      <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)} sx={{ mb: 2 }}>
         <Tab label="Replay analysis" />
         <Tab label="Visual overlay" />
       </Tabs>
@@ -199,8 +210,12 @@ createRoot(root).render(
     <ThemeProvider theme={darkTheme}>
       <Box
         sx={{
-          minHeight: "100vh",
+          height: "100vh",
+          minHeight: 0,
           width: "100%",
+          boxSizing: "border-box",
+          overflowX: "hidden",
+          overflowY: isOverlay ? "hidden" : "auto",
           p: isOverlay ? 0 : 2,
           backgroundColor: isOverlay ? "transparent" : "background.default",
         }}
