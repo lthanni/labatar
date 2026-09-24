@@ -16,6 +16,8 @@ let overlayMonitor = null;
 let gameDisplayId = null;
 let onlyShowWhenGameFocused = true;
 let lastGameBounds = null;
+let lastGameWindowTitle = null;
+let missedGameFocusChecks = 0;
 let overlayEnabled = false;
 const getActiveWindow = async () => (await import("active-win")).activeWindow();
 
@@ -155,7 +157,6 @@ ipcMain.handle("replays:scan-folder", (_, folder) => {
 function createOverlayWindow() {
   overlayEnabled = true;
   if (overlayWindow && !overlayWindow.isDestroyed()) {
-    overlayWindow.show();
     return;
   }
   const display = screen.getPrimaryDisplay();
@@ -168,6 +169,8 @@ function createOverlayWindow() {
     frame: false,
     transparent: true,
     alwaysOnTop: true,
+    focusable: false,
+    show: false,
     skipTaskbar: true,
     resizable: false,
     hasShadow: false,
@@ -181,6 +184,10 @@ function createOverlayWindow() {
   overlayWindow.setIgnoreMouseEvents(true, { forward: true });
   overlayWindow.on("closed", () => {
     overlayEnabled = false;
+    gameDisplayId = null;
+    lastGameBounds = null;
+    lastGameWindowTitle = null;
+    missedGameFocusChecks = 0;
     if (overlayMonitor) clearInterval(overlayMonitor);
     overlayMonitor = null;
     overlayWindow = null;
@@ -190,50 +197,95 @@ function createOverlayWindow() {
     void overlayWindow.loadFile(path.join(__dirname, "../dist/index.html"), {
       search: "?overlay=1",
     });
-  overlayMonitor = setInterval(async () => {
-    if (!overlayWindow || overlayWindow.isDestroyed()) return;
-    if (!overlayEnabled) {
-      overlayWindow.hide();
-      return;
+  let monitorBusy = false;
+  let appliedBounds = null;
+  let appliedDisplayId = null;
+  const sameBounds = (left, right) =>
+    left &&
+    right &&
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height;
+  const applyOverlayTarget = (display) => {
+    const bounds = { ...display.bounds };
+    const targetChanged = !sameBounds(appliedBounds, bounds) || appliedDisplayId !== display.id;
+    gameDisplayId = display.id;
+    lastGameBounds = bounds;
+    if (targetChanged) {
+      overlayWindow.setAlwaysOnTop(true, "screen-saver");
+      overlayWindow.setBounds(bounds);
+      appliedBounds = bounds;
+      appliedDisplayId = display.id;
     }
-    const active = await getActiveWindow().catch(() => null);
-    const processName = active?.owner?.name?.toLowerCase() ?? "";
-    const processPath = active?.owner?.path?.toLowerCase() ?? "";
-    const isGame =
-      processName === "Atla.exe" ||
-      processName === "Avatar Legends: The Fighting Game" ||
-      processPath.endsWith("\\atla.exe") ||
-      processPath.endsWith("/atla.exe");
-    if (isDev && active && overlayWindow._lastActiveWindow !== isGame) {
-      console.log("Active window:", {
-        title: active.title,
-        process: active.owner?.name,
-        path: active.owner?.path,
-      });
-    }
-    if (overlayWindow) overlayWindow._lastActiveWindow = isGame;
-    if (!isGame) {
-      if (onlyShowWhenGameFocused) overlayWindow.hide();
-      else if (lastGameBounds) {
-        overlayWindow.setBounds(lastGameBounds);
-        overlayWindow.showInactive();
+    if (!overlayWindow.isVisible()) overlayWindow.showInactive();
+  };
+  const syncOverlayWindow = async () => {
+    if (monitorBusy || !overlayWindow || overlayWindow.isDestroyed()) return;
+    monitorBusy = true;
+    try {
+      if (!overlayEnabled) {
+        overlayWindow.hide();
+        return;
       }
-      return;
+      const active = await getActiveWindow().catch(() => null);
+      const processName = active?.owner?.name?.toLowerCase() ?? "";
+      const processPath = active?.owner?.path?.toLowerCase() ?? "";
+      const isGame =
+        processName === "atla.exe" ||
+        processName === "avatar legends: the fighting game" ||
+        processPath.endsWith("\\atla.exe") ||
+        processPath.endsWith("/atla.exe") ||
+        processName.includes("atla") ||
+        processPath.includes("\\atla") ||
+        processPath.includes("/atla");
+      if (isDev && active && overlayWindow._lastActiveWindow !== isGame) {
+        console.log("Active window:", {
+          title: active.title,
+          process: active.owner?.name,
+          path: active.owner?.path,
+        });
+      }
+      overlayWindow._lastActiveWindow = isGame;
+      if (!isGame || !active?.bounds) {
+        if (!onlyShowWhenGameFocused) {
+          const display = lastGameBounds
+            ? screen.getDisplayMatching(lastGameBounds)
+            : screen.getPrimaryDisplay();
+          missedGameFocusChecks = 0;
+          applyOverlayTarget(display);
+          return;
+        }
+        missedGameFocusChecks += 1;
+        if (onlyShowWhenGameFocused && missedGameFocusChecks >= 4) overlayWindow.hide();
+        else if (lastGameBounds) {
+          const display = screen.getDisplayMatching(lastGameBounds);
+          applyOverlayTarget(display);
+          if (!overlayWindow.isVisible()) overlayWindow.showInactive();
+        }
+        return;
+      }
+      missedGameFocusChecks = 0;
+      lastGameWindowTitle = active.title || lastGameWindowTitle;
+      // The capture and overlay coordinates are display-based. Use Electron's
+      // display bounds instead of active-win's native window rectangle so DPI
+      // scaling cannot move or resize the overlay incorrectly.
+      const gameDisplay = screen.getDisplayMatching(active.bounds);
+      applyOverlayTarget(gameDisplay);
+    } finally {
+      monitorBusy = false;
     }
-    const { x, y, width, height } = active.bounds;
-    lastGameBounds = { x, y, width, height };
-    const gameDisplay = screen.getDisplayMatching(active.bounds);
-    gameDisplayId = gameDisplay.id;
-    overlayWindow.setAlwaysOnTop(true, "floating");
-    overlayWindow.setBounds({ x, y, width, height });
-    overlayWindow.setPosition(Math.max(gameDisplay.bounds.x, x), Math.max(gameDisplay.bounds.y, y));
-    overlayWindow.showInactive();
-  }, 500);
+  };
+  overlayMonitor = setInterval(() => void syncOverlayWindow(), 250);
+  void syncOverlayWindow();
 }
 
 ipcMain.handle("overlay:show", () => createOverlayWindow());
 ipcMain.handle("overlay:hide", () => {
   overlayEnabled = false;
+  gameDisplayId = null;
+  lastGameBounds = null;
+  missedGameFocusChecks = 0;
   overlayWindow?.hide();
 });
 ipcMain.handle("overlay:is-visible", () =>
@@ -282,23 +334,61 @@ function createWindow() {
 }
 
 async function getGameCaptureSource() {
-  const sources = await desktopCapturer.getSources({ types: ["screen"] });
+  const sources = await desktopCapturer.getSources({ types: ["window"] });
   const displays = screen.getAllDisplays();
-  const matchingIndex = displays.findIndex((display) => display.id === gameDisplayId);
-  const source =
-    sources.find((candidate) => candidate.display_id === String(gameDisplayId)) ??
-    sources[matchingIndex] ??
-    sources[0];
+  // `display_id` is the authoritative mapping. Source order is not guaranteed
+  // to match screen.getAllDisplays(), especially with monitors arranged left of
+  // the primary display. Some Electron versions also expose the same ID only
+  // in the source ID (`screen:<display-id>:<index>`), so support both forms.
+  const gameDisplay = lastGameBounds ? screen.getDisplayMatching(lastGameBounds) : null;
+  const overlayDisplay =
+    overlayWindow && !overlayWindow.isDestroyed()
+      ? screen.getDisplayMatching(overlayWindow.getBounds())
+      : null;
+  if (gameDisplay) gameDisplayId = gameDisplay.id;
+  if (!gameDisplayId && overlayDisplay) gameDisplayId = overlayDisplay.id;
+  const wantedDisplayId = String(gameDisplayId ?? screen.getPrimaryDisplay().id);
+  const sourceDisplayMatches = (candidate) => {
+    const sourceDisplayId = String(candidate.display_id ?? "");
+    const sourceIdDisplayId = String(candidate.id ?? "").match(/^screen:([^:]+):/i)?.[1] ?? "";
+    return sourceDisplayId === wantedDisplayId || sourceIdDisplayId === wantedDisplayId;
+  };
+  const normalizeTitle = (value) =>
+    String(value ?? "")
+      .trim()
+      .toLowerCase();
+  const gameTitle = normalizeTitle(lastGameWindowTitle);
+  const windowSources = sources.filter((candidate) => {
+    if (!String(candidate.id ?? "").startsWith("window:")) return false;
+    const sourceTitle = normalizeTitle(candidate.name);
+    return (
+      gameTitle &&
+      (sourceTitle === gameTitle ||
+        sourceTitle.includes(gameTitle) ||
+        gameTitle.includes(sourceTitle))
+    );
+  });
+  const windowSource = windowSources.find(sourceDisplayMatches) ?? windowSources[0] ?? null;
+  const source = windowSource;
+  // Deliberately disabled for now: a screen source can contain this overlay
+  // window and feed the overlay's own pixels back into the scanners.
+  // const screenSources = await desktopCapturer.getSources({ types: ["screen"] });
+  // const screenSource = screenSources.find(sourceDisplayMatches);
+  // const source = windowSource ?? screenSource;
   if (isDev) {
     console.log("Capture source:", {
       gameDisplayId,
       sourceId: source?.id,
+      sourceType: source?.id?.startsWith("window:") ? "game-window" : "unavailable",
+      sourceName: source?.name,
       sourceDisplayId: source?.display_id,
       availableSources: sources.map((candidate) => ({
         id: candidate.id,
+        name: candidate.name,
         displayId: candidate.display_id,
       })),
       displays: displays.map((display) => display.id),
+      matched: Boolean(source),
     });
   }
   return source ?? null;
@@ -312,7 +402,13 @@ void app.whenReady().then(() => {
   });
   ipcMain.handle("overlay:get-capture-source", async () => {
     const source = await getGameCaptureSource();
-    return source ? { id: source.id } : null;
+    return source
+      ? {
+          id: source.id,
+          mode: source.id.startsWith("window:") ? "game-window" : "unavailable",
+          name: source.name,
+        }
+      : null;
   });
   createWindow();
 
