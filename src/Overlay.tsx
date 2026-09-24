@@ -1,5 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Box,
   Button,
   Checkbox,
@@ -775,6 +778,42 @@ const cornerConfigGroups: Array<{
 
 const cornerRegionKeys = Object.keys(cornerRegionLabels) as CornerRegionKey[];
 
+const accordionStoragePrefix = "avatar-overlay-accordion-";
+
+function StoredAccordion({
+  id,
+  title,
+  defaultExpanded = false,
+  children,
+}: {
+  id: string;
+  title: string;
+  defaultExpanded?: boolean;
+  children: ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(() => {
+    const saved = localStorage.getItem(`${accordionStoragePrefix}${id}`);
+    return saved === null ? defaultExpanded : saved === "true";
+  });
+  const changeExpanded = (_event: SyntheticEvent, nextExpanded: boolean) => {
+    setExpanded(nextExpanded);
+    localStorage.setItem(`${accordionStoragePrefix}${id}`, String(nextExpanded));
+  };
+  return (
+    <Accordion
+      disableGutters
+      expanded={expanded}
+      onChange={changeExpanded}
+      sx={{ mt: 1, "&:before": { display: "none" } }}
+    >
+      <AccordionSummary expandIcon={<span aria-hidden="true">▾</span>}>
+        <Typography variant="subtitle1">{title}</Typography>
+      </AccordionSummary>
+      <AccordionDetails>{children}</AccordionDetails>
+    </Accordion>
+  );
+}
+
 export function VisualOverlay() {
   const [visible, setVisible] = useState(false);
   const [onlyWhenFocused, setOnlyWhenFocused] = useState(true);
@@ -980,232 +1019,42 @@ export function VisualOverlay() {
         Basic always-on-top overlay test window. Game capture and visual analysis will be added
         next.
       </Typography>
-      <Stack direction="row" spacing={1}>
-        <Button variant="contained" onClick={showOverlay} disabled={visible}>
-          Show overlay
-        </Button>
-        <Button variant="outlined" onClick={hideOverlay} disabled={!visible}>
-          Hide overlay
-        </Button>
-      </Stack>
-      <FormControlLabel
-        control={
-          <Checkbox
-            checked={onlyWhenFocused}
-            onChange={(event) => void changeFocusMode(event.target.checked)}
-          />
-        }
-        label="Only show when game is focused"
-      />
-      <Typography variant="subtitle2" sx={{ mt: 2 }}>
-        Mirrored region and destination (percent of screen)
-      </Typography>
-      <Typography variant="caption" color="text.secondary">
-        X/Y are measured from the top-left. Width/height are percentages. Changes are saved
-        automatically.
-      </Typography>
-      <FormControlLabel
-        control={
-          <Checkbox
-            checked={allowOverride}
-            onChange={(event) => changeOverride(event.target.checked)}
-          />
-        }
-        label="Allow configuration overrides"
-      />
-      <FormControlLabel
-        control={
-          <Checkbox
-            checked={detectFramebar}
-            onChange={(event) => changeFramebarDetection(event.target.checked)}
-          />
-        }
-        label="Detect framebar"
-      />
-      <FormControlLabel
-        control={
-          <Checkbox
-            checked={detectInput}
-            onChange={(event) => changeInputDetection(event.target.checked)}
-          />
-        }
-        label="Detect input display"
-      />
-      <FormControlLabel
-        control={
-          <Checkbox
-            checked={detectCorners}
-            onChange={(event) => changeCornerDetection(event.target.checked)}
-          />
-        }
-        label="Detect character/support images"
-      />
-      {allowOverride && (
-        <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
-          {configFields.map(({ key, label }) => (
-            <TextField
-              key={key}
-              label={label}
-              type="number"
-              size="small"
-              value={config[key]}
-              onChange={(event) => updateConfig(key, event.target.value)}
-              slotProps={{ htmlInput: { min: 0, max: 100, step: 0.1 } }}
-              sx={{ width: 125 }}
-            />
-          ))}
+      <StoredAccordion id="overlay-controls" title="Overlay controls" defaultExpanded>
+        <Stack direction="row" spacing={1}>
+          <Button variant="contained" onClick={showOverlay} disabled={visible}>
+            Show overlay
+          </Button>
+          <Button variant="outlined" onClick={hideOverlay} disabled={!visible}>
+            Hide overlay
+          </Button>
         </Stack>
-      )}
-      {allowOverride && detectInput && (
-        <>
-          <Typography variant="subtitle2" sx={{ mt: 2 }}>
-            Input display scan region (percent of screen)
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            Segment and control geometry is relative to this ROI. Buttons use a relative layout: A
-            is the start point, B/C use horizontal spacing, and S uses an offset from A.
-          </Typography>
-          <Stack spacing={1.5} sx={{ mt: 1 }}>
-            {inputConfigGroups.map((group) => (
-              <Box key={group.title}>
-                <Typography variant="caption" color="text.secondary">
-                  {group.title}
-                </Typography>
-                <Stack direction="row" spacing={1} sx={{ mt: 0.5, flexWrap: "wrap" }}>
-                  {group.fields.map(({ key, label }) => (
-                    <TextField
-                      key={key}
-                      label={label}
-                      type="number"
-                      size="small"
-                      value={config[key]}
-                      onChange={(event) => updateConfig(key, event.target.value)}
-                      slotProps={{ htmlInput: { min: 0, max: 100, step: 0.1 } }}
-                      sx={{ width: 145 }}
-                    />
-                  ))}
-                </Stack>
-              </Box>
-            ))}
-          </Stack>
-        </>
-      )}
-      {detectCorners && (
-        <>
-          <Typography variant="subtitle2" sx={{ mt: 2 }}>
-            Character/support image detection
-          </Typography>
-          <Typography variant="caption" color="text.secondary" component="div">
-            Detection compares the raw game capture against named templates. Configure each corner
-            region if your HUD or scaling differs, then register the visible image once. Scores are
-            similarity scores from 0 to 1; higher is better.
-          </Typography>
-          {allowOverride && (
-            <Stack spacing={1.5} sx={{ mt: 1 }}>
-              {cornerConfigGroups.map((group) => (
-                <Box key={group.title}>
-                  <Typography variant="caption" color="text.secondary">
-                    {group.title} (percent of captured screen)
-                  </Typography>
-                  <Stack direction="row" spacing={1} sx={{ mt: 0.5, flexWrap: "wrap" }}>
-                    {group.fields.map(({ key, label }) => (
-                      <TextField
-                        key={key}
-                        label={label}
-                        type="number"
-                        size="small"
-                        value={config[key]}
-                        onChange={(event) => updateConfig(key, event.target.value)}
-                        slotProps={{ htmlInput: { min: 0, max: 100, step: 0.1 } }}
-                        sx={{ width: 110 }}
-                      />
-                    ))}
-                  </Stack>
-                </Box>
-              ))}
-            </Stack>
-          )}
-          <Stack spacing={0.75} sx={{ mt: 1 }}>
-            {cornerRegionKeys.map((key) => {
-              const fingerprint = cornerObservation?.regions[key];
-              const match = cornerMatches?.[key] ?? null;
-              return (
-                <Stack
-                  key={key}
-                  direction={{ xs: "column", sm: "row" }}
-                  spacing={1}
-                  sx={{ alignItems: { sm: "center" } }}
-                >
-                  <Typography sx={{ width: 120, flexShrink: 0 }} variant="body2">
-                    {cornerRegionLabels[key]}
-                  </Typography>
-                  <Typography
-                    variant="caption"
-                    color={match ? "success.main" : "text.secondary"}
-                    sx={{ minWidth: 150 }}
-                  >
-                    {fingerprint ? `current: ${formatCornerMatch(match)}` : "waiting for capture"}
-                  </Typography>
-                  <TextField
-                    size="small"
-                    label="Template name"
-                    value={cornerNames[key]}
-                    onChange={(event) =>
-                      setCornerNames((previous) => ({ ...previous, [key]: event.target.value }))
-                    }
-                    sx={{ width: 165 }}
-                  />
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    disabled={!fingerprint || !cornerNames[key]?.trim()}
-                    onClick={() => registerCornerTemplate(key)}
-                  >
-                    Register current
-                  </Button>
-                </Stack>
-              );
-            })}
-          </Stack>
-          {cornerTemplates.length > 0 && (
-            <Stack spacing={0.5} sx={{ mt: 1 }}>
-              <Typography variant="caption" color="text.secondary">
-                Registered templates
-              </Typography>
-              {cornerTemplates.map((template) => (
-                <Stack key={template.id} direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                  <Typography variant="caption" sx={{ minWidth: 210 }}>
-                    {template.side.toUpperCase()} {template.kind}: {template.name}
-                  </Typography>
-                  <Button
-                    size="small"
-                    color="error"
-                    onClick={() => removeCornerTemplate(template.id)}
-                  >
-                    Remove
-                  </Button>
-                </Stack>
-              ))}
-            </Stack>
-          )}
-        </>
-      )}
-      {allowOverride && (
-        <>
-          <Typography variant="subtitle2" sx={{ mt: 2 }}>
-            Player 1 framebar scan origin
-          </Typography>
-          <Typography variant="caption" color="text.secondary" component="div">
-            Player 1 reuses Player 2&apos;s dimensions, gate, spacing, sample count, and color
-            mappings. Only its screen-space origin is separate.
-          </Typography>
+        <FormControlLabel
+          control={
+            <Checkbox
+              checked={onlyWhenFocused}
+              onChange={(event) => void changeFocusMode(event.target.checked)}
+            />
+          }
+          label="Only show when game is focused"
+        />
+      </StoredAccordion>
+      <StoredAccordion id="mirror-settings" title="P2 mirror settings" defaultExpanded>
+        <Typography variant="caption" color="text.secondary" component="div">
+          X/Y are measured from the top-left. Width/height are percentages. Changes are saved
+          automatically.
+        </Typography>
+        <FormControlLabel
+          control={
+            <Checkbox
+              checked={allowOverride}
+              onChange={(event) => changeOverride(event.target.checked)}
+            />
+          }
+          label="Allow configuration overrides"
+        />
+        {allowOverride && (
           <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
-            {(
-              [
-                ["player1SourceX", "P1 source X"],
-                ["player1SourceY", "P1 source Y"],
-              ] as Array<[keyof OverlayConfig, string]>
-            ).map(([key, label]) => (
+            {configFields.map(({ key, label }) => (
               <TextField
                 key={key}
                 label={label}
@@ -1218,76 +1067,281 @@ export function VisualOverlay() {
               />
             ))}
           </Stack>
-        </>
-      )}
-      {allowOverride && (
-        <>
-          <Typography variant="subtitle2" sx={{ mt: 2 }}>
-            Framebar detection region
-          </Typography>
-          <Typography variant="caption" color="text.secondary" component="div">
-            These dimensions control only the P1/P2 framebar scanners. They are independent of the
-            P2 mirror source and mirror destination dimensions above.
-          </Typography>
-          <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
-            {(
-              [
-                ["framebarSourceWidth", "Detection width"],
-                ["framebarSourceHeight", "Detection height"],
-              ] as Array<[keyof OverlayConfig, string]>
-            ).map(([key, label]) => (
-              <TextField
-                key={key}
-                label={label}
-                type="number"
-                size="small"
-                value={config[key]}
-                onChange={(event) => updateConfig(key, event.target.value)}
-                slotProps={{ htmlInput: { min: 0.1, max: 100, step: 0.1 } }}
-                sx={{ width: 140 }}
-              />
-            ))}
-          </Stack>
-          <Typography variant="subtitle2" sx={{ mt: 2 }}>
-            Automatic framebar gate
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            Every gate sample must match the configured segment color before framebar detection
-            runs.
-          </Typography>
-          <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
-            {(
-              [
-                ["gateSampleOffset", "Meter sample Y"],
-                ["gateStartOffset", "Meter sample X"],
-                ["gateSpacing", "Meter sample spacing"],
-                ["gateSampleCount", "Meter sample count"],
-                ["gateRed", "Meter anchor red"],
-                ["gateGreen", "Meter anchor green"],
-                ["gateBlue", "Meter anchor blue"],
-                ["gateTolerance", "Meter color tolerance"],
-              ] as Array<[keyof OverlayConfig, string]>
-            ).map(([key, label]) => (
-              <TextField
-                key={key}
-                label={label}
-                type="number"
-                size="small"
-                value={config[key]}
-                onChange={(event) => updateConfig(key, event.target.value)}
-                slotProps={{ htmlInput: { min: 0, step: 1 } }}
-                sx={{ width: 125 }}
-              />
-            ))}
-          </Stack>
-          <Button size="small" sx={{ mt: 1 }} onClick={resetConfig}>
-            Reset overlay geometry
-          </Button>
-        </>
-      )}
+        )}
+      </StoredAccordion>
+      <StoredAccordion id="input-detection" title="Input detection" defaultExpanded>
+        <FormControlLabel
+          control={
+            <Checkbox
+              checked={detectInput}
+              onChange={(event) => changeInputDetection(event.target.checked)}
+            />
+          }
+          label="Detect input display"
+        />
+        {allowOverride && detectInput && (
+          <>
+            <Typography variant="subtitle2" sx={{ mt: 2 }}>
+              Input display scan region (percent of screen)
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Segment and control geometry is relative to this ROI. Buttons use a relative layout: A
+              is the start point, B/C use horizontal spacing, and S uses an offset from A.
+            </Typography>
+            <Stack spacing={1.5} sx={{ mt: 1 }}>
+              {inputConfigGroups.map((group) => (
+                <Box key={group.title}>
+                  <Typography variant="caption" color="text.secondary">
+                    {group.title}
+                  </Typography>
+                  <Stack direction="row" spacing={1} sx={{ mt: 0.5, flexWrap: "wrap" }}>
+                    {group.fields.map(({ key, label }) => (
+                      <TextField
+                        key={key}
+                        label={label}
+                        type="number"
+                        size="small"
+                        value={config[key]}
+                        onChange={(event) => updateConfig(key, event.target.value)}
+                        slotProps={{ htmlInput: { min: 0, max: 100, step: 0.1 } }}
+                        sx={{ width: 145 }}
+                      />
+                    ))}
+                  </Stack>
+                </Box>
+              ))}
+            </Stack>
+          </>
+        )}
+      </StoredAccordion>
+      <StoredAccordion id="corner-detection" title="Character/support detection" defaultExpanded>
+        <FormControlLabel
+          control={
+            <Checkbox
+              checked={detectCorners}
+              onChange={(event) => changeCornerDetection(event.target.checked)}
+            />
+          }
+          label="Detect character/support images"
+        />
+        {detectCorners && (
+          <>
+            <Typography variant="subtitle2" sx={{ mt: 2 }}>
+              Character/support image detection
+            </Typography>
+            <Typography variant="caption" color="text.secondary" component="div">
+              Detection compares the raw game capture against named templates. Configure each corner
+              region if your HUD or scaling differs, then register the visible image once. Scores
+              are similarity scores from 0 to 1; higher is better.
+            </Typography>
+            {allowOverride && (
+              <Stack spacing={1.5} sx={{ mt: 1 }}>
+                {cornerConfigGroups.map((group) => (
+                  <Box key={group.title}>
+                    <Typography variant="caption" color="text.secondary">
+                      {group.title} (percent of captured screen)
+                    </Typography>
+                    <Stack direction="row" spacing={1} sx={{ mt: 0.5, flexWrap: "wrap" }}>
+                      {group.fields.map(({ key, label }) => (
+                        <TextField
+                          key={key}
+                          label={label}
+                          type="number"
+                          size="small"
+                          value={config[key]}
+                          onChange={(event) => updateConfig(key, event.target.value)}
+                          slotProps={{ htmlInput: { min: 0, max: 100, step: 0.1 } }}
+                          sx={{ width: 110 }}
+                        />
+                      ))}
+                    </Stack>
+                  </Box>
+                ))}
+              </Stack>
+            )}
+            <Stack spacing={0.75} sx={{ mt: 1 }}>
+              {cornerRegionKeys.map((key) => {
+                const fingerprint = cornerObservation?.regions[key];
+                const match = cornerMatches?.[key] ?? null;
+                return (
+                  <Stack
+                    key={key}
+                    direction={{ xs: "column", sm: "row" }}
+                    spacing={1}
+                    sx={{ alignItems: { sm: "center" } }}
+                  >
+                    <Typography sx={{ width: 120, flexShrink: 0 }} variant="body2">
+                      {cornerRegionLabels[key]}
+                    </Typography>
+                    <Typography
+                      variant="caption"
+                      color={match ? "success.main" : "text.secondary"}
+                      sx={{ minWidth: 150 }}
+                    >
+                      {fingerprint ? `current: ${formatCornerMatch(match)}` : "waiting for capture"}
+                    </Typography>
+                    <TextField
+                      size="small"
+                      label="Template name"
+                      value={cornerNames[key]}
+                      onChange={(event) =>
+                        setCornerNames((previous) => ({ ...previous, [key]: event.target.value }))
+                      }
+                      sx={{ width: 165 }}
+                    />
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      disabled={!fingerprint || !cornerNames[key]?.trim()}
+                      onClick={() => registerCornerTemplate(key)}
+                    >
+                      Register current
+                    </Button>
+                  </Stack>
+                );
+              })}
+            </Stack>
+            {cornerTemplates.length > 0 && (
+              <Stack spacing={0.5} sx={{ mt: 1 }}>
+                <Typography variant="caption" color="text.secondary">
+                  Registered templates
+                </Typography>
+                {cornerTemplates.map((template) => (
+                  <Stack
+                    key={template.id}
+                    direction="row"
+                    spacing={1}
+                    sx={{ alignItems: "center" }}
+                  >
+                    <Typography variant="caption" sx={{ minWidth: 210 }}>
+                      {template.side.toUpperCase()} {template.kind}: {template.name}
+                    </Typography>
+                    <Button
+                      size="small"
+                      color="error"
+                      onClick={() => removeCornerTemplate(template.id)}
+                    >
+                      Remove
+                    </Button>
+                  </Stack>
+                ))}
+              </Stack>
+            )}
+          </>
+        )}
+      </StoredAccordion>
+      <StoredAccordion id="framebar-detection" title="Framebar detection" defaultExpanded>
+        <FormControlLabel
+          control={
+            <Checkbox
+              checked={detectFramebar}
+              onChange={(event) => changeFramebarDetection(event.target.checked)}
+            />
+          }
+          label="Detect framebar"
+        />
+        {allowOverride && (
+          <>
+            <Typography variant="subtitle2" sx={{ mt: 2 }}>
+              Player 1 framebar scan origin
+            </Typography>
+            <Typography variant="caption" color="text.secondary" component="div">
+              Player 1 reuses Player 2&apos;s dimensions, gate, spacing, sample count, and color
+              mappings. Only its screen-space origin is separate.
+            </Typography>
+            <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
+              {(
+                [
+                  ["player1SourceX", "P1 source X"],
+                  ["player1SourceY", "P1 source Y"],
+                ] as Array<[keyof OverlayConfig, string]>
+              ).map(([key, label]) => (
+                <TextField
+                  key={key}
+                  label={label}
+                  type="number"
+                  size="small"
+                  value={config[key]}
+                  onChange={(event) => updateConfig(key, event.target.value)}
+                  slotProps={{ htmlInput: { min: 0, max: 100, step: 0.1 } }}
+                  sx={{ width: 125 }}
+                />
+              ))}
+            </Stack>
+          </>
+        )}
+        {allowOverride && (
+          <>
+            <Typography variant="subtitle2" sx={{ mt: 2 }}>
+              Framebar detection region
+            </Typography>
+            <Typography variant="caption" color="text.secondary" component="div">
+              These dimensions control only the P1/P2 framebar scanners. They are independent of the
+              P2 mirror source and mirror destination dimensions above.
+            </Typography>
+            <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
+              {(
+                [
+                  ["framebarSourceWidth", "Detection width"],
+                  ["framebarSourceHeight", "Detection height"],
+                ] as Array<[keyof OverlayConfig, string]>
+              ).map(([key, label]) => (
+                <TextField
+                  key={key}
+                  label={label}
+                  type="number"
+                  size="small"
+                  value={config[key]}
+                  onChange={(event) => updateConfig(key, event.target.value)}
+                  slotProps={{ htmlInput: { min: 0.1, max: 100, step: 0.1 } }}
+                  sx={{ width: 140 }}
+                />
+              ))}
+            </Stack>
+            <Typography variant="subtitle2" sx={{ mt: 2 }}>
+              Automatic framebar gate
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Every gate sample must match the configured segment color before framebar detection
+              runs.
+            </Typography>
+            <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
+              {(
+                [
+                  ["gateSampleOffset", "Meter sample Y"],
+                  ["gateStartOffset", "Meter sample X"],
+                  ["gateSpacing", "Meter sample spacing"],
+                  ["gateSampleCount", "Meter sample count"],
+                  ["gateRed", "Meter anchor red"],
+                  ["gateGreen", "Meter anchor green"],
+                  ["gateBlue", "Meter anchor blue"],
+                  ["gateTolerance", "Meter color tolerance"],
+                ] as Array<[keyof OverlayConfig, string]>
+              ).map(([key, label]) => (
+                <TextField
+                  key={key}
+                  label={label}
+                  type="number"
+                  size="small"
+                  value={config[key]}
+                  onChange={(event) => updateConfig(key, event.target.value)}
+                  slotProps={{ htmlInput: { min: 0, step: 1 } }}
+                  sx={{ width: 125 }}
+                />
+              ))}
+            </Stack>
+            <Button size="small" sx={{ mt: 1 }} onClick={resetConfig}>
+              Reset overlay geometry
+            </Button>
+          </>
+        )}
+      </StoredAccordion>
       {detectFramebar && (
-        <Paper variant="outlined" sx={{ mt: 2, p: 1.5 }}>
-          <Typography variant="subtitle2">Training meter calibration</Typography>
+        <StoredAccordion
+          id="training-calibration"
+          title="Training meter calibration"
+          defaultExpanded
+        >
           <Typography variant="caption" color="text.secondary" component="div">
             Show the overlay before capturing. Capture several seconds while the frame meter is
             visible, then several seconds while it is absent. The detector learns thresholds from
@@ -1342,277 +1396,279 @@ export function VisualOverlay() {
               ? `; fitted accuracy ${(trainingCalibration.fitted.accuracy * 100).toFixed(1)}%`
               : "; detector not fitted"}
           </Typography>
-        </Paper>
+        </StoredAccordion>
       )}
-      <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center" }}>
-        <Typography variant="subtitle2">Unmapped colors</Typography>
-        <Button
-          size="small"
-          color="warning"
-          onClick={() => {
-            localStorage.removeItem(overlayUnmappedKey);
-            localStorage.removeItem(overlayPlayer1UnmappedKey);
-            localStorage.removeItem(overlayPlayer2UnmappedKey);
-            setUnmappedColors([]);
-          }}
-          disabled={unmappedColors.length === 0}
-        >
-          Clear unmapped colors
-        </Button>
-      </Stack>
-      <Stack spacing={1} sx={{ mt: 1 }}>
-        {unmappedColors.length === 0 ? (
+      <StoredAccordion id="diagnostics" title="Diagnostics and logs">
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+          <Typography variant="subtitle2">Unmapped colors</Typography>
+          <Button
+            size="small"
+            color="warning"
+            onClick={() => {
+              localStorage.removeItem(overlayUnmappedKey);
+              localStorage.removeItem(overlayPlayer1UnmappedKey);
+              localStorage.removeItem(overlayPlayer2UnmappedKey);
+              setUnmappedColors([]);
+            }}
+            disabled={unmappedColors.length === 0}
+          >
+            Clear unmapped colors
+          </Button>
+        </Stack>
+        <Stack spacing={1} sx={{ mt: 1 }}>
+          {unmappedColors.length === 0 ? (
+            <Typography variant="caption" color="text.secondary">
+              No unmapped colors detected yet.
+            </Typography>
+          ) : (
+            unmappedColors.map((color) => {
+              const key = `${color.red},${color.green},${color.blue}`;
+              const closest = getClosestMapping(color);
+              return (
+                <Stack key={key} direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                  <Box
+                    sx={{
+                      width: 24,
+                      height: 24,
+                      backgroundColor: `rgb(${key})`,
+                      border: "1px solid white",
+                    }}
+                  />
+                  <Typography variant="caption" sx={{ minWidth: 125 }}>
+                    rgb({key}) × {color.count}
+                  </Typography>
+                  {closest && (
+                    <Typography variant="caption" sx={{ minWidth: 190 }}>
+                      Similar: {closest.name} (rgb({closest.red},{closest.green},{closest.blue}))
+                    </Typography>
+                  )}
+                  <TextField
+                    label="Definition"
+                    size="small"
+                    value={definitions[key] ?? ""}
+                    onChange={(event) =>
+                      setDefinitions((previous) => ({ ...previous, [key]: event.target.value }))
+                    }
+                    sx={{ width: 150 }}
+                  />
+                  {closest && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => addColorMappingWithName(color, closest.name)}
+                    >
+                      Use similar
+                    </Button>
+                  )}
+                  <Button size="small" variant="outlined" onClick={() => addColorMapping(color)}>
+                    Add mapping
+                  </Button>
+                  {(["startup", "active", "recovery"] as const).map((phase) => (
+                    <Button
+                      key={phase}
+                      size="small"
+                      variant="text"
+                      onClick={() => addColorMappingWithName(color, phase)}
+                    >
+                      {phase}
+                    </Button>
+                  ))}
+                </Stack>
+              );
+            })
+          )}
+        </Stack>
+        <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center" }}>
+          <Typography variant="subtitle2">Contiguous cell-group log</Typography>
+          <Button
+            size="small"
+            color="warning"
+            onClick={() => {
+              localStorage.removeItem(overlayCellGroupLogKey);
+              setCellGroupLog([]);
+            }}
+            disabled={cellGroupLog.length === 0}
+          >
+            Clear log
+          </Button>
+        </Stack>
+        {cellGroupLog.length === 0 ? (
           <Typography variant="caption" color="text.secondary">
-            No unmapped colors detected yet.
+            No discrete sequences detected yet.
           </Typography>
         ) : (
-          unmappedColors.map((color) => {
-            const key = `${color.red},${color.green},${color.blue}`;
-            const closest = getClosestMapping(color);
-            return (
-              <Stack key={key} direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                <Box
-                  sx={{
-                    width: 24,
-                    height: 24,
-                    backgroundColor: `rgb(${key})`,
-                    border: "1px solid white",
-                  }}
-                />
-                <Typography variant="caption" sx={{ minWidth: 125 }}>
-                  rgb({key}) × {color.count}
+          <Stack spacing={0.5} sx={{ mt: 1, maxHeight: 180, overflowY: "auto" }}>
+            {cellGroupLog
+              .slice()
+              .reverse()
+              .map((entry, index) => (
+                <Typography key={`${entry.timestamp}-${index}`} variant="caption" component="div">
+                  {new Date(entry.timestamp).toLocaleTimeString()} —{" "}
+                  {entry.groups.map((group) => `${group.state} × ${group.length}`).join(" → ")}
                 </Typography>
-                {closest && (
-                  <Typography variant="caption" sx={{ minWidth: 190 }}>
-                    Similar: {closest.name} (rgb({closest.red},{closest.green},{closest.blue}))
-                  </Typography>
-                )}
-                <TextField
-                  label="Definition"
-                  size="small"
-                  value={definitions[key] ?? ""}
-                  onChange={(event) =>
-                    setDefinitions((previous) => ({ ...previous, [key]: event.target.value }))
-                  }
-                  sx={{ width: 150 }}
-                />
-                {closest && (
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    onClick={() => addColorMappingWithName(color, closest.name)}
-                  >
-                    Use similar
-                  </Button>
-                )}
-                <Button size="small" variant="outlined" onClick={() => addColorMapping(color)}>
-                  Add mapping
-                </Button>
-                {(["startup", "active", "recovery"] as const).map((phase) => (
-                  <Button
-                    key={phase}
-                    size="small"
-                    variant="text"
-                    onClick={() => addColorMappingWithName(color, phase)}
-                  >
-                    {phase}
-                  </Button>
-                ))}
-              </Stack>
-            );
-          })
-        )}
-      </Stack>
-      <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center" }}>
-        <Typography variant="subtitle2">Contiguous cell-group log</Typography>
-        <Button
-          size="small"
-          color="warning"
-          onClick={() => {
-            localStorage.removeItem(overlayCellGroupLogKey);
-            setCellGroupLog([]);
-          }}
-          disabled={cellGroupLog.length === 0}
-        >
-          Clear log
-        </Button>
-      </Stack>
-      {cellGroupLog.length === 0 ? (
-        <Typography variant="caption" color="text.secondary">
-          No discrete sequences detected yet.
-        </Typography>
-      ) : (
-        <Stack spacing={0.5} sx={{ mt: 1, maxHeight: 180, overflowY: "auto" }}>
-          {cellGroupLog
-            .slice()
-            .reverse()
-            .map((entry, index) => (
-              <Typography key={`${entry.timestamp}-${index}`} variant="caption" component="div">
-                {new Date(entry.timestamp).toLocaleTimeString()} —{" "}
-                {entry.groups.map((group) => `${group.state} × ${group.length}`).join(" → ")}
-              </Typography>
-            ))}
-        </Stack>
-      )}
-      <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center" }}>
-        <Typography variant="subtitle2">Player 1 contiguous cell-group log</Typography>
-        <Button
-          size="small"
-          color="warning"
-          onClick={() => {
-            localStorage.removeItem(overlayPlayer1CellGroupLogKey);
-            setPlayer1CellGroupLog([]);
-          }}
-          disabled={player1CellGroupLog.length === 0}
-        >
-          Clear P1 log
-        </Button>
-      </Stack>
-      {player1CellGroupLog.length === 0 ? (
-        <Typography variant="caption" color="text.secondary">
-          No Player 1 sequences detected yet.
-        </Typography>
-      ) : (
-        <Stack spacing={0.5} sx={{ mt: 1, maxHeight: 180, overflowY: "auto" }}>
-          {player1CellGroupLog
-            .slice()
-            .reverse()
-            .map((entry, index) => (
-              <Typography key={`${entry.timestamp}-${index}`} variant="caption" component="div">
-                {new Date(entry.timestamp).toLocaleTimeString()} —{" "}
-                {entry.groups.map((group) => `${group.state} × ${group.length}`).join(" → ")}
-              </Typography>
-            ))}
-        </Stack>
-      )}
-      <Typography variant="subtitle2" sx={{ mt: 2 }}>
-        Input display resolver
-      </Typography>
-      <Typography variant="caption" color="text.secondary" component="div">
-        {inputObservation
-          ? `${inputObservation.rows.length} segments detected: ${formatInputDisplayDebug(inputObservation)}`
-          : "No input display snapshot detected yet."}
-      </Typography>
-      <Stack direction="row" spacing={1} sx={{ mt: 1, alignItems: "center" }}>
-        <Button
-          size="small"
-          color="warning"
-          onClick={() => {
-            localStorage.removeItem(overlayInputEventLogKey);
-            setInputEventLog([]);
-          }}
-          disabled={inputEventLog.length === 0}
-        >
-          Clear input events
-        </Button>
-      </Stack>
-      {inputEventLog.length > 0 && (
-        <Stack spacing={0.5} sx={{ mt: 1, maxHeight: 180, overflowY: "auto" }}>
-          {inputEventLog
-            .slice(-20)
-            .reverse()
-            .map((entry, index) => (
-              <Typography key={`${entry.timestamp}-${index}`} variant="caption" component="div">
-                {new Date(entry.timestamp).toLocaleTimeString()} — {entry.signature}
-                {entry.resolvedInput ? ` => ${entry.resolvedInput.notation}` : ""}
-                {entry.framebar ? ` (${formatFramebarResolution(entry.framebar)})` : ""}
-              </Typography>
-            ))}
-        </Stack>
-      )}
-      <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center" }}>
-        <Typography variant="subtitle2">Move episodes from idle</Typography>
-        <Button
-          size="small"
-          color="warning"
-          onClick={() => {
-            localStorage.removeItem(overlayMoveEpisodeLogKey);
-            setMoveEpisodeLog([]);
-          }}
-          disabled={moveEpisodeLog.length === 0}
-        >
-          Clear moves
-        </Button>
-      </Stack>
-      {moveEpisodeLog.length === 0 ? (
-        <Typography variant="caption" color="text.secondary">
-          No move episodes detected yet.
-        </Typography>
-      ) : (
-        <Stack spacing={0.5} sx={{ mt: 1, maxHeight: 220, overflowY: "auto" }}>
-          {moveEpisodeLog
-            .slice()
-            .reverse()
-            .map((episode, index) => (
-              <Typography key={`${episode.startedAt}-${index}`} variant="caption" component="div">
-                {new Date(episode.startedAt).toLocaleTimeString()} —{" "}
-                {episode.resolvedMove
-                  ? `${episode.resolvedMove.notation}: startup ${episode.resolvedMove.phases.startup}, active ${episode.resolvedMove.phases.active}, recovery ${episode.resolvedMove.phases.recovery}, hitstun ${episode.resolvedMove.opponentPhases?.hitstun ?? 0}, blockstun ${episode.resolvedMove.opponentPhases?.blockstun ?? 0}`
-                  : episode.inputEvents
-                      .map((event) =>
-                        event.resolvedInput
-                          ? formatResolvedMove(event.resolvedInput, event.framebar ?? null)
-                          : event.signature || "none",
-                      )
-                      .join(" → ")}
-              </Typography>
-            ))}
-        </Stack>
-      )}
-      {allowOverride && (
-        <>
-          <Typography variant="subtitle2" sx={{ mt: 2 }}>
-            Debug scan settings (source pixels)
-          </Typography>
-          <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
-            <TextField
-              label="Sample X offset"
-              type="number"
-              size="small"
-              value={config.sampleStartOffset}
-              onChange={(event) => updateConfig("sampleStartOffset", event.target.value)}
-              slotProps={{ htmlInput: { min: 0, step: 1 } }}
-              sx={{ width: 140 }}
-            />
-            <TextField
-              label="Sample X spacing"
-              type="number"
-              size="small"
-              value={config.sampleSpacing}
-              onChange={(event) => updateConfig("sampleSpacing", event.target.value)}
-              slotProps={{ htmlInput: { min: 1, step: 1 } }}
-              sx={{ width: 140 }}
-            />
-            <TextField
-              label="Base offset from top"
-              type="number"
-              size="small"
-              value={config.baseSampleOffset}
-              onChange={(event) => updateConfig("baseSampleOffset", event.target.value)}
-              slotProps={{ htmlInput: { min: 0, step: 1 } }}
-              sx={{ width: 170 }}
-            />
-            <TextField
-              label="Yellow offset from top"
-              type="number"
-              size="small"
-              value={config.yellowSampleOffset}
-              onChange={(event) => updateConfig("yellowSampleOffset", event.target.value)}
-              slotProps={{ htmlInput: { min: 0, step: 1 } }}
-              sx={{ width: 170 }}
-            />
-            <TextField
-              label="Sample count"
-              type="number"
-              size="small"
-              value={config.sampleCount}
-              onChange={(event) => updateConfig("sampleCount", event.target.value)}
-              slotProps={{ htmlInput: { min: 1, max: 1000, step: 1 } }}
-              sx={{ width: 130 }}
-            />
+              ))}
           </Stack>
-        </>
-      )}
+        )}
+        <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center" }}>
+          <Typography variant="subtitle2">Player 1 contiguous cell-group log</Typography>
+          <Button
+            size="small"
+            color="warning"
+            onClick={() => {
+              localStorage.removeItem(overlayPlayer1CellGroupLogKey);
+              setPlayer1CellGroupLog([]);
+            }}
+            disabled={player1CellGroupLog.length === 0}
+          >
+            Clear P1 log
+          </Button>
+        </Stack>
+        {player1CellGroupLog.length === 0 ? (
+          <Typography variant="caption" color="text.secondary">
+            No Player 1 sequences detected yet.
+          </Typography>
+        ) : (
+          <Stack spacing={0.5} sx={{ mt: 1, maxHeight: 180, overflowY: "auto" }}>
+            {player1CellGroupLog
+              .slice()
+              .reverse()
+              .map((entry, index) => (
+                <Typography key={`${entry.timestamp}-${index}`} variant="caption" component="div">
+                  {new Date(entry.timestamp).toLocaleTimeString()} —{" "}
+                  {entry.groups.map((group) => `${group.state} × ${group.length}`).join(" → ")}
+                </Typography>
+              ))}
+          </Stack>
+        )}
+        <Typography variant="subtitle2" sx={{ mt: 2 }}>
+          Input display resolver
+        </Typography>
+        <Typography variant="caption" color="text.secondary" component="div">
+          {inputObservation
+            ? `${inputObservation.rows.length} segments detected: ${formatInputDisplayDebug(inputObservation)}`
+            : "No input display snapshot detected yet."}
+        </Typography>
+        <Stack direction="row" spacing={1} sx={{ mt: 1, alignItems: "center" }}>
+          <Button
+            size="small"
+            color="warning"
+            onClick={() => {
+              localStorage.removeItem(overlayInputEventLogKey);
+              setInputEventLog([]);
+            }}
+            disabled={inputEventLog.length === 0}
+          >
+            Clear input events
+          </Button>
+        </Stack>
+        {inputEventLog.length > 0 && (
+          <Stack spacing={0.5} sx={{ mt: 1, maxHeight: 180, overflowY: "auto" }}>
+            {inputEventLog
+              .slice(-20)
+              .reverse()
+              .map((entry, index) => (
+                <Typography key={`${entry.timestamp}-${index}`} variant="caption" component="div">
+                  {new Date(entry.timestamp).toLocaleTimeString()} — {entry.signature}
+                  {entry.resolvedInput ? ` => ${entry.resolvedInput.notation}` : ""}
+                  {entry.framebar ? ` (${formatFramebarResolution(entry.framebar)})` : ""}
+                </Typography>
+              ))}
+          </Stack>
+        )}
+        <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center" }}>
+          <Typography variant="subtitle2">Move episodes from idle</Typography>
+          <Button
+            size="small"
+            color="warning"
+            onClick={() => {
+              localStorage.removeItem(overlayMoveEpisodeLogKey);
+              setMoveEpisodeLog([]);
+            }}
+            disabled={moveEpisodeLog.length === 0}
+          >
+            Clear moves
+          </Button>
+        </Stack>
+        {moveEpisodeLog.length === 0 ? (
+          <Typography variant="caption" color="text.secondary">
+            No move episodes detected yet.
+          </Typography>
+        ) : (
+          <Stack spacing={0.5} sx={{ mt: 1, maxHeight: 220, overflowY: "auto" }}>
+            {moveEpisodeLog
+              .slice()
+              .reverse()
+              .map((episode, index) => (
+                <Typography key={`${episode.startedAt}-${index}`} variant="caption" component="div">
+                  {new Date(episode.startedAt).toLocaleTimeString()} —{" "}
+                  {episode.resolvedMove
+                    ? `${episode.resolvedMove.notation}: startup ${episode.resolvedMove.phases.startup}, active ${episode.resolvedMove.phases.active}, recovery ${episode.resolvedMove.phases.recovery}, hitstun ${episode.resolvedMove.opponentPhases?.hitstun ?? 0}, blockstun ${episode.resolvedMove.opponentPhases?.blockstun ?? 0}`
+                    : episode.inputEvents
+                        .map((event) =>
+                          event.resolvedInput
+                            ? formatResolvedMove(event.resolvedInput, event.framebar ?? null)
+                            : event.signature || "none",
+                        )
+                        .join(" → ")}
+                </Typography>
+              ))}
+          </Stack>
+        )}
+        {allowOverride && (
+          <>
+            <Typography variant="subtitle2" sx={{ mt: 2 }}>
+              Debug scan settings (source pixels)
+            </Typography>
+            <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
+              <TextField
+                label="Sample X offset"
+                type="number"
+                size="small"
+                value={config.sampleStartOffset}
+                onChange={(event) => updateConfig("sampleStartOffset", event.target.value)}
+                slotProps={{ htmlInput: { min: 0, step: 1 } }}
+                sx={{ width: 140 }}
+              />
+              <TextField
+                label="Sample X spacing"
+                type="number"
+                size="small"
+                value={config.sampleSpacing}
+                onChange={(event) => updateConfig("sampleSpacing", event.target.value)}
+                slotProps={{ htmlInput: { min: 1, step: 1 } }}
+                sx={{ width: 140 }}
+              />
+              <TextField
+                label="Base offset from top"
+                type="number"
+                size="small"
+                value={config.baseSampleOffset}
+                onChange={(event) => updateConfig("baseSampleOffset", event.target.value)}
+                slotProps={{ htmlInput: { min: 0, step: 1 } }}
+                sx={{ width: 170 }}
+              />
+              <TextField
+                label="Yellow offset from top"
+                type="number"
+                size="small"
+                value={config.yellowSampleOffset}
+                onChange={(event) => updateConfig("yellowSampleOffset", event.target.value)}
+                slotProps={{ htmlInput: { min: 0, step: 1 } }}
+                sx={{ width: 170 }}
+              />
+              <TextField
+                label="Sample count"
+                type="number"
+                size="small"
+                value={config.sampleCount}
+                onChange={(event) => updateConfig("sampleCount", event.target.value)}
+                slotProps={{ htmlInput: { min: 1, max: 1000, step: 1 } }}
+                sx={{ width: 130 }}
+              />
+            </Stack>
+          </>
+        )}
+      </StoredAccordion>
     </Paper>
   );
 }
