@@ -38,8 +38,49 @@ export type InputDisplayRow = {
   numberReading?: {
     text: string;
     confidence: number;
+    glyphs?: NumberGlyphSample[];
   };
 };
+
+export type NumberGlyphSample = {
+  x: number;
+  width: number;
+  height: number;
+  mask: number[];
+};
+
+export type DigitTemplate = {
+  id: string;
+  digit: string;
+  mask: number[];
+  capturedAt: string;
+};
+
+export const digitTemplatesKey = "avatar-overlay-digit-templates";
+
+export function readDigitTemplates(): DigitTemplate[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(digitTemplatesKey) ?? "[]") as unknown;
+    if (!Array.isArray(saved)) return [];
+    return saved.filter(
+      (entry): entry is DigitTemplate =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof (entry as DigitTemplate).id === "string" &&
+        typeof (entry as DigitTemplate).digit === "string" &&
+        ((entry as DigitTemplate).digit === "blank" ||
+          /^[0-9]$/.test((entry as DigitTemplate).digit)) &&
+        Array.isArray((entry as DigitTemplate).mask) &&
+        (entry as DigitTemplate).mask.length === 35,
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function writeDigitTemplates(templates: DigitTemplate[]) {
+  localStorage.setItem(digitTemplatesKey, JSON.stringify(templates.slice(-100)));
+}
 
 export type InputDisplayObservation = {
   width: number;
@@ -77,6 +118,14 @@ type LightComponent = {
 type NumberReading = {
   text: string;
   confidence: number;
+  glyphs: NumberGlyphSample[];
+};
+
+type NumberDigitBox = {
+  x: number;
+  width: number;
+  top: number;
+  height: number;
 };
 
 export const inputButtonSlotRatios = [
@@ -96,6 +145,11 @@ export type InputDisplayGeometry = {
   buttonRegionRadius: number;
   numberStartX: number;
   numberEndX: number;
+  numberDigitXs?: number[];
+  numberDigitWidth?: number;
+  numberDigitTop?: number;
+  numberDigitHeight?: number;
+  digitTemplates?: DigitTemplate[];
 };
 
 export const defaultInputDisplayGeometry: InputDisplayGeometry = {
@@ -110,6 +164,10 @@ export const defaultInputDisplayGeometry: InputDisplayGeometry = {
   buttonRegionRadius: 6.5,
   numberStartX: 68,
   numberEndX: 98,
+  numberDigitXs: [70, 79, 88],
+  numberDigitWidth: 8,
+  numberDigitTop: 10,
+  numberDigitHeight: 80,
 };
 
 const colorRules: ColorRule[] = [
@@ -354,17 +412,23 @@ function findLightComponents(image: RgbImage, maxXRatio = 0.55): LightComponent[
   return components;
 }
 
-function isNumberPixel(red: number, green: number, blue: number) {
-  return (
-    red > 135 &&
-    green > 135 &&
-    blue > 135 &&
-    Math.max(red, green, blue) - Math.min(red, green, blue) < 105
-  );
+function numberPixelScore(red: number, green: number, blue: number) {
+  const brightness = (red + green + blue) / 3;
+  const chroma = Math.max(red, green, blue) - Math.min(red, green, blue);
+  if (brightness < 115 || chroma > 125) return 0;
+  const brightnessScore = Math.min(1, Math.max(0, (brightness - 115) / 125));
+  const neutralityScore = Math.min(1, Math.max(0, 1 - Math.max(0, chroma - 30) / 95));
+  return brightnessScore * neutralityScore;
 }
 
-const digitTemplates: Record<string, string[]> = {
-  "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+function isNumberPixel(red: number, green: number, blue: number) {
+  return numberPixelScore(red, green, blue) >= 0.42;
+}
+
+const fallbackDigitTemplates: Record<string, string[]> = {
+  // Keep the middle of 0 open. This is important when anti-aliasing blends
+  // the glyph with the changing game background.
+  "0": ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
   "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
   "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
   "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
@@ -376,112 +440,198 @@ const digitTemplates: Record<string, string[]> = {
   "9": ["01110", "10001", "10001", "01111", "00001", "00001", "01110"],
 };
 
+function normalizeGlyphMask(image: RgbImage, range: [number, number], top: number, bottom: number) {
+  const width = range[1] - range[0] + 1;
+  const height = bottom - top + 1;
+  return Array.from({ length: 35 }, (_, index) => {
+    const targetY = Math.floor(index / 5);
+    const targetX = index % 5;
+    const sourceXStart = range[0] + Math.floor((targetX * width) / 5);
+    const sourceXEnd = Math.max(
+      sourceXStart + 1,
+      range[0] + Math.ceil(((targetX + 1) * width) / 5),
+    );
+    const sourceYStart = top + Math.floor((targetY * height) / 7);
+    const sourceYEnd = Math.max(sourceYStart + 1, top + Math.ceil(((targetY + 1) * height) / 7));
+    let ink = 0;
+    let samples = 0;
+    for (let y = sourceYStart; y < sourceYEnd; y += 1) {
+      for (let x = sourceXStart; x < sourceXEnd; x += 1) {
+        const pixel = pixelIndex(image.width, x, y);
+        ink += numberPixelScore(image.data[pixel], image.data[pixel + 1], image.data[pixel + 2]);
+        samples += 1;
+      }
+    }
+    return ink / Math.max(1, samples);
+  });
+}
+
 function readNumberInSegment(
   image: RgbImage,
   centerY: number,
   halfHeight: number,
   numberStartX: number,
   numberEndX: number,
+  calibratedTemplates: DigitTemplate[] = [],
+  digitBoxes: NumberDigitBox[] = [],
 ): NumberReading | null {
   const startX = Math.floor(image.width * (numberStartX / 100));
   const endX = Math.floor(image.width * (numberEndX / 100));
   const startY = Math.max(0, Math.floor(centerY - halfHeight));
   const endY = Math.min(image.height, Math.ceil(centerY + halfHeight));
-  const columns: number[] = [];
-  for (let x = startX; x < endX; x += 1) {
-    let count = 0;
-    for (let y = startY; y < endY; y += 1) {
-      const index = pixelIndex(image.width, x, y);
-      if (isNumberPixel(image.data[index], image.data[index + 1], image.data[index + 2])) {
-        count += 1;
-      }
-    }
-    if (count > 0) columns.push(x);
-  }
-  if (columns.length === 0) return null;
-
-  const glyphRanges: Array<[number, number]> = [];
-  let glyphStart = columns[0];
-  let previous = columns[0];
-  for (let index = 1; index <= columns.length; index += 1) {
-    const current = columns[index];
-    if (current !== undefined && current - previous <= 1) {
-      previous = current;
-      continue;
-    }
-    glyphRanges.push([glyphStart, previous]);
-    glyphStart = current;
-    previous = current;
-  }
-
   const glyphs: Array<{ range: [number, number]; top: number; bottom: number }> = [];
-  for (const range of glyphRanges) {
-    let top = endY;
-    let bottom = startY;
-    for (let y = startY; y < endY; y += 1) {
-      for (let x = range[0]; x <= range[1]; x += 1) {
-        const index = pixelIndex(image.width, x, y);
-        if (isNumberPixel(image.data[index], image.data[index + 1], image.data[index + 2])) {
-          top = Math.min(top, y);
-          bottom = Math.max(bottom, y);
+  if (digitBoxes.length > 0) {
+    const segmentHeight = halfHeight / 0.48;
+    const segmentTop = centerY - segmentHeight / 2;
+    for (const box of digitBoxes) {
+      const boxStartX = Math.max(0, Math.floor(image.width * (box.x / 100)));
+      const boxEndX = Math.min(image.width, Math.ceil(image.width * ((box.x + box.width) / 100)));
+      const boxStartY = Math.max(0, Math.floor(segmentTop + segmentHeight * (box.top / 100)));
+      const boxEndY = Math.min(
+        image.height,
+        Math.ceil(segmentTop + segmentHeight * ((box.top + box.height) / 100)),
+      );
+      let top = boxEndY;
+      let bottom = boxStartY;
+      let left = boxEndX;
+      let right = boxStartX;
+      let ink = 0;
+      for (let y = boxStartY; y < boxEndY; y += 1) {
+        for (let x = boxStartX; x < boxEndX; x += 1) {
+          const index = pixelIndex(image.width, x, y);
+          const score = numberPixelScore(
+            image.data[index],
+            image.data[index + 1],
+            image.data[index + 2],
+          );
+          ink += score;
+          if (score >= 0.42) {
+            left = Math.min(left, x);
+            right = Math.max(right, x);
+            top = Math.min(top, y);
+            bottom = Math.max(bottom, y);
+          }
         }
       }
+      const boxWidth = boxEndX - boxStartX;
+      const boxHeight = boxEndY - boxStartY;
+      if (
+        ink >= Math.max(2, boxWidth * boxHeight * 0.04) &&
+        left < boxEndX &&
+        right >= left &&
+        top < boxEndY &&
+        bottom >= top &&
+        bottom - top + 1 >= 5
+      ) {
+        glyphs.push({ range: [left, right], top, bottom });
+      }
     }
-    const width = range[1] - range[0] + 1;
-    const height = bottom - top + 1;
-    if (width >= 1 && width <= image.width * 0.12 && height >= 5 && height <= halfHeight * 2) {
-      glyphs.push({ range, top, bottom });
+  } else {
+    const rowHeight = Math.max(1, endY - startY);
+    const columns: number[] = [];
+    for (let x = startX; x < endX; x += 1) {
+      let ink = 0;
+      for (let y = startY; y < endY; y += 1) {
+        const index = pixelIndex(image.width, x, y);
+        ink += numberPixelScore(image.data[index], image.data[index + 1], image.data[index + 2]);
+      }
+      // Require vertical evidence so bright background pixels do not become
+      // one-pixel glyphs or split a real glyph into fragments.
+      if (ink >= Math.max(0.75, rowHeight * 0.06)) columns.push(x);
+    }
+    if (columns.length === 0) return null;
+
+    const glyphRanges: Array<[number, number]> = [];
+    let glyphStart = columns[0];
+    let previous = columns[0];
+    for (let index = 1; index <= columns.length; index += 1) {
+      const current = columns[index];
+      if (current !== undefined && current - previous <= 1) {
+        previous = current;
+        continue;
+      }
+      glyphRanges.push([glyphStart, previous]);
+      glyphStart = current;
+      previous = current;
+    }
+
+    for (const range of glyphRanges) {
+      let top = endY;
+      let bottom = startY;
+      for (let y = startY; y < endY; y += 1) {
+        for (let x = range[0]; x <= range[1]; x += 1) {
+          const index = pixelIndex(image.width, x, y);
+          if (isNumberPixel(image.data[index], image.data[index + 1], image.data[index + 2])) {
+            top = Math.min(top, y);
+            bottom = Math.max(bottom, y);
+          }
+        }
+      }
+      const width = range[1] - range[0] + 1;
+      const height = bottom - top + 1;
+      if (width >= 1 && width <= image.width * 0.12 && height >= 5 && height <= halfHeight * 2) {
+        glyphs.push({ range, top, bottom });
+      }
     }
   }
   if (glyphs.length === 0) return null;
 
+  const glyphSamples = glyphs.map(({ range, top, bottom }) => ({
+    x: range[0],
+    width: range[1] - range[0] + 1,
+    height: bottom - top + 1,
+    mask: normalizeGlyphMask(image, range, top, bottom),
+  }));
+  const templateEntries = [
+    ...Object.entries(fallbackDigitTemplates).map(([digit, template]) => ({
+      digit,
+      mask: template.flatMap((row) => row.split("").map((cell) => (cell === "1" ? 0.72 : 0.06))),
+      calibrated: false,
+    })),
+    ...calibratedTemplates.map((template) => ({
+      digit: template.digit,
+      mask: template.mask,
+      calibrated: true,
+    })),
+  ];
   let totalConfidence = 0;
   const text = glyphs
     .map(({ range, top, bottom }) => {
-      const width = range[1] - range[0] + 1;
-      const height = bottom - top + 1;
+      const glyphMask = normalizeGlyphMask(image, range, top, bottom);
       let bestDigit = "?";
-      let bestScore = 0;
-      for (const [digit, template] of Object.entries(digitTemplates)) {
-        let mismatches = 0;
+      let bestScore = -Infinity;
+      let secondBestScore = -Infinity;
+      for (const { digit, mask, calibrated } of templateEntries) {
+        let error = 0;
+        let totalWeight = 0;
         for (let targetY = 0; targetY < 7; targetY += 1) {
           for (let targetX = 0; targetX < 5; targetX += 1) {
-            const sourceXStart = range[0] + Math.floor((targetX * width) / 5);
-            const sourceXEnd = Math.max(
-              sourceXStart + 1,
-              range[0] + Math.ceil(((targetX + 1) * width) / 5),
-            );
-            const sourceYStart = top + Math.floor((targetY * height) / 7);
-            const sourceYEnd = Math.max(
-              sourceYStart + 1,
-              top + Math.ceil(((targetY + 1) * height) / 7),
-            );
-            let lit = false;
-            for (let y = sourceYStart; y < sourceYEnd && !lit; y += 1) {
-              for (let x = sourceXStart; x < sourceXEnd; x += 1) {
-                const index = pixelIndex(image.width, x, y);
-                if (
-                  isNumberPixel(image.data[index], image.data[index + 1], image.data[index + 2])
-                ) {
-                  lit = true;
-                  break;
-                }
-              }
-            }
-            if (lit !== (template[targetY][targetX] === "1")) mismatches += 1;
+            const cellIndex = targetY * 5 + targetX;
+            const cellInk = glyphMask[cellIndex];
+            const expectedInk = calibrated
+              ? Math.max(0, Math.min(1, mask[cellIndex] ?? 0))
+              : mask[cellIndex];
+            const weight = targetY === 0 || targetY === 6 ? 1.1 : 1;
+            error += Math.abs(cellInk - expectedInk) * weight;
+            totalWeight += weight;
           }
         }
-        const score = 1 - mismatches / 35;
+        const score = 1 - error / (totalWeight * 0.72);
         if (score > bestScore) {
+          secondBestScore = bestScore;
           bestScore = score;
           bestDigit = digit;
+        } else if (score > secondBestScore) {
+          secondBestScore = score;
         }
       }
       totalConfidence += bestScore;
-      return bestScore >= 0.3 ? bestDigit : "?";
+      const margin = bestScore - secondBestScore;
+      if (bestScore < 0.42 || (bestScore < 0.58 && margin < 0.04)) return "?";
+      return bestDigit === "blank" ? "" : bestDigit;
     })
     .join("");
-  return { text, confidence: totalConfidence / glyphs.length };
+  return { text, confidence: Math.max(0, totalConfidence / glyphs.length), glyphs: glyphSamples };
 }
 
 function buildButtonChecks(
@@ -628,6 +778,13 @@ export function detectInputDisplay(
         segmentHeight * 0.48,
         geometry.numberStartX,
         geometry.numberEndX,
+        geometry.digitTemplates,
+        (geometry.numberDigitXs ?? []).map((x) => ({
+          x,
+          width: geometry.numberDigitWidth ?? 8,
+          top: geometry.numberDigitTop ?? 10,
+          height: geometry.numberDigitHeight ?? 80,
+        })),
       ) ?? undefined;
     return row;
   });
