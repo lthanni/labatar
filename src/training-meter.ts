@@ -16,8 +16,7 @@ export type TrainingMeterScore = {
   colorScore: number;
   edgeScore: number;
   mappedScore: number;
-  gateMatches: number;
-  gateCount: number;
+  sampleCount: number;
 };
 
 export type TrainingMeterState = "unknown" | "training" | "not-training";
@@ -139,18 +138,10 @@ export function scoreTrainingMeterPresence({
     blue: config.gateBlue,
   };
   let colorTotal = 0;
-  let gateMatches = 0;
   for (let index = 0; index < gateCount; index += 1) {
     const x = Math.min(sampleWidth - 1, gateStart + index * gateSpacing);
     const pixel = readPixel(x, gateY);
     colorTotal += colorSimilarity(pixel, target, config.gateTolerance);
-    if (
-      Math.abs(pixel.red - target.red) <= config.gateTolerance &&
-      Math.abs(pixel.green - target.green) <= config.gateTolerance &&
-      Math.abs(pixel.blue - target.blue) <= config.gateTolerance
-    ) {
-      gateMatches += 1;
-    }
   }
   const colorScore = colorTotal / gateCount;
   const edgeScore = scoreHorizontalEdges({
@@ -170,8 +161,7 @@ export function scoreTrainingMeterPresence({
     colorScore,
     edgeScore,
     mappedScore: normalizedMappedScore,
-    gateMatches,
-    gateCount,
+    sampleCount: gateCount,
   };
 }
 

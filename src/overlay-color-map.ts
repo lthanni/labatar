@@ -87,7 +87,6 @@ export const overlayCellGroupsKey = "avatar-overlay-cell-groups";
 export const overlayCellGroupLogKey = "avatar-overlay-cell-group-log";
 export const overlayPlayer1CellGroupsKey = "avatar-overlay-player1-cell-groups";
 export const overlayPlayer1CellGroupLogKey = "avatar-overlay-player1-cell-group-log";
-export const overlayGateSamplesKey = "avatar-overlay-gate-samples";
 export const overlayDetectInputKey = "avatar-overlay-detect-input";
 export const overlayInputObservationKey = "avatar-overlay-input-observation";
 export const overlayInputEventLogKey = "avatar-overlay-input-event-log";

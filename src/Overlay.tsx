@@ -17,7 +17,6 @@ import {
   overlayCellGroupLogKey,
   overlayPlayer1CellGroupsKey,
   overlayPlayer1CellGroupLogKey,
-  overlayGateSamplesKey,
   overlayDetectFramebarKey,
   overlayDetectInputKey,
   overlayInputObservationKey,
@@ -90,7 +89,6 @@ type OverlayConfig = {
   gateStartOffset: number;
   gateSpacing: number;
   gateSampleCount: number;
-  gateRequiredMatches: number;
   gateRed: number;
   gateGreen: number;
   gateBlue: number;
@@ -152,7 +150,6 @@ const defaultOverlayConfig: OverlayConfig = {
   gateStartOffset: 0,
   gateSpacing: 10,
   gateSampleCount: 61,
-  gateRequiredMatches: 61,
   gateRed: 0,
   gateGreen: 0,
   gateBlue: 0,
@@ -530,11 +527,6 @@ function findPrecedingButtonInput(timeline: TimedInputEvent[], framebarTimestamp
   return null;
 }
 type FramebarScan = {
-  gateActive: boolean;
-  gateMatches: number;
-  gateCount: number;
-  requiredGateMatches: number;
-  gateSamples: FramebarPixel[];
   rawStates: string[];
   confidences: number[];
   yellowStates: boolean[];
@@ -565,29 +557,6 @@ function scanFramebar({
   readPixel: (x: number, y: number) => FramebarPixel;
   getMappedColor: (red: number, green: number, blue: number) => OverlayColorMatch | null;
 }): FramebarScan {
-  const gateY = Math.min(sampleHeight - 1, Math.max(0, Math.round(config.gateSampleOffset)));
-  const gateStart = Math.max(0, Math.round(config.gateStartOffset));
-  const gateSpacing = Math.max(1, Math.round(config.gateSpacing));
-  const gateCount = Math.min(1000, Math.max(1, Math.round(config.gateSampleCount)));
-  const gateTolerance = Math.max(0, Math.round(config.gateTolerance));
-  const gateSamples: FramebarPixel[] = [];
-  let gateMatches = 0;
-  for (let gateIndex = 0; gateIndex < gateCount; gateIndex += 1) {
-    const gateX = Math.min(sampleWidth - 1, gateStart + gateIndex * gateSpacing);
-    const gateColor = readPixel(gateX, gateY);
-    gateSamples.push(gateColor);
-    if (
-      Math.abs(gateColor.red - config.gateRed) <= gateTolerance &&
-      Math.abs(gateColor.green - config.gateGreen) <= gateTolerance &&
-      Math.abs(gateColor.blue - config.gateBlue) <= gateTolerance
-    ) {
-      gateMatches += 1;
-    }
-  }
-  const requiredGateMatches = Math.min(
-    gateCount,
-    Math.max(1, Math.round(config.gateRequiredMatches)),
-  );
   const baseSampleY = Math.min(sampleHeight - 1, Math.max(0, Math.round(config.baseSampleOffset)));
   const yellowSampleY = Math.min(
     sampleHeight - 1,
@@ -639,13 +608,6 @@ function scanFramebar({
     mappedScore,
   });
   return {
-    // Keep the legacy gate fields for diagnostics, but make the active gate
-    // tolerant of translucent UI compositing and small background changes.
-    gateActive: meterPresence.score >= 0.42,
-    gateMatches,
-    gateCount,
-    requiredGateMatches,
-    gateSamples,
     rawStates,
     confidences,
     yellowStates,
@@ -952,9 +914,6 @@ export function VisualOverlay() {
       groups: Array<{ state: string; start: number; length: number }>;
     }>
   >([]);
-  const [gateSamples, setGateSamples] = useState<
-    Array<{ red: number; green: number; blue: number }>
-  >([]);
   const [trainingCalibration, setTrainingCalibration] = useState(readTrainingMeterCalibration);
   const [trainingCalibrationMode, setTrainingCalibrationMode] = useState<
     "positive" | "negative" | "idle"
@@ -989,7 +948,6 @@ export function VisualOverlay() {
         setPlayer1CellGroupLog(
           JSON.parse(localStorage.getItem(overlayPlayer1CellGroupLogKey) ?? "[]"),
         );
-        setGateSamples(JSON.parse(localStorage.getItem(overlayGateSamplesKey) ?? "[]"));
         setTrainingCalibration(readTrainingMeterCalibration());
         setInputObservation(JSON.parse(localStorage.getItem(overlayInputObservationKey) ?? "null"));
         setInputDebugImage(localStorage.getItem(overlayInputDebugImageKey) ?? "");
@@ -1064,20 +1022,6 @@ export function VisualOverlay() {
     const next = cornerTemplates.filter((template) => template.id !== id);
     writeCornerTemplates(next);
     setCornerTemplates(next);
-  };
-  const snapshotGateColor = () => {
-    if (gateSamples.length === 0) return;
-    const counts = new Map<string, number>();
-    gateSamples.forEach(({ red, green, blue }) => {
-      const key = `${red},${green},${blue}`;
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    });
-    const [key] = [...counts.entries()].sort((left, right) => right[1] - left[1])[0] ?? [];
-    if (!key) return;
-    const [red, green, blue] = key.split(",").map(Number);
-    const next = { ...config, gateRed: red, gateGreen: green, gateBlue: blue };
-    setConfig(next);
-    localStorage.setItem(overlayConfigKey, JSON.stringify(next));
   };
   const changeTrainingCalibrationMode = (mode: "positive" | "negative" | "idle") => {
     localStorage.setItem(trainingMeterCalibrationModeKey, mode);
@@ -1567,15 +1511,14 @@ export function VisualOverlay() {
           <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
             {(
               [
-                ["gateSampleOffset", "Gate Y offset"],
-                ["gateStartOffset", "Gate X offset"],
-                ["gateSpacing", "Gate spacing"],
-                ["gateSampleCount", "Gate sample count"],
-                ["gateRequiredMatches", "Required matches"],
-                ["gateRed", "Gate red"],
-                ["gateGreen", "Gate green"],
-                ["gateBlue", "Gate blue"],
-                ["gateTolerance", "Gate tolerance"],
+                ["gateSampleOffset", "Meter sample Y"],
+                ["gateStartOffset", "Meter sample X"],
+                ["gateSpacing", "Meter sample spacing"],
+                ["gateSampleCount", "Meter sample count"],
+                ["gateRed", "Meter anchor red"],
+                ["gateGreen", "Meter anchor green"],
+                ["gateBlue", "Meter anchor blue"],
+                ["gateTolerance", "Meter color tolerance"],
               ] as Array<[keyof OverlayConfig, string]>
             ).map(([key, label]) => (
               <TextField
@@ -1589,14 +1532,6 @@ export function VisualOverlay() {
                 sx={{ width: 125 }}
               />
             ))}
-            <Button
-              variant="outlined"
-              size="small"
-              onClick={snapshotGateColor}
-              disabled={gateSamples.length === 0}
-            >
-              Snapshot current gate color
-            </Button>
           </Stack>
           <Button size="small" sx={{ mt: 1 }} onClick={resetConfig}>
             Reset overlay geometry
@@ -2422,9 +2357,10 @@ export function OverlaySurface() {
               }
               const player1MeterReady =
                 trainingMeterRef.current.state === "training" ||
-                (trainingMeterRef.current.state === "unknown" && player1Reading.gateActive);
+                (trainingMeterRef.current.state === "unknown" &&
+                  player1Reading.meterPresence.score >= 0.42);
               if (!player1MeterReady) {
-                player1SummaryRef.current = `gate inactive ${player1Reading.gateMatches}/${player1Reading.gateCount}`;
+                player1SummaryRef.current = `meter inactive score=${player1Reading.meterPresence.score.toFixed(2)}`;
               } else {
                 const player1States = stabilizeFramebarStates(
                   player1Reading.rawStates,
@@ -2645,32 +2581,6 @@ export function OverlaySurface() {
                 const index = (y * sampleWidth + x) * 4;
                 return { red: pixels[index], green: pixels[index + 1], blue: pixels[index + 2] };
               };
-              const gateY = Math.min(
-                sampleHeight - 1,
-                Math.max(0, Math.round(config.gateSampleOffset)),
-              );
-              const gateStart = Math.max(0, Math.round(config.gateStartOffset));
-              const gateSpacing = Math.max(1, Math.round(config.gateSpacing));
-              const gateCount = Math.min(1000, Math.max(1, Math.round(config.gateSampleCount)));
-              const gateTolerance = Math.max(0, Math.round(config.gateTolerance));
-              let gateMatches = 0;
-              const currentGateSamples: Array<{ red: number; green: number; blue: number }> = [];
-              for (let gateIndex = 0; gateIndex < gateCount; gateIndex += 1) {
-                const gateX = Math.min(sampleWidth - 1, gateStart + gateIndex * gateSpacing);
-                const gateColor = readPixel(gateX, gateY);
-                currentGateSamples.push(gateColor);
-                if (
-                  Math.abs(gateColor.red - config.gateRed) <= gateTolerance &&
-                  Math.abs(gateColor.green - config.gateGreen) <= gateTolerance &&
-                  Math.abs(gateColor.blue - config.gateBlue) <= gateTolerance
-                ) {
-                  gateMatches += 1;
-                }
-              }
-              const requiredGateMatches = Math.min(
-                gateCount,
-                Math.max(1, Math.round(config.gateRequiredMatches)),
-              );
               const player2MeterPresence = scoreTrainingMeterPresence({
                 config,
                 sampleWidth,
@@ -2698,31 +2608,13 @@ export function OverlaySurface() {
               ) {
                 appendTrainingMeterSample(calibrationMode, trainingMeterScores);
               }
-              const gateActive =
+              const meterReady =
                 trainingMeterRef.current.state === "training" ||
                 (trainingMeterRef.current.state === "unknown" &&
                   player2MeterPresence.score >= 0.42);
-              if (tick % 10 === 0) {
-                localStorage.setItem(overlayGateSamplesKey, JSON.stringify(currentGateSamples));
-              }
-              for (let gateIndex = 0; gateIndex < gateCount; gateIndex += 1) {
-                const gateX = Math.min(sampleWidth - 1, gateStart + gateIndex * gateSpacing);
-                const gateColor = readPixel(gateX, gateY);
-                const matched =
-                  Math.abs(gateColor.red - config.gateRed) <= gateTolerance &&
-                  Math.abs(gateColor.green - config.gateGreen) <= gateTolerance &&
-                  Math.abs(gateColor.blue - config.gateBlue) <= gateTolerance;
-                context.fillStyle = matched ? "#00ff66" : "#ff0044";
-                context.fillRect(
-                  sourceDisplayX + (gateX / sampleWidth) * framebarDisplayWidth,
-                  sourceDisplayY + (gateY / sampleHeight) * framebarDisplayHeight,
-                  1,
-                  1,
-                );
-              }
-              if (!gateActive) {
+              if (!meterReady) {
                 if (debugRef.current) {
-                  debugRef.current.textContent = `Framebar gate inactive\n${trainingMeterSummaryRef.current}\nmatched gate samples: ${gateMatches}/${gateCount}\nrequired matches: ${requiredGateMatches}\ngate RGB: ${config.gateRed},${config.gateGreen},${config.gateBlue}\ninput: ${inputSummaryRef.current}\ninput event: ${inputEventSummaryRef.current}\ninput alignment: ${inputAlignmentSummaryRef.current}\ncorners: ${cornerSummaryRef.current}\nresolved move: ${moveResolutionSummaryRef.current}\nmove framebar source: P1 (P2 reserved for defense)\nP1: ${player1SummaryRef.current}\nmove: ${moveStatusRef.current}`;
+                  debugRef.current.textContent = `Training meter inactive\n${trainingMeterSummaryRef.current}\ninput: ${inputSummaryRef.current}\ninput event: ${inputEventSummaryRef.current}\ninput alignment: ${inputAlignmentSummaryRef.current}\ncorners: ${cornerSummaryRef.current}\nresolved move: ${moveResolutionSummaryRef.current}\nmove framebar source: P1 (P2 reserved for defense)\nP1: ${player1SummaryRef.current}\nmove: ${moveStatusRef.current}`;
                 }
                 frame = requestAnimationFrame(draw);
                 return;
@@ -2885,7 +2777,7 @@ export function OverlaySurface() {
                   `x samples: start=${sampleStartOffset}px, spacing=${sampleSpacing}px`,
                   `unmapped RGB: ${unmappedSummary || "none"}`,
                   `mapping confidence: ${confidenceSamples ? (confidenceTotal / confidenceSamples).toFixed(2) : "none"}`,
-                  `gate: ${gateMatches}/${gateCount} matched, required=${requiredGateMatches}`,
+                  `meter features: color=${player2MeterPresence.colorScore.toFixed(2)}, edge=${player2MeterPresence.edgeScore.toFixed(2)}, mapped=${player2MeterPresence.mappedScore.toFixed(2)}`,
                   `input: ${inputSummaryRef.current}`,
                   `capture: ${captureSourceMode}`,
                   `input event: ${inputEventSummaryRef.current}`,
