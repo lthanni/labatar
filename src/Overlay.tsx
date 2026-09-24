@@ -75,6 +75,8 @@ type OverlayConfig = {
   sourceY: number;
   sourceWidth: number;
   sourceHeight: number;
+  framebarSourceWidth: number;
+  framebarSourceHeight: number;
   targetX: number;
   targetY: number;
   targetWidth: number;
@@ -135,6 +137,8 @@ const defaultOverlayConfig: OverlayConfig = {
   sourceY: 91,
   sourceWidth: 39.4,
   sourceHeight: 4.5,
+  framebarSourceWidth: 39.4,
+  framebarSourceHeight: 4.5,
   targetX: 6.9,
   targetY: 94,
   targetWidth: 39.4,
@@ -806,8 +810,8 @@ function isIdleFramebar(groups: FramebarGroup[]) {
 const configFields: Array<{ key: keyof OverlayConfig; label: string }> = [
   { key: "sourceX", label: "P2 source X" },
   { key: "sourceY", label: "P2 source Y" },
-  { key: "sourceWidth", label: "P2 source width" },
-  { key: "sourceHeight", label: "P2 source height" },
+  { key: "sourceWidth", label: "P2 mirror source width" },
+  { key: "sourceHeight", label: "P2 mirror source height" },
   { key: "targetX", label: "P2 mirror X" },
   { key: "targetY", label: "P2 mirror Y" },
   { key: "targetWidth", label: "P2 mirror width" },
@@ -1528,6 +1532,32 @@ export function VisualOverlay() {
       {allowOverride && (
         <>
           <Typography variant="subtitle2" sx={{ mt: 2 }}>
+            Framebar detection region
+          </Typography>
+          <Typography variant="caption" color="text.secondary" component="div">
+            These dimensions control only the P1/P2 framebar scanners. They are independent of the
+            P2 mirror source and mirror destination dimensions above.
+          </Typography>
+          <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
+            {(
+              [
+                ["framebarSourceWidth", "Detection width"],
+                ["framebarSourceHeight", "Detection height"],
+              ] as Array<[keyof OverlayConfig, string]>
+            ).map(([key, label]) => (
+              <TextField
+                key={key}
+                label={label}
+                type="number"
+                size="small"
+                value={config[key]}
+                onChange={(event) => updateConfig(key, event.target.value)}
+                slotProps={{ htmlInput: { min: 0.1, max: 100, step: 0.1 } }}
+                sx={{ width: 140 }}
+              />
+            ))}
+          </Stack>
+          <Typography variant="subtitle2" sx={{ mt: 2 }}>
             Automatic framebar gate
           </Typography>
           <Typography variant="caption" color="text.secondary">
@@ -2061,14 +2091,21 @@ export function OverlaySurface() {
             const sourceY = video.videoHeight * (config.sourceY / 100);
             const sourceWidth = video.videoWidth * (config.sourceWidth / 100);
             const sourceHeight = Math.max(24, video.videoHeight * (config.sourceHeight / 100));
+            const framebarSourceWidth = video.videoWidth * (config.framebarSourceWidth / 100);
+            const framebarSourceHeight = Math.max(
+              24,
+              video.videoHeight * (config.framebarSourceHeight / 100),
+            );
             const targetX = width * (config.targetX / 100);
             const targetY = height * (config.targetY / 100);
             const targetWidth = width * (config.targetWidth / 100);
             const targetHeight = height * (config.targetHeight / 100);
             const sourceDisplayX = width * (config.sourceX / 100);
             const sourceDisplayY = height * (config.sourceY / 100);
-            const sourceDisplayWidth = width * (config.sourceWidth / 100);
-            const sourceDisplayHeight = height * (config.sourceHeight / 100);
+            const framebarDisplayWidth = width * (config.framebarSourceWidth / 100);
+            const framebarDisplayHeight = height * (config.framebarSourceHeight / 100);
+            const player1DisplayX = width * (config.player1SourceX / 100);
+            const player1DisplayY = height * (config.player1SourceY / 100);
             context.clearRect(0, 0, width, height);
             // P2 is sampled directly from the raw game-window video. The
             // mirrored copy below is output only and is never used as input.
@@ -2306,17 +2343,11 @@ export function OverlaySurface() {
               const player1SourceY = Math.max(0, video.videoHeight * (config.player1SourceY / 100));
               const player1SourceWidth = Math.max(
                 1,
-                Math.min(
-                  video.videoWidth - player1SourceX,
-                  video.videoWidth * (config.sourceWidth / 100),
-                ),
+                Math.min(video.videoWidth - player1SourceX, framebarSourceWidth),
               );
               const player1SourceHeight = Math.max(
                 1,
-                Math.min(
-                  video.videoHeight - player1SourceY,
-                  video.videoHeight * (config.sourceHeight / 100),
-                ),
+                Math.min(video.videoHeight - player1SourceY, framebarSourceHeight),
               );
               const player1Width = Math.max(1, Math.round(player1SourceWidth));
               const player1Height = Math.max(1, Math.round(player1SourceHeight));
@@ -2358,14 +2389,13 @@ export function OverlaySurface() {
                 getMappedColor: player1GetMappedColor,
               });
               player1MeterPresence = player1Reading.meterPresence;
-              const player1TargetX = width * (config.player1SourceX / 100);
-              const player1TargetY = height * (config.player1SourceY / 100);
               for (let sample = 0; sample < player1Reading.rawStates.length; sample += 1) {
                 const x = Math.min(
                   player1Reading.sampleWidth - 1,
                   player1Reading.sampleStartOffset + sample * player1Reading.sampleSpacing,
                 );
-                const markerX = player1TargetX + (x / player1Reading.sampleWidth) * targetWidth;
+                const markerX =
+                  player1DisplayX + (x / player1Reading.sampleWidth) * framebarDisplayWidth;
                 context.fillStyle =
                   player1Reading.rawStates[sample] === "idle"
                     ? "#00ccff"
@@ -2374,16 +2404,18 @@ export function OverlaySurface() {
                       : "#ff0066";
                 context.fillRect(
                   markerX,
-                  player1TargetY +
-                    (player1Reading.baseSampleY / player1Reading.sampleHeight) * targetHeight,
+                  player1DisplayY +
+                    (player1Reading.baseSampleY / player1Reading.sampleHeight) *
+                      framebarDisplayHeight,
                   1,
                   1,
                 );
                 context.fillStyle = player1Reading.yellowStates[sample] ? "#ffff00" : "#0088ff";
                 context.fillRect(
                   markerX,
-                  player1TargetY +
-                    (player1Reading.yellowSampleY / player1Reading.sampleHeight) * targetHeight,
+                  player1DisplayY +
+                    (player1Reading.yellowSampleY / player1Reading.sampleHeight) *
+                      framebarDisplayHeight,
                   1,
                   1,
                 );
@@ -2593,16 +2625,16 @@ export function OverlaySurface() {
             }
 
             if (analysisContext && localStorage.getItem(overlayDetectFramebarKey) === "true") {
-              const sampleWidth = Math.max(1, Math.round(sourceWidth));
-              const sampleHeight = Math.max(1, Math.round(sourceHeight));
+              const sampleWidth = Math.max(1, Math.round(framebarSourceWidth));
+              const sampleHeight = Math.max(1, Math.round(framebarSourceHeight));
               analysisCanvas.width = sampleWidth;
               analysisCanvas.height = sampleHeight;
               analysisContext.drawImage(
                 video,
                 sourceX,
                 sourceY,
-                sourceWidth,
-                sourceHeight,
+                framebarSourceWidth,
+                framebarSourceHeight,
                 0,
                 0,
                 sampleWidth,
@@ -2682,8 +2714,8 @@ export function OverlaySurface() {
                   Math.abs(gateColor.blue - config.gateBlue) <= gateTolerance;
                 context.fillStyle = matched ? "#00ff66" : "#ff0044";
                 context.fillRect(
-                  sourceDisplayX + (gateX / sampleWidth) * sourceDisplayWidth,
-                  sourceDisplayY + (gateY / sampleHeight) * sourceDisplayHeight,
+                  sourceDisplayX + (gateX / sampleWidth) * framebarDisplayWidth,
+                  sourceDisplayY + (gateY / sampleHeight) * framebarDisplayHeight,
                   1,
                   1,
                 );
@@ -2745,15 +2777,15 @@ export function OverlaySurface() {
 
                 context.fillStyle = idle ? "#00ff66" : hitpause ? "#ff9900" : "#ff0066";
                 context.fillRect(
-                  sourceDisplayX + (x / sampleWidth) * sourceDisplayWidth,
-                  sourceDisplayY + (baseSampleY / sampleHeight) * sourceDisplayHeight,
+                  sourceDisplayX + (x / sampleWidth) * framebarDisplayWidth,
+                  sourceDisplayY + (baseSampleY / sampleHeight) * framebarDisplayHeight,
                   1,
                   1,
                 );
                 context.fillStyle = yellow ? "#ffff00" : "#0088ff";
                 context.fillRect(
-                  sourceDisplayX + (x / sampleWidth) * sourceDisplayWidth,
-                  sourceDisplayY + (yellowSampleY / sampleHeight) * sourceDisplayHeight,
+                  sourceDisplayX + (x / sampleWidth) * framebarDisplayWidth,
+                  sourceDisplayY + (yellowSampleY / sampleHeight) * framebarDisplayHeight,
                   1,
                   1,
                 );
@@ -2844,7 +2876,7 @@ export function OverlaySurface() {
                 debugRef.current.textContent = [
                   "P2 frame-bar debug",
                   trainingMeterSummaryRef.current,
-                  `scan: raw game-window source x=${Math.round(sourceX)}, y=${Math.round(sourceY)}, w=${Math.round(sourceWidth)}, h=${Math.round(sourceHeight)}`,
+                  `scan: raw game-window source x=${Math.round(sourceX)}, y=${Math.round(sourceY)}, w=${Math.round(framebarSourceWidth)}, h=${Math.round(framebarSourceHeight)}`,
                   `mirror output: x=${Math.round(targetX)}, y=${Math.round(targetY)}, w=${Math.round(targetWidth)}, h=${Math.round(targetHeight)}`,
                   `source: ${sampleWidth} x ${sampleHeight}px`,
                   `base scanline: y=${baseSampleY}px, idle=${idlePixels}, hitpause=${hitpausePixels}/${sampleCount}`,
@@ -2870,8 +2902,8 @@ export function OverlaySurface() {
               context.strokeRect(
                 sourceDisplayX,
                 sourceDisplayY,
-                sourceDisplayWidth,
-                sourceDisplayHeight,
+                framebarDisplayWidth,
+                framebarDisplayHeight,
               );
               context.strokeStyle = "rgba(255, 0, 0, 0.9)";
               context.lineWidth = 2;
