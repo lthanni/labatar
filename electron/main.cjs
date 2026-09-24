@@ -95,8 +95,8 @@ function formatCharacter(character) {
   );
 }
 
-function parseReplayFile(filePath) {
-  const content = fs.readFileSync(filePath).toString("latin1");
+async function parseReplayFile(filePath) {
+  const content = await fs.promises.readFile(filePath, "latin1");
   const fields = {};
   for (const match of content.match(/[ -~]{3,}/g) ?? []) {
     const separator = match.indexOf(" = ");
@@ -140,12 +140,27 @@ function parseReplayFile(filePath) {
   };
 }
 
-ipcMain.handle("replays:scan-folder", (_, folder) => {
+ipcMain.handle("replays:scan-folder", async (event, folder) => {
   if (!folder || !fs.existsSync(folder)) return { games: [], playerCounts: {} };
-  const games = fs
+  const entries = fs
     .readdirSync(folder, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".dlr"))
-    .map((entry) => parseReplayFile(path.join(folder, entry.name)));
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".dlr"));
+  const total = entries.length;
+  const games = [];
+  event.sender.send("replays:scan-progress", { completed: 0, total, phase: "scanning" });
+  for (const [index, entry] of entries.entries()) {
+    games.push(await parseReplayFile(path.join(folder, entry.name)));
+    event.sender.send("replays:scan-progress", {
+      completed: index + 1,
+      total,
+      phase: "scanning",
+    });
+    // Give Electron a turn between batches so the window and progress events
+    // remain responsive during large replay-folder scans.
+    if ((index + 1) % 10 === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
   const playerCounts = {};
   for (const game of games) {
     playerCounts[game.player1] = (playerCounts[game.player1] ?? 0) + 1;

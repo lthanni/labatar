@@ -6,6 +6,7 @@ import {
   Button,
   FormControl,
   InputLabel,
+  LinearProgress,
   MenuItem,
   Paper,
   Select,
@@ -16,7 +17,7 @@ import {
   Typography,
   createTheme,
 } from "@mui/material";
-import { useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { AgGridProvider } from "ag-grid-react";
 import { AllCommunityModule } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
@@ -34,6 +35,9 @@ declare global {
         scanFolder: (
           folder: string,
         ) => Promise<{ games: ReplayRow[]; playerCounts: Record<string, number> }>;
+        onScanProgress: (
+          listener: (progress: { completed: number; total: number; phase: "scanning" }) => void,
+        ) => () => void;
       };
       overlay: {
         show: () => Promise<void>;
@@ -56,20 +60,46 @@ function ReplayFolderPicker({
   onData: (games: ReplayRow[], counts: Record<string, number>) => void;
 }) {
   const [folder, setFolder] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState({ completed: 0, total: 0 });
+  const [error, setError] = useState<string | null>(null);
+  const scanGeneration = useRef(0);
   const scan = useCallback(
     async (selectedFolder: string | null) => {
       if (!selectedFolder || !window.electronAPI) return;
-      const result = await window.electronAPI.replays.scanFolder(selectedFolder);
-      onData(result.games, result.playerCounts);
+      const generation = ++scanGeneration.current;
+      setLoading(true);
+      setError(null);
+      setProgress({ completed: 0, total: 0 });
+      try {
+        const result = await window.electronAPI.replays.scanFolder(selectedFolder);
+        if (generation !== scanGeneration.current) return;
+        onData(result.games, result.playerCounts);
+        setProgress({ completed: result.games.length, total: result.games.length });
+      } catch (scanError) {
+        if (generation !== scanGeneration.current) return;
+        setError(scanError instanceof Error ? scanError.message : String(scanError));
+      } finally {
+        if (generation === scanGeneration.current) setLoading(false);
+      }
     },
     [onData],
   );
 
   useEffect(() => {
+    let active = true;
+    const unsubscribe = window.electronAPI?.replays.onScanProgress((nextProgress) => {
+      setProgress({ completed: nextProgress.completed, total: nextProgress.total });
+    });
     void window.electronAPI?.replays.getFolder().then((savedFolder) => {
+      if (!active) return;
       setFolder(savedFolder);
       void scan(savedFolder);
     });
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
   }, [scan]);
 
   const chooseFolder = async () => {
@@ -95,10 +125,28 @@ function ReplayFolderPicker({
             {folder ?? "No replay folder selected"}
           </Typography>
         </Box>
-        <Button variant="contained" onClick={chooseFolder}>
+        <Button variant="contained" onClick={chooseFolder} disabled={loading}>
           Choose folder
         </Button>
       </Stack>
+      {loading && (
+        <Stack spacing={0.5} sx={{ mt: 1 }}>
+          <LinearProgress
+            variant={progress.total > 0 ? "determinate" : "indeterminate"}
+            value={progress.total > 0 ? (progress.completed / progress.total) * 100 : undefined}
+          />
+          <Typography variant="caption" color="text.secondary">
+            {progress.total > 0
+              ? `Loading replay ${progress.completed} of ${progress.total}...`
+              : "Finding replay files..."}
+          </Typography>
+        </Stack>
+      )}
+      {error && (
+        <Typography variant="caption" color="error" component="div" sx={{ mt: 1 }}>
+          Replay loading failed: {error}
+        </Typography>
+      )}
     </Paper>
   );
 }
@@ -118,20 +166,32 @@ function ReplayAnalysis() {
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
   const [overridePlayer, setOverridePlayer] = useState<string | null>(null);
+  const [isGridPending, startGridTransition] = useTransition();
   const onData = useCallback((nextGames: ReplayRow[], counts: Record<string, number>) => {
-    setGames(nextGames);
-    setPlayerCounts(counts);
-    setOverridePlayer(null);
+    startGridTransition(() => {
+      setGames(nextGames);
+      setPlayerCounts(counts);
+      setOverridePlayer(null);
+    });
   }, []);
+  const deferredGames = useDeferredValue(games);
+  const isGridStale = deferredGames !== games;
+  const isPreparingGrid = isGridPending || isGridStale;
   const automaticPlayer = Object.entries(playerCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
   const playerOfInterest = overridePlayer ?? automaticPlayer;
   const relevantGames = useMemo(
     () =>
-      games.filter(
+      deferredGames.filter(
         (game) => game.player1 === playerOfInterest || game.player2 === playerOfInterest,
       ),
-    [games, playerOfInterest],
+    [deferredGames, playerOfInterest],
   );
+
+  const onPlayerOverride = (nextPlayer: string) => {
+    startGridTransition(() => {
+      setOverridePlayer(nextPlayer);
+    });
+  };
 
   return (
     <>
@@ -141,6 +201,14 @@ function ReplayAnalysis() {
           ? `Player of interest: ${playerOfInterest} (${playerCounts[playerOfInterest]} appearances)`
           : "No replay data loaded"}
       </Typography>
+      {isPreparingGrid && (
+        <Stack spacing={0.5} sx={{ mb: 1, textAlign: "left" }}>
+          <LinearProgress />
+          <Typography variant="caption" color="text.secondary">
+            Preparing replay grid… The current grid remains available while this finishes.
+          </Typography>
+        </Stack>
+      )}
       <Stack direction="row" spacing={2} sx={{ mb: 1, alignItems: "center" }}>
         <FormControl
           size="small"
@@ -151,7 +219,7 @@ function ReplayAnalysis() {
             labelId="player-override-label"
             value={playerOfInterest ?? ""}
             label="Player of interest"
-            onChange={(event) => setOverridePlayer(event.target.value)}
+            onChange={(event) => onPlayerOverride(event.target.value)}
           >
             {Object.entries(playerCounts)
               .sort((a, b) => b[1] - a[1])
@@ -183,8 +251,16 @@ function App() {
     const savedTab = Number(localStorage.getItem("avatar-app-last-tab"));
     return savedTab === 1 ? 1 : 0;
   });
+  const [mountedTabs, setMountedTabs] = useState(() => ({
+    replay: tab === 0,
+    overlay: tab === 1,
+  }));
   const changeTab = (nextTab: number) => {
     setTab(nextTab);
+    setMountedTabs((current) => ({
+      replay: current.replay || nextTab === 0,
+      overlay: current.overlay || nextTab === 1,
+    }));
     localStorage.setItem("avatar-app-last-tab", String(nextTab));
   };
 
@@ -194,7 +270,16 @@ function App() {
         <Tab label="Replay analysis" />
         <Tab label="Visual overlay" />
       </Tabs>
-      {tab === 0 ? <ReplayAnalysis /> : <VisualOverlay />}
+      {mountedTabs.replay && (
+        <Box sx={{ display: tab === 0 ? "block" : "none" }}>
+          <ReplayAnalysis />
+        </Box>
+      )}
+      {mountedTabs.overlay && (
+        <Box sx={{ display: tab === 1 ? "block" : "none" }}>
+          <VisualOverlay />
+        </Box>
+      )}
     </>
   );
 }

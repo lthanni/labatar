@@ -1,15 +1,20 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ColDef, ICellRendererParams, ValueGetterParams } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import {
   Checkbox,
   FormControl,
   InputLabel,
+  LinearProgress,
   ListItemText,
   MenuItem,
+  Pagination,
   Select,
   Stack,
+  Typography,
 } from "@mui/material";
+
+const SETS_PER_PAGE = 50;
 
 export type ReplayRow = {
   id: string;
@@ -144,6 +149,90 @@ function makeSessions(games: ReplayRow[], poi: string | null): SessionRow[] {
   });
 }
 
+function makeSessionsAsync(
+  games: ReplayRow[],
+  poi: string | null,
+  onProgress: (completed: number, total: number) => void,
+): Promise<SessionRow[]> {
+  return new Promise((resolve) => {
+    window.setTimeout(() => {
+      const sortedGames = [...games].sort((a, b) =>
+        (b.timestamp ?? "").localeCompare(a.timestamp ?? ""),
+      );
+      const sessions: ReplayRow[][] = [];
+      let index = 0;
+
+      const processBatch = () => {
+        const end = Math.min(index + 250, sortedGames.length);
+        for (; index < end; index += 1) {
+          const game = sortedGames[index];
+          const previous = sessions.at(-1)?.at(-1);
+          const opponent = poi === game.player1 ? game.player2 : game.player1;
+          const previousOpponent = previous
+            ? poi === previous.player1
+              ? previous.player2
+              : previous.player1
+            : null;
+          if (!previous || opponent !== previousOpponent) sessions.push([game]);
+          else sessions.at(-1)?.push(game);
+        }
+        onProgress(index, sortedGames.length);
+        if (index < sortedGames.length) {
+          window.setTimeout(processBatch, 0);
+        } else {
+          resolve(
+            sessions.map((sessionGames, sessionIndex) => {
+              const wins = sessionGames.filter((game) => game.winner === poi).length;
+              const losses = sessionGames.filter(
+                (game) => game.winner !== "Unknown" && game.winner !== poi,
+              ).length;
+              const first = sessionGames[0];
+              return {
+                id: `session-${sessionIndex}-${first.id}`,
+                started: first.timestamp ?? "Unknown",
+                finished: sessionGames.at(-1)?.timestamp ?? "Unknown",
+                record: `${wins} - ${losses}`,
+                opponent: poi === first.player1 ? first.player2 : first.player1,
+                playerCharacters: [
+                  ...new Set(
+                    sessionGames.map((game) =>
+                      poi === game.player1 ? game.player1Character : game.player2Character,
+                    ),
+                  ),
+                ].join(", "),
+                playerSupports: [
+                  ...new Set(
+                    sessionGames.map((game) =>
+                      poi === game.player1 ? game.player1Support : game.player2Support,
+                    ),
+                  ),
+                ].join(", "),
+                opponentCharacters: [
+                  ...new Set(
+                    sessionGames.map((game) =>
+                      poi === game.player1 ? game.player2Character : game.player1Character,
+                    ),
+                  ),
+                ].join(", "),
+                opponentSupports: [
+                  ...new Set(
+                    sessionGames.map((game) =>
+                      poi === game.player1 ? game.player2Support : game.player1Support,
+                    ),
+                  ),
+                ].join(", "),
+                games: sessionGames,
+              };
+            }),
+          );
+        }
+      };
+
+      processBatch();
+    }, 0);
+  });
+}
+
 export function AvatarGrid({
   rowData,
   playerOfInterest,
@@ -159,10 +248,27 @@ export function AvatarGrid({
     opponentCharacter: [] as string[],
     opponentSupport: [] as string[],
   });
-  const sessionRows = useMemo(
-    () => makeSessions(rowData, playerOfInterest),
-    [rowData, playerOfInterest],
+  const [page, setPage] = useState(1);
+  const [sessionRows, setSessionRows] = useState<SessionRow[]>(() =>
+    makeSessions(rowData, playerOfInterest),
   );
+  const [sessionProgress, setSessionProgress] = useState({ completed: 0, total: 0 });
+  const [isPreparingSessions, setIsPreparingSessions] = useState(false);
+  useEffect(() => {
+    let active = true;
+    setIsPreparingSessions(true);
+    setSessionProgress({ completed: 0, total: rowData.length });
+    void makeSessionsAsync(rowData, playerOfInterest, (completed, total) => {
+      if (active) setSessionProgress({ completed, total });
+    }).then((nextSessions) => {
+      if (!active) return;
+      setSessionRows(nextSessions);
+      setIsPreparingSessions(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [rowData, playerOfInterest]);
   const matchesOtherFilters = (session: SessionRow, ignored: keyof typeof filters) =>
     (ignored === "opponent" ||
       filters.opponent.length === 0 ||
@@ -227,15 +333,21 @@ export function AvatarGrid({
       ),
     [sessionRows, filters],
   );
+  const pageCount = Math.max(1, Math.ceil(filteredSessions.length / SETS_PER_PAGE));
+  const currentPage = Math.min(page, pageCount);
+  const pagedSessions = useMemo(
+    () => filteredSessions.slice((currentPage - 1) * SETS_PER_PAGE, currentPage * SETS_PER_PAGE),
+    [currentPage, filteredSessions],
+  );
   const displayRows = useMemo<DisplayRow[]>(
     () =>
-      filteredSessions.flatMap((session) => [
+      pagedSessions.flatMap((session) => [
         { ...session, kind: "session" as const },
         ...(expandedSessions.has(session.id)
           ? session.games.map((game) => ({ ...game, kind: "game" as const, sessionId: session.id }))
           : []),
       ]),
-    [filteredSessions, expandedSessions],
+    [expandedSessions, pagedSessions],
   );
   const columnDefs = useMemo<ColDef<DisplayRow>[]>(
     () => [
@@ -350,6 +462,25 @@ export function AvatarGrid({
   );
   return (
     <>
+      {isPreparingSessions && (
+        <Stack spacing={0.5} sx={{ mb: 1, textAlign: "left" }}>
+          <LinearProgress
+            variant={sessionProgress.total > 0 ? "determinate" : "indeterminate"}
+            value={
+              sessionProgress.total > 0
+                ? (sessionProgress.completed / sessionProgress.total) * 100
+                : undefined
+            }
+          />
+          <Typography variant="caption" color="text.secondary">
+            Preparing replay sessions
+            {sessionProgress.total > 0
+              ? ` (${sessionProgress.completed} of ${sessionProgress.total})`
+              : "…"}
+            …
+          </Typography>
+        </Stack>
+      )}
       <Stack
         direction={{ xs: "column", md: "row" }}
         spacing={1}
@@ -403,6 +534,30 @@ export function AvatarGrid({
           getRowId={({ data }) => data.id}
         />
       </div>
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        spacing={2}
+        sx={{ mt: 1, alignItems: { sm: "center" }, justifyContent: "space-between" }}
+      >
+        <Typography variant="caption" color="text.secondary">
+          {filteredSessions.length === 0
+            ? "No sets"
+            : `Showing ${(currentPage - 1) * SETS_PER_PAGE + 1}-${Math.min(
+                currentPage * SETS_PER_PAGE,
+                filteredSessions.length,
+              )} of ${filteredSessions.length} sets`}
+        </Typography>
+        <Pagination
+          count={pageCount}
+          page={currentPage}
+          onChange={(_, nextPage) => setPage(nextPage)}
+          size="small"
+          color="primary"
+          showFirstButton
+          showLastButton
+          disabled={pageCount <= 1}
+        />
+      </Stack>
     </>
   );
 }

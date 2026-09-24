@@ -13,5 +13,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getFolder: () => ipcRenderer.invoke("replays:get-folder"),
     selectFolder: () => ipcRenderer.invoke("replays:select-folder"),
     scanFolder: (folder) => ipcRenderer.invoke("replays:scan-folder", folder),
+    onScanProgress: (listener) => {
+      const handler = (_, progress) => listener(progress);
+      ipcRenderer.on("replays:scan-progress", handler);
+      return () => ipcRenderer.removeListener("replays:scan-progress", handler);
+    },
   },
 });
