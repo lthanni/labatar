@@ -1882,6 +1882,7 @@ export function OverlaySurface() {
   const cornerSummaryRef = useRef("disabled");
   const trainingMeterRef = useRef<TrainingMeterTracker>(createTrainingMeterTracker());
   const trainingMeterSummaryRef = useRef("unknown");
+  const lastTrainingMeterStateRef = useRef<TrainingMeterTracker["state"]>("unknown");
   const pendingInputSignatureRef = useRef("");
   const pendingInputCountRef = useRef(0);
   const stableInputObservationRef = useRef<InputDisplayObservation | null>(null);
@@ -2059,6 +2060,7 @@ export function OverlaySurface() {
             if (
               inputAnalysisContext &&
               localStorage.getItem(overlayDetectInputKey) !== "false" &&
+              trainingMeterRef.current.state === "training" &&
               tick % 6 === 0
             ) {
               const inputSourceX = Math.max(0, video.videoWidth * (config.inputSourceX / 100));
@@ -2206,6 +2208,8 @@ export function OverlaySurface() {
               );
             } else if (localStorage.getItem(overlayDetectInputKey) === "false") {
               inputSummaryRef.current = "disabled";
+            } else if (trainingMeterRef.current.state !== "training") {
+              inputSummaryRef.current = `training mode required (${trainingMeterRef.current.state})`;
             }
 
             if (
@@ -2240,7 +2244,10 @@ export function OverlaySurface() {
               cornerSummaryRef.current = "disabled";
             }
 
-            if (localStorage.getItem(overlayDetectInputKey) !== "false") {
+            if (
+              localStorage.getItem(overlayDetectInputKey) !== "false" &&
+              trainingMeterRef.current.state === "training"
+            ) {
               context.strokeStyle = "rgba(0, 255, 255, 0.9)";
               context.lineWidth = 2;
               context.strokeRect(
@@ -2324,44 +2331,41 @@ export function OverlaySurface() {
                 getMappedColor: player1GetMappedColor,
               });
               player1MeterPresence = player1Reading.meterPresence;
-              for (let sample = 0; sample < player1Reading.rawStates.length; sample += 1) {
-                const x = Math.min(
-                  player1Reading.sampleWidth - 1,
-                  player1Reading.sampleStartOffset + sample * player1Reading.sampleSpacing,
-                );
-                const markerX =
-                  player1DisplayX + (x / player1Reading.sampleWidth) * framebarDisplayWidth;
-                context.fillStyle =
-                  player1Reading.rawStates[sample] === "idle"
-                    ? "#00ccff"
-                    : player1Reading.rawStates[sample] === "hitpause"
-                      ? "#ff66ff"
-                      : "#ff0066";
-                context.fillRect(
-                  markerX,
-                  player1DisplayY +
-                    (player1Reading.baseSampleY / player1Reading.sampleHeight) *
-                      framebarDisplayHeight,
-                  1,
-                  1,
-                );
-                context.fillStyle = player1Reading.yellowStates[sample] ? "#ffff00" : "#0088ff";
-                context.fillRect(
-                  markerX,
-                  player1DisplayY +
-                    (player1Reading.yellowSampleY / player1Reading.sampleHeight) *
-                      framebarDisplayHeight,
-                  1,
-                  1,
-                );
-              }
-              const player1MeterReady =
-                trainingMeterRef.current.state === "training" ||
-                (trainingMeterRef.current.state === "unknown" &&
-                  player1Reading.meterPresence.score >= 0.42);
+              const player1MeterReady = trainingMeterRef.current.state === "training";
               if (!player1MeterReady) {
                 player1SummaryRef.current = `meter inactive score=${player1Reading.meterPresence.score.toFixed(2)}`;
               } else {
+                for (let sample = 0; sample < player1Reading.rawStates.length; sample += 1) {
+                  const x = Math.min(
+                    player1Reading.sampleWidth - 1,
+                    player1Reading.sampleStartOffset + sample * player1Reading.sampleSpacing,
+                  );
+                  const markerX =
+                    player1DisplayX + (x / player1Reading.sampleWidth) * framebarDisplayWidth;
+                  context.fillStyle =
+                    player1Reading.rawStates[sample] === "idle"
+                      ? "#00ccff"
+                      : player1Reading.rawStates[sample] === "hitpause"
+                        ? "#ff66ff"
+                        : "#ff0066";
+                  context.fillRect(
+                    markerX,
+                    player1DisplayY +
+                      (player1Reading.baseSampleY / player1Reading.sampleHeight) *
+                        framebarDisplayHeight,
+                    1,
+                    1,
+                  );
+                  context.fillStyle = player1Reading.yellowStates[sample] ? "#ffff00" : "#0088ff";
+                  context.fillRect(
+                    markerX,
+                    player1DisplayY +
+                      (player1Reading.yellowSampleY / player1Reading.sampleHeight) *
+                        framebarDisplayHeight,
+                    1,
+                    1,
+                  );
+                }
                 const player1States = stabilizeFramebarStates(
                   player1Reading.rawStates,
                   stablePlayer1StatesRef.current,
@@ -2597,6 +2601,48 @@ export function OverlaySurface() {
                 trainingMeterScores,
                 trainingCalibration.fitted ?? undefined,
               );
+              if (trainingMeterRef.current.state !== lastTrainingMeterStateRef.current) {
+                lastTrainingMeterStateRef.current = trainingMeterRef.current.state;
+                // Do not carry transient observations or frame timelines across
+                // a training-mode boundary. Historical logs remain available,
+                // but live resolution starts cleanly when training resumes.
+                stableInputObservationRef.current = null;
+                latestInputObservationRef.current = null;
+                latestInputObservationAtRef.current = 0;
+                pendingInputSignatureRef.current = "";
+                pendingInputCountRef.current = 0;
+                stableResolvedInputRef.current = null;
+                pendingResolvedInputSignatureRef.current = "";
+                pendingResolvedInputCountRef.current = 0;
+                lastResolvedInputSignatureRef.current = "";
+                inputTimelineRef.current = [];
+                framebarStateRef.current = { player1: [], player2: [] };
+                framebarTimelineRef.current = [];
+                stableStatesRef.current = [];
+                candidateStatesRef.current = [];
+                candidateCountsRef.current = [];
+                stablePlayer1StatesRef.current = [];
+                candidatePlayer1StatesRef.current = [];
+                candidatePlayer1CountsRef.current = [];
+                lastGroupSignatureRef.current = "";
+                pendingGroupSignatureRef.current = "";
+                pendingGroupCountRef.current = 0;
+                lastPlayer1GroupSignatureRef.current = "";
+                pendingPlayer1GroupSignatureRef.current = "";
+                pendingPlayer1GroupCountRef.current = 0;
+                lastPlayer1FramebarSignatureRef.current = "";
+                lastPlayer1FramebarChangeAtRef.current = 0;
+                waitingForPlayer1IdleRef.current = true;
+                activeMoveEpisodeRef.current = null;
+                inputEventSummaryRef.current = "training mode required";
+                inputAlignmentSummaryRef.current = "unresolved";
+                moveResolutionSummaryRef.current = "training mode required";
+                moveStatusRef.current = "waiting for training mode";
+                localStorage.removeItem(overlayInputObservationKey);
+                localStorage.removeItem(overlayInputDebugImageKey);
+                localStorage.removeItem(overlayCellGroupsKey);
+                localStorage.removeItem(overlayPlayer1CellGroupsKey);
+              }
               trainingMeterSummaryRef.current = formatTrainingMeterStatus(
                 trainingMeterRef.current,
                 trainingMeterScores,
@@ -2608,10 +2654,7 @@ export function OverlaySurface() {
               ) {
                 appendTrainingMeterSample(calibrationMode, trainingMeterScores);
               }
-              const meterReady =
-                trainingMeterRef.current.state === "training" ||
-                (trainingMeterRef.current.state === "unknown" &&
-                  player2MeterPresence.score >= 0.42);
+              const meterReady = trainingMeterRef.current.state === "training";
               if (!meterReady) {
                 if (debugRef.current) {
                   debugRef.current.textContent = `Training meter inactive\n${trainingMeterSummaryRef.current}\ninput: ${inputSummaryRef.current}\ninput event: ${inputEventSummaryRef.current}\ninput alignment: ${inputAlignmentSummaryRef.current}\ncorners: ${cornerSummaryRef.current}\nresolved move: ${moveResolutionSummaryRef.current}\nmove framebar source: P1 (P2 reserved for defense)\nP1: ${player1SummaryRef.current}\nmove: ${moveStatusRef.current}`;
