@@ -51,6 +51,14 @@ import {
   type CornerRegionKey,
   type CornerTemplate,
 } from "./corner-detection";
+import {
+  createTrainingMeterTracker,
+  formatTrainingMeterStatus,
+  scoreTrainingMeterPresence,
+  updateTrainingMeterTracker,
+  type TrainingMeterScore,
+  type TrainingMeterTracker,
+} from "./training-meter";
 
 const overlayConfigKey = "avatar-overlay-config";
 const overlayOverrideKey = "avatar-overlay-allow-override";
@@ -532,6 +540,7 @@ type FramebarScan = {
   yellowSampleY: number;
   sampleStartOffset: number;
   sampleSpacing: number;
+  meterPresence: TrainingMeterScore;
 };
 
 function scanFramebar({
@@ -585,6 +594,7 @@ function scanFramebar({
   let yellowPixels = 0;
   let idlePixels = 0;
   let hitpausePixels = 0;
+  let mappedPixels = 0;
   const isYellow = (red: number, green: number, blue: number) =>
     red > 150 && green > 105 && blue < 120 && red > blue * 1.4;
   for (let sample = 0; sample < sampleCount; sample += 1) {
@@ -595,6 +605,7 @@ function scanFramebar({
     const yellow = isYellow(yellowColor.red, yellowColor.green, yellowColor.blue);
     rawStates.push(mappedColor?.name ?? "Unmapped");
     confidences.push(mappedColor?.confidence ?? 0);
+    if (mappedColor) mappedPixels += 1;
     yellowStates.push(yellow);
     if (mappedColor?.name === "idle") idlePixels += 1;
     if (mappedColor?.name === "hitpause") hitpausePixels += 1;
@@ -610,8 +621,18 @@ function scanFramebar({
     if (previous?.state === state) previous.length += 1;
     else groups.push({ state, start: index, length: 1 });
   });
+  const mappedScore = sampleCount === 0 ? 0 : mappedPixels / sampleCount;
+  const meterPresence = scoreTrainingMeterPresence({
+    config,
+    sampleWidth,
+    sampleHeight,
+    readPixel,
+    mappedScore,
+  });
   return {
-    gateActive: gateMatches >= requiredGateMatches,
+    // Keep the legacy gate fields for diagnostics, but make the active gate
+    // tolerant of translucent UI compositing and small background changes.
+    gateActive: meterPresence.score >= 0.42,
     gateMatches,
     gateCount,
     requiredGateMatches,
@@ -630,6 +651,7 @@ function scanFramebar({
     yellowSampleY,
     sampleStartOffset,
     sampleSpacing,
+    meterPresence,
   };
 }
 
@@ -1805,6 +1827,8 @@ export function OverlaySurface() {
   const moveResolutionSummaryRef = useRef("none yet");
   const player1SummaryRef = useRef("disabled");
   const cornerSummaryRef = useRef("disabled");
+  const trainingMeterRef = useRef<TrainingMeterTracker>(createTrainingMeterTracker());
+  const trainingMeterSummaryRef = useRef("unknown");
   const pendingInputSignatureRef = useRef("");
   const pendingInputCountRef = useRef(0);
   const stableInputObservationRef = useRef<InputDisplayObservation | null>(null);
@@ -1921,6 +1945,7 @@ export function OverlaySurface() {
           if (canvas.height !== height) canvas.height = height;
           const context = canvas.getContext("2d");
           if (context) {
+            let player1MeterPresence: TrainingMeterScore | null = null;
             if (tick % 60 === 0 && !captureCheckPending) {
               captureCheckPending = true;
               void window.electronAPI?.overlay
@@ -2244,6 +2269,7 @@ export function OverlaySurface() {
                 readPixel: player1ReadPixel,
                 getMappedColor: player1GetMappedColor,
               });
+              player1MeterPresence = player1Reading.meterPresence;
               const player1TargetX = width * (config.player1SourceX / 100);
               const player1TargetY = height * (config.player1SourceY / 100);
               for (let sample = 0; sample < player1Reading.rawStates.length; sample += 1) {
@@ -2274,7 +2300,10 @@ export function OverlaySurface() {
                   1,
                 );
               }
-              if (!player1Reading.gateActive) {
+              const player1MeterReady =
+                trainingMeterRef.current.state === "training" ||
+                (trainingMeterRef.current.state === "unknown" && player1Reading.gateActive);
+              if (!player1MeterReady) {
                 player1SummaryRef.current = `gate inactive ${player1Reading.gateMatches}/${player1Reading.gateCount}`;
               } else {
                 const player1States = stabilizeFramebarStates(
@@ -2522,7 +2551,25 @@ export function OverlaySurface() {
                 gateCount,
                 Math.max(1, Math.round(config.gateRequiredMatches)),
               );
-              const gateActive = gateMatches >= requiredGateMatches;
+              const player2MeterPresence = scoreTrainingMeterPresence({
+                config,
+                sampleWidth,
+                sampleHeight,
+                readPixel,
+              });
+              const trainingMeterScores = {
+                player1: player1MeterPresence,
+                player2: player2MeterPresence,
+              };
+              updateTrainingMeterTracker(trainingMeterRef.current, trainingMeterScores);
+              trainingMeterSummaryRef.current = formatTrainingMeterStatus(
+                trainingMeterRef.current,
+                trainingMeterScores,
+              );
+              const gateActive =
+                trainingMeterRef.current.state === "training" ||
+                (trainingMeterRef.current.state === "unknown" &&
+                  player2MeterPresence.score >= 0.42);
               if (tick % 10 === 0) {
                 localStorage.setItem(overlayGateSamplesKey, JSON.stringify(currentGateSamples));
               }
@@ -2543,7 +2590,7 @@ export function OverlaySurface() {
               }
               if (!gateActive) {
                 if (debugRef.current) {
-                  debugRef.current.textContent = `Framebar gate inactive\nmatched gate samples: ${gateMatches}/${gateCount}\nrequired matches: ${requiredGateMatches}\ngate RGB: ${config.gateRed},${config.gateGreen},${config.gateBlue}\ninput: ${inputSummaryRef.current}\ninput event: ${inputEventSummaryRef.current}\ninput alignment: ${inputAlignmentSummaryRef.current}\ncorners: ${cornerSummaryRef.current}\nresolved move: ${moveResolutionSummaryRef.current}\nmove framebar source: P1 (P2 reserved for defense)\nP1: ${player1SummaryRef.current}\nmove: ${moveStatusRef.current}`;
+                  debugRef.current.textContent = `Framebar gate inactive\n${trainingMeterSummaryRef.current}\nmatched gate samples: ${gateMatches}/${gateCount}\nrequired matches: ${requiredGateMatches}\ngate RGB: ${config.gateRed},${config.gateGreen},${config.gateBlue}\ninput: ${inputSummaryRef.current}\ninput event: ${inputEventSummaryRef.current}\ninput alignment: ${inputAlignmentSummaryRef.current}\ncorners: ${cornerSummaryRef.current}\nresolved move: ${moveResolutionSummaryRef.current}\nmove framebar source: P1 (P2 reserved for defense)\nP1: ${player1SummaryRef.current}\nmove: ${moveStatusRef.current}`;
                 }
                 frame = requestAnimationFrame(draw);
                 return;
@@ -2696,6 +2743,7 @@ export function OverlaySurface() {
                 }
                 debugRef.current.textContent = [
                   "P2 frame-bar debug",
+                  trainingMeterSummaryRef.current,
                   `scan: raw game-window source x=${Math.round(sourceX)}, y=${Math.round(sourceY)}, w=${Math.round(sourceWidth)}, h=${Math.round(sourceHeight)}`,
                   `mirror output: x=${Math.round(targetX)}, y=${Math.round(targetY)}, w=${Math.round(targetWidth)}, h=${Math.round(targetHeight)}`,
                   `source: ${sampleWidth} x ${sampleHeight}px`,
