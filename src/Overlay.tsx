@@ -32,7 +32,6 @@ import {
   formatInputDisplayObservation,
   formatInputDisplayDebug,
   resolveRecentInput,
-  type InputMarker,
   type InputDisplayObservation,
   type ResolvedInput,
 } from "./input-display";
@@ -66,8 +65,6 @@ import {
 
 const overlayConfigKey = "avatar-overlay-config";
 const overlayOverrideKey = "avatar-overlay-allow-override";
-const overlayInputDebugKey = "avatar-overlay-input-debug";
-const overlayInputDebugImageKey = "avatar-overlay-input-debug-image";
 const overlayDetectCornersKey = "avatar-overlay-detect-corners";
 type OverlayConfig = {
   sourceX: number;
@@ -686,85 +683,6 @@ function truncateDebugText(value: string, maxLength = 240) {
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
-function sameInputMarker(left: InputMarker, right: InputMarker) {
-  return (
-    left.color === right.color &&
-    Math.abs(left.x - right.x) <= 1 &&
-    Math.abs(left.y - right.y) <= 1 &&
-    Math.abs(left.area - right.area) <= 2
-  );
-}
-
-function drawInputObservationDebug(
-  context: CanvasRenderingContext2D,
-  observation: InputDisplayObservation,
-  target: { x: number; y: number; width: number; height: number },
-  config: OverlayConfig,
-) {
-  const mapX = (x: number) => target.x + (x / observation.width) * target.width;
-  const mapY = (y: number) => target.y + (y / observation.height) * target.height;
-  context.save();
-  context.font = "11px monospace";
-  context.lineWidth = 1;
-  observation.rows.forEach((row, index) => {
-    const rowTop = mapY(row.top);
-    const rowBottom = mapY(row.bottom);
-    const rowHeight = Math.max(2, rowBottom - rowTop);
-    context.strokeStyle = "rgba(255, 255, 255, 0.65)";
-    context.strokeRect(target.x + 1, rowTop, target.width - 2, rowHeight);
-    context.fillStyle = "rgba(255, 255, 255, 0.9)";
-    context.fillText(`r${index}`, target.x + 3, rowTop + 11);
-
-    if (row.joystickCheck) {
-      const joystickX = mapX(row.joystickCheck.centerX);
-      const joystickY = mapY(row.joystickCheck.centerY);
-      context.strokeStyle = row.joystickCheck.detected ? "#00ff66" : "#ff6060";
-      context.beginPath();
-      context.arc(joystickX, joystickY, Math.max(5, target.width * 0.018), 0, Math.PI * 2);
-      context.stroke();
-      if (row.joystickCheck.markerX !== undefined && row.joystickCheck.markerY !== undefined) {
-        context.fillStyle = "#00ff66";
-        context.beginPath();
-        context.arc(
-          mapX(row.joystickCheck.markerX),
-          mapY(row.joystickCheck.markerY),
-          Math.max(2, target.width * 0.008),
-          0,
-          Math.PI * 2,
-        );
-        context.fill();
-      }
-    }
-
-    inputButtonSlotRatios(config).forEach((slot) => {
-      const check = row.buttonChecks?.find((candidate) => candidate.slot === slot.slot);
-      const centerX = mapX(observation.width * slot.ratio);
-      const centerY = mapY(row.top + slot.yRatio * (row.bottom - row.top));
-      const radius = Math.max(5, target.width * (config.inputButtonRegionRadius / 100));
-      context.strokeStyle = check?.detected ? "#00ff66" : "rgba(255, 100, 100, 0.75)";
-      context.beginPath();
-      context.arc(centerX, centerY, radius, 0, Math.PI * 2);
-      context.stroke();
-      context.fillStyle = context.strokeStyle;
-      context.fillText(slot.slot, centerX - 3, centerY + 4);
-    });
-
-    const numberX = mapX(observation.width * (config.inputNumberStartX / 100));
-    context.strokeStyle = "rgba(255, 176, 0, 0.9)";
-    context.strokeRect(
-      numberX,
-      rowTop,
-      target.width * ((config.inputNumberEndX - config.inputNumberStartX) / 100),
-      rowHeight,
-    );
-    if (row.numberReading) {
-      context.fillStyle = "#ffb000";
-      context.fillText(row.numberReading.text, numberX + 2, rowBottom - 2);
-    }
-  });
-  context.restore();
-}
-
 function isIdleFramebar(groups: FramebarGroup[]) {
   return groups.length === 1 && groups[0]?.state === "idle";
 }
@@ -870,14 +788,8 @@ export function VisualOverlay() {
   const [detectInput, setDetectInput] = useState(
     () => localStorage.getItem(overlayDetectInputKey) !== "false",
   );
-  const [showInputDebug, setShowInputDebug] = useState(
-    () => localStorage.getItem(overlayInputDebugKey) !== "false",
-  );
   const [detectCorners, setDetectCorners] = useState(
     () => localStorage.getItem(overlayDetectCornersKey) !== "false",
-  );
-  const [inputDebugImage, setInputDebugImage] = useState(
-    () => localStorage.getItem(overlayInputDebugImageKey) ?? "",
   );
   const [inputObservation, setInputObservation] = useState<InputDisplayObservation | null>(null);
   const [inputEventLog, setInputEventLog] = useState<InputEventRecord[]>([]);
@@ -950,7 +862,6 @@ export function VisualOverlay() {
         );
         setTrainingCalibration(readTrainingMeterCalibration());
         setInputObservation(JSON.parse(localStorage.getItem(overlayInputObservationKey) ?? "null"));
-        setInputDebugImage(localStorage.getItem(overlayInputDebugImageKey) ?? "");
         setInputEventLog(JSON.parse(localStorage.getItem(overlayInputEventLogKey) ?? "[]"));
         setMoveEpisodeLog(JSON.parse(localStorage.getItem(overlayMoveEpisodeLogKey) ?? "[]"));
         setCornerObservation(
@@ -987,10 +898,6 @@ export function VisualOverlay() {
   const changeInputDetection = (enabled: boolean) => {
     setDetectInput(enabled);
     localStorage.setItem(overlayDetectInputKey, String(enabled));
-  };
-  const changeInputDebug = (enabled: boolean) => {
-    setShowInputDebug(enabled);
-    localStorage.setItem(overlayInputDebugKey, String(enabled));
   };
   const changeCornerDetection = (enabled: boolean) => {
     setDetectCorners(enabled);
@@ -1123,16 +1030,6 @@ export function VisualOverlay() {
           />
         }
         label="Detect input display"
-      />
-      <FormControlLabel
-        control={
-          <Checkbox
-            checked={showInputDebug}
-            onChange={(event) => changeInputDebug(event.target.checked)}
-            disabled={!detectInput}
-          />
-        }
-        label="Visualize input blobs"
       />
       <FormControlLabel
         control={
@@ -1291,156 +1188,6 @@ export function VisualOverlay() {
               ))}
             </Stack>
           )}
-        </>
-      )}
-      {detectInput && showInputDebug && (
-        <>
-          <Typography variant="subtitle2" sx={{ mt: 2 }}>
-            Input blob preview
-          </Typography>
-          <Typography variant="caption" color="text.secondary" component="div">
-            This preview is rendered outside the capture overlay, so its annotations cannot feed
-            back into detection.
-          </Typography>
-          <Box
-            sx={{
-              position: "relative",
-              mt: 1,
-              width: 280,
-              height: 560,
-              maxWidth: "100%",
-              overflowY: "auto",
-              overflowX: "hidden",
-              backgroundColor: "#101010",
-              border: "1px solid rgba(0, 229, 255, 0.8)",
-            }}
-          >
-            {inputDebugImage && (
-              <Box
-                component="img"
-                src={inputDebugImage}
-                alt="Captured input display"
-                sx={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
-              />
-            )}
-            {inputObservation?.rows.map((row, index) => {
-              const top = `${(row.top / inputObservation.height) * 100}%`;
-              const height = `${Math.max(0.5, ((row.bottom - row.top) / inputObservation.height) * 100)}%`;
-              return (
-                <Box
-                  key={`input-debug-row-${index}`}
-                  sx={{
-                    position: "absolute",
-                    left: 0,
-                    right: 0,
-                    top,
-                    height,
-                    border: "1px solid rgba(255,255,255,.75)",
-                  }}
-                >
-                  <Box
-                    component="span"
-                    sx={{ position: "absolute", left: 2, top: 0, color: "white", fontSize: 10 }}
-                  >
-                    r{index}
-                  </Box>
-                  {row.markers.map((marker, markerIndex) => {
-                    const buttonCheck = row.buttonChecks?.find(
-                      (check) => check.marker && sameInputMarker(check.marker, marker),
-                    );
-                    if (buttonCheck) return null;
-                    const isJoystickMarker =
-                      row.joystickCheck?.detected &&
-                      row.joystickCheck.markerX !== undefined &&
-                      row.joystickCheck.markerY !== undefined &&
-                      Math.abs(row.joystickCheck.markerX - marker.x) <= 1 &&
-                      Math.abs(row.joystickCheck.markerY - marker.y) <= 1;
-                    const markerColor = isJoystickMarker ? "#00ff66" : "#aa66ff";
-                    const markerLabel = isJoystickMarker ? "J" : "N";
-                    return (
-                      <Box
-                        key={`input-debug-marker-${index}-${markerIndex}`}
-                        component="span"
-                        sx={{
-                          position: "absolute",
-                          left: `${(marker.x / inputObservation.width) * 100}%`,
-                          top: `${((marker.y - row.top) / Math.max(1, row.bottom - row.top)) * 100}%`,
-                          width: `${Math.max(1, (marker.width / inputObservation.width) * 100)}%`,
-                          height: `${Math.max(3, (marker.height / Math.max(1, row.bottom - row.top)) * 100)}%`,
-                          transform: "translate(-50%, -50%)",
-                          border: `2px solid ${markerColor}`,
-                          color: markerColor,
-                          fontSize: 9,
-                          lineHeight: 1,
-                          textAlign: "center",
-                        }}
-                      >
-                        {markerLabel}
-                      </Box>
-                    );
-                  })}
-                  {row.joystickCheck && (
-                    <Box
-                      component="span"
-                      sx={{
-                        position: "absolute",
-                        left: `${(row.joystickCheck.centerX / inputObservation.width) * 100}%`,
-                        top: `${((row.joystickCheck.centerY - row.top) / Math.max(1, row.bottom - row.top)) * 100}%`,
-                        width: "10%",
-                        aspectRatio: "1",
-                        transform: "translate(-50%, -50%)",
-                        border: `1px solid ${row.joystickCheck.detected ? "#00ff66" : "#ff6060"}`,
-                        borderRadius: "50%",
-                      }}
-                    />
-                  )}
-                  {row.buttonChecks?.map((check) => {
-                    const slot = inputButtonSlotRatios(config).find(
-                      (candidate) => candidate.slot === check.slot,
-                    );
-                    const slotRatio = slot?.ratio ?? 0;
-                    const slotYRatio = slot?.yRatio ?? 0;
-                    return (
-                      <Box
-                        key={`input-debug-slot-${index}-${check.slot}`}
-                        component="span"
-                        sx={{
-                          position: "absolute",
-                          left: `${slotRatio * 100}%`,
-                          top: `${slotYRatio * 100}%`,
-                          width: `${config.inputButtonRegionRadius * 2}%`,
-                          height: `${(config.inputButtonRegionRadius * 2 * inputObservation.width) / Math.max(1, row.bottom - row.top)}%`,
-                          transform: "translate(-50%, -50%)",
-                          border: `1px solid ${check.detected ? "#00ff66" : "rgba(255,100,100,.8)"}`,
-                          borderRadius: "50%",
-                          color: check.detected ? "#00ff66" : "rgba(255,100,100,.8)",
-                          fontSize: 9,
-                          textAlign: "center",
-                        }}
-                      >
-                        {check.slot}
-                      </Box>
-                    );
-                  })}
-                  <Box
-                    component="span"
-                    sx={{
-                      position: "absolute",
-                      left: `${config.inputNumberStartX}%`,
-                      top: 0,
-                      bottom: 0,
-                      width: `${config.inputNumberEndX - config.inputNumberStartX}%`,
-                      border: "1px solid #ffb000",
-                      color: "#ffb000",
-                      fontSize: 9,
-                    }}
-                  >
-                    {row.numberReading?.text ?? "?"}
-                  </Box>
-                </Box>
-              );
-            })}
-          </Box>
         </>
       )}
       {allowOverride && (
@@ -2112,16 +1859,6 @@ export function OverlaySurface() {
                   numberEndX: config.inputNumberEndX,
                 },
               );
-              if (localStorage.getItem(overlayInputDebugKey) !== "false" && tick % 30 === 0) {
-                try {
-                  localStorage.setItem(
-                    overlayInputDebugImageKey,
-                    inputAnalysisCanvas.toDataURL("image/jpeg", 0.65),
-                  );
-                } catch {
-                  // Debug snapshots are optional; detection should continue if storage is full.
-                }
-              }
               const inputSignature = formatInputDisplayObservation(inputObservation);
               if (inputSignature === pendingInputSignatureRef.current) {
                 pendingInputCountRef.current += 1;
@@ -2244,39 +1981,6 @@ export function OverlaySurface() {
               cornerSummaryRef.current = "disabled";
             }
 
-            if (
-              localStorage.getItem(overlayDetectInputKey) !== "false" &&
-              trainingMeterRef.current.state === "training"
-            ) {
-              context.strokeStyle = "rgba(0, 255, 255, 0.9)";
-              context.lineWidth = 2;
-              context.strokeRect(
-                width * (config.inputSourceX / 100),
-                height * (config.inputSourceY / 100),
-                width * (config.inputSourceWidth / 100),
-                height * (config.inputSourceHeight / 100),
-              );
-            }
-            // The preview is drawn only after detection has read the raw
-            // game-window frame.  It is therefore output-only and cannot
-            // feed any of the input or framebar detectors back into itself.
-            if (
-              localStorage.getItem(overlayInputDebugKey) !== "false" &&
-              captureSourceMode === "game-window" &&
-              stableInputObservationRef.current
-            ) {
-              drawInputObservationDebug(
-                context,
-                stableInputObservationRef.current,
-                {
-                  x: width * (config.inputSourceX / 100),
-                  y: height * (config.inputSourceY / 100),
-                  width: width * (config.inputSourceWidth / 100),
-                  height: height * (config.inputSourceHeight / 100),
-                },
-                config,
-              );
-            }
             if (
               player1AnalysisContext &&
               localStorage.getItem(overlayDetectFramebarKey) === "true"
@@ -2639,7 +2343,6 @@ export function OverlaySurface() {
                 moveResolutionSummaryRef.current = "training mode required";
                 moveStatusRef.current = "waiting for training mode";
                 localStorage.removeItem(overlayInputObservationKey);
-                localStorage.removeItem(overlayInputDebugImageKey);
                 localStorage.removeItem(overlayCellGroupsKey);
                 localStorage.removeItem(overlayPlayer1CellGroupsKey);
               }
