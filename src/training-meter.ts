@@ -29,6 +29,29 @@ export type TrainingMeterTracker = {
   negativeStreak: number;
 };
 
+export type TrainingMeterThresholds = {
+  enterThreshold: number;
+  exitThreshold: number;
+  oneSidedEnterThreshold: number;
+};
+
+export type TrainingMeterCalibrationSample = {
+  timestamp: string;
+  score: number;
+  player1: TrainingMeterScore | null;
+  player2: TrainingMeterScore | null;
+};
+
+export type TrainingMeterCalibration = {
+  positive: TrainingMeterCalibrationSample[];
+  negative: TrainingMeterCalibrationSample[];
+  fitted: (TrainingMeterThresholds & { accuracy: number; trainedAt: string }) | null;
+};
+
+export const trainingMeterCalibrationKey = "avatar-overlay-training-meter-calibration";
+export const trainingMeterCalibrationModeKey = "avatar-overlay-training-meter-calibration-mode";
+export type TrainingMeterCalibrationMode = "positive" | "negative" | "idle";
+
 function clamp(value: number, min = 0, max = 1) {
   return Math.max(min, Math.min(max, value));
 }
@@ -156,9 +179,105 @@ export function createTrainingMeterTracker(): TrainingMeterTracker {
   return { state: "unknown", score: 0, positiveStreak: 0, negativeStreak: 0 };
 }
 
+export function readTrainingMeterCalibration(): TrainingMeterCalibration {
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(trainingMeterCalibrationKey) ?? "null",
+    ) as Partial<TrainingMeterCalibration> | null;
+    return {
+      positive: Array.isArray(parsed?.positive) ? parsed.positive : [],
+      negative: Array.isArray(parsed?.negative) ? parsed.negative : [],
+      fitted: parsed?.fitted ?? null,
+    };
+  } catch {
+    return { positive: [], negative: [], fitted: null };
+  }
+}
+
+export function writeTrainingMeterCalibration(calibration: TrainingMeterCalibration) {
+  localStorage.setItem(
+    trainingMeterCalibrationKey,
+    JSON.stringify({
+      ...calibration,
+      positive: calibration.positive.slice(-300),
+      negative: calibration.negative.slice(-300),
+    }),
+  );
+}
+
+function scoreFromSides(scores: {
+  player1: TrainingMeterScore | null;
+  player2: TrainingMeterScore | null;
+}) {
+  const available = [scores.player1, scores.player2].filter(
+    (score): score is TrainingMeterScore => score !== null,
+  );
+  if (available.length === 0) return 0;
+  const average = available.reduce((total, score) => total + score.score, 0) / available.length;
+  return scores.player1 && scores.player2 ? average : average * 0.85;
+}
+
+export function appendTrainingMeterSample(
+  mode: Exclude<TrainingMeterCalibrationMode, "idle">,
+  scores: { player1: TrainingMeterScore | null; player2: TrainingMeterScore | null },
+) {
+  const calibration = readTrainingMeterCalibration();
+  const sample: TrainingMeterCalibrationSample = {
+    timestamp: new Date().toISOString(),
+    score: scoreFromSides(scores),
+    player1: scores.player1,
+    player2: scores.player2,
+  };
+  calibration[mode].push(sample);
+  writeTrainingMeterCalibration(calibration);
+}
+
+function percentile(values: number[], fraction: number) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.round((sorted.length - 1) * fraction)),
+  );
+  return sorted[index] ?? 0;
+}
+
+export function fitTrainingMeterCalibration(calibration: TrainingMeterCalibration) {
+  const positive = calibration.positive.map((sample) => sample.score);
+  const negative = calibration.negative.map((sample) => sample.score);
+  if (positive.length < 8 || negative.length < 8) return null;
+  const candidates = [...new Set([...positive, ...negative])].sort((left, right) => left - right);
+  let bestThreshold = 0.5;
+  let bestAccuracy = -1;
+  candidates.forEach((threshold) => {
+    const correct =
+      positive.filter((score) => score >= threshold).length +
+      negative.filter((score) => score < threshold).length;
+    const accuracy = correct / (positive.length + negative.length);
+    if (accuracy > bestAccuracy) {
+      bestAccuracy = accuracy;
+      bestThreshold = threshold;
+    }
+  });
+  const positiveFloor = percentile(positive, 0.1);
+  const negativeCeiling = percentile(negative, 0.9);
+  const enterThreshold =
+    negativeCeiling < positiveFloor ? (negativeCeiling + positiveFloor) / 2 : bestThreshold;
+  const fitted = {
+    enterThreshold,
+    exitThreshold: Math.max(0, enterThreshold - 0.08),
+    oneSidedEnterThreshold: Math.min(1, enterThreshold + 0.18),
+    accuracy: bestAccuracy,
+    trainedAt: new Date().toISOString(),
+  };
+  calibration.fitted = fitted;
+  return fitted;
+}
+
 export function updateTrainingMeterTracker(
   tracker: TrainingMeterTracker,
   scores: { player1: TrainingMeterScore | null; player2: TrainingMeterScore | null },
+  thresholds: Partial<TrainingMeterThresholds> = {},
 ) {
   const available = [scores.player1, scores.player2].filter(
     (score): score is TrainingMeterScore => score !== null,
@@ -172,7 +291,12 @@ export function updateTrainingMeterTracker(
   // Requiring both bars when both are available prevents a single unrelated
   // dark strip from declaring training mode. The one-sided path is useful
   // during capture startup, but is deliberately discounted.
-  const positive = bothSides ? combinedScore >= 0.5 : combinedScore >= 0.68;
+  const enterThreshold = thresholds.enterThreshold ?? 0.5;
+  const exitThreshold = thresholds.exitThreshold ?? enterThreshold;
+  const oneSidedEnterThreshold = thresholds.oneSidedEnterThreshold ?? 0.68;
+  const positive = bothSides
+    ? combinedScore >= (tracker.state === "training" ? exitThreshold : enterThreshold)
+    : combinedScore >= oneSidedEnterThreshold;
   if (positive) {
     tracker.positiveStreak += 1;
     tracker.negativeStreak = 0;

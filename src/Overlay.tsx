@@ -52,10 +52,15 @@ import {
   type CornerTemplate,
 } from "./corner-detection";
 import {
+  appendTrainingMeterSample,
   createTrainingMeterTracker,
+  fitTrainingMeterCalibration,
   formatTrainingMeterStatus,
+  readTrainingMeterCalibration,
   scoreTrainingMeterPresence,
+  trainingMeterCalibrationModeKey,
   updateTrainingMeterTracker,
+  writeTrainingMeterCalibration,
   type TrainingMeterScore,
   type TrainingMeterTracker,
 } from "./training-meter";
@@ -946,6 +951,13 @@ export function VisualOverlay() {
   const [gateSamples, setGateSamples] = useState<
     Array<{ red: number; green: number; blue: number }>
   >([]);
+  const [trainingCalibration, setTrainingCalibration] = useState(readTrainingMeterCalibration);
+  const [trainingCalibrationMode, setTrainingCalibrationMode] = useState<
+    "positive" | "negative" | "idle"
+  >(() => {
+    const mode = localStorage.getItem(trainingMeterCalibrationModeKey);
+    return mode === "positive" || mode === "negative" ? mode : "idle";
+  });
   const [definitions, setDefinitions] = useState<Record<string, string>>({});
   const showOverlay = async () => {
     await window.electronAPI?.overlay.show();
@@ -974,6 +986,7 @@ export function VisualOverlay() {
           JSON.parse(localStorage.getItem(overlayPlayer1CellGroupLogKey) ?? "[]"),
         );
         setGateSamples(JSON.parse(localStorage.getItem(overlayGateSamplesKey) ?? "[]"));
+        setTrainingCalibration(readTrainingMeterCalibration());
         setInputObservation(JSON.parse(localStorage.getItem(overlayInputObservationKey) ?? "null"));
         setInputDebugImage(localStorage.getItem(overlayInputDebugImageKey) ?? "");
         setInputEventLog(JSON.parse(localStorage.getItem(overlayInputEventLogKey) ?? "[]"));
@@ -1061,6 +1074,22 @@ export function VisualOverlay() {
     const next = { ...config, gateRed: red, gateGreen: green, gateBlue: blue };
     setConfig(next);
     localStorage.setItem(overlayConfigKey, JSON.stringify(next));
+  };
+  const changeTrainingCalibrationMode = (mode: "positive" | "negative" | "idle") => {
+    localStorage.setItem(trainingMeterCalibrationModeKey, mode);
+    setTrainingCalibrationMode(mode);
+  };
+  const fitTrainingCalibration = () => {
+    const next = readTrainingMeterCalibration();
+    if (!fitTrainingMeterCalibration(next)) return;
+    writeTrainingMeterCalibration(next);
+    setTrainingCalibration(next);
+  };
+  const clearTrainingCalibration = () => {
+    const next = { positive: [], negative: [], fitted: null };
+    writeTrainingMeterCalibration(next);
+    setTrainingCalibration(next);
+    localStorage.setItem(trainingMeterCalibrationModeKey, "idle");
   };
   const addColorMapping = (color: (typeof unmappedColors)[number]) => {
     const name = definitions[`${color.red},${color.green},${color.blue}`]?.trim();
@@ -1543,6 +1572,65 @@ export function VisualOverlay() {
             Reset overlay geometry
           </Button>
         </>
+      )}
+      {detectFramebar && (
+        <Paper variant="outlined" sx={{ mt: 2, p: 1.5 }}>
+          <Typography variant="subtitle2">Training meter calibration</Typography>
+          <Typography variant="caption" color="text.secondary" component="div">
+            Show the overlay before capturing. Capture several seconds while the frame meter is
+            visible, then several seconds while it is absent. The detector learns thresholds from
+            the raw game-window capture.
+          </Typography>
+          <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
+            <Button
+              size="small"
+              variant={trainingCalibrationMode === "positive" ? "contained" : "outlined"}
+              onClick={() => changeTrainingCalibrationMode("positive")}
+              disabled={!visible}
+            >
+              Capture training mode
+            </Button>
+            <Button
+              size="small"
+              variant={trainingCalibrationMode === "negative" ? "contained" : "outlined"}
+              onClick={() => changeTrainingCalibrationMode("negative")}
+              disabled={!visible}
+            >
+              Capture non-training
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => changeTrainingCalibrationMode("idle")}
+              disabled={trainingCalibrationMode === "idle"}
+            >
+              Stop capture
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={fitTrainingCalibration}
+              disabled={
+                trainingCalibration.positive.length < 8 || trainingCalibration.negative.length < 8
+              }
+            >
+              Fit detector
+            </Button>
+            <Button size="small" color="warning" onClick={clearTrainingCalibration}>
+              Clear samples
+            </Button>
+          </Stack>
+          <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
+            {trainingCalibrationMode === "idle"
+              ? "Capture stopped."
+              : `Capturing ${trainingCalibrationMode === "positive" ? "training-mode" : "non-training"} samples.`}{" "}
+            Positive: {trainingCalibration.positive.length}; negative:{" "}
+            {trainingCalibration.negative.length}
+            {trainingCalibration.fitted
+              ? `; fitted accuracy ${(trainingCalibration.fitted.accuracy * 100).toFixed(1)}%`
+              : "; detector not fitted"}
+          </Typography>
+        </Paper>
       )}
       <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center" }}>
         <Typography variant="subtitle2">Unmapped colors</Typography>
@@ -2561,11 +2649,23 @@ export function OverlaySurface() {
                 player1: player1MeterPresence,
                 player2: player2MeterPresence,
               };
-              updateTrainingMeterTracker(trainingMeterRef.current, trainingMeterScores);
+              const trainingCalibration = readTrainingMeterCalibration();
+              updateTrainingMeterTracker(
+                trainingMeterRef.current,
+                trainingMeterScores,
+                trainingCalibration.fitted ?? undefined,
+              );
               trainingMeterSummaryRef.current = formatTrainingMeterStatus(
                 trainingMeterRef.current,
                 trainingMeterScores,
               );
+              const calibrationMode = localStorage.getItem(trainingMeterCalibrationModeKey);
+              if (
+                tick % 6 === 0 &&
+                (calibrationMode === "positive" || calibrationMode === "negative")
+              ) {
+                appendTrainingMeterSample(calibrationMode, trainingMeterScores);
+              }
               const gateActive =
                 trainingMeterRef.current.state === "training" ||
                 (trainingMeterRef.current.state === "unknown" &&
