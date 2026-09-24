@@ -82,7 +82,6 @@ export const overlayRuntimeMapKey = "avatar-overlay-runtime-color-map";
 export const overlayUnmappedKey = "avatar-overlay-unmapped-colors";
 export const overlayPlayer1UnmappedKey = "avatar-overlay-player1-unmapped-colors";
 export const overlayPlayer2UnmappedKey = "avatar-overlay-player2-unmapped-colors";
-export const overlayDetectFramebarKey = "avatar-overlay-detect-framebar";
 export const overlayCellGroupsKey = "avatar-overlay-cell-groups";
 export const overlayCellGroupLogKey = "avatar-overlay-cell-group-log";
 export const overlayPlayer1CellGroupsKey = "avatar-overlay-player1-cell-groups";

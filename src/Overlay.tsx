@@ -20,7 +20,6 @@ import {
   overlayCellGroupLogKey,
   overlayPlayer1CellGroupsKey,
   overlayPlayer1CellGroupLogKey,
-  overlayDetectFramebarKey,
   overlayDetectInputKey,
   overlayInputObservationKey,
   overlayInputEventLogKey,
@@ -34,8 +33,12 @@ import {
   detectInputDisplay,
   formatInputDisplayObservation,
   formatInputDisplayDebug,
+  readDigitTemplates,
   resolveRecentInput,
+  writeDigitTemplates,
   type InputDisplayObservation,
+  type DigitTemplate,
+  type NumberGlyphSample,
   type ResolvedInput,
 } from "./input-display";
 import {
@@ -69,6 +72,7 @@ import {
 const overlayConfigKey = "avatar-overlay-config";
 const overlayOverrideKey = "avatar-overlay-allow-override";
 const overlayDetectCornersKey = "avatar-overlay-detect-corners";
+const overlayTextDebugKey = "avatar-overlay-show-text-debug";
 type OverlayConfig = {
   sourceX: number;
   sourceY: number;
@@ -110,6 +114,11 @@ type OverlayConfig = {
   inputButtonRegionRadius: number;
   inputNumberStartX: number;
   inputNumberEndX: number;
+  inputNumberDigit1X: number;
+  inputNumberDigitWidth: number;
+  inputNumberDigitGap: number;
+  inputNumberDigitTop: number;
+  inputNumberDigitHeight: number;
   player1SourceX: number;
   player1SourceY: number;
   p1CharacterX: number;
@@ -171,6 +180,11 @@ const defaultOverlayConfig: OverlayConfig = {
   inputButtonRegionRadius: 6.5,
   inputNumberStartX: 68,
   inputNumberEndX: 98,
+  inputNumberDigit1X: 70,
+  inputNumberDigitWidth: 8,
+  inputNumberDigitGap: 1,
+  inputNumberDigitTop: 10,
+  inputNumberDigitHeight: 80,
   player1SourceX: 6.9,
   player1SourceY: 91,
   p1CharacterX: defaultCornerRegions.p1Character.x,
@@ -738,8 +752,11 @@ const inputConfigGroups: Array<{
   {
     title: "Number reading",
     fields: [
-      { key: "inputNumberStartX", label: "Number start %" },
-      { key: "inputNumberEndX", label: "Number end %" },
+      { key: "inputNumberDigit1X", label: "Digit 1 X %" },
+      { key: "inputNumberDigitWidth", label: "Digit width %" },
+      { key: "inputNumberDigitGap", label: "Digit gap %" },
+      { key: "inputNumberDigitTop", label: "Digit top %" },
+      { key: "inputNumberDigitHeight", label: "Digit height %" },
     ],
   },
 ];
@@ -784,11 +801,13 @@ function StoredAccordion({
   id,
   title,
   defaultExpanded = false,
+  disabled = false,
   children,
 }: {
   id: string;
   title: string;
   defaultExpanded?: boolean;
+  disabled?: boolean;
   children: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(() => {
@@ -802,7 +821,8 @@ function StoredAccordion({
   return (
     <Accordion
       disableGutters
-      expanded={expanded}
+      disabled={disabled}
+      expanded={disabled ? false : expanded}
       onChange={changeExpanded}
       sx={{ mt: 1, "&:before": { display: "none" } }}
     >
@@ -818,11 +838,11 @@ export function VisualOverlay() {
   const [visible, setVisible] = useState(false);
   const [onlyWhenFocused, setOnlyWhenFocused] = useState(true);
   const [config, setConfig] = useState<OverlayConfig>(readOverlayConfig);
+  const [showTextDebug, setShowTextDebug] = useState(
+    () => localStorage.getItem(overlayTextDebugKey) !== "false",
+  );
   const [allowOverride, setAllowOverride] = useState(
     () => localStorage.getItem(overlayOverrideKey) === "true",
-  );
-  const [detectFramebar, setDetectFramebar] = useState(
-    () => localStorage.getItem(overlayDetectFramebarKey) !== "false",
   );
   const [detectInput, setDetectInput] = useState(
     () => localStorage.getItem(overlayDetectInputKey) !== "false",
@@ -831,6 +851,8 @@ export function VisualOverlay() {
     () => localStorage.getItem(overlayDetectCornersKey) !== "false",
   );
   const [inputObservation, setInputObservation] = useState<InputDisplayObservation | null>(null);
+  const [digitTemplates, setDigitTemplates] = useState<DigitTemplate[]>(readDigitTemplates);
+  const [digitCalibrationRow, setDigitCalibrationRow] = useState(0);
   const [inputEventLog, setInputEventLog] = useState<InputEventRecord[]>([]);
   const [moveEpisodeLog, setMoveEpisodeLog] = useState<MoveEpisode[]>([]);
   const [cornerObservation, setCornerObservation] = useState<CornerObservation | null>(() => {
@@ -901,6 +923,7 @@ export function VisualOverlay() {
         );
         setTrainingCalibration(readTrainingMeterCalibration());
         setInputObservation(JSON.parse(localStorage.getItem(overlayInputObservationKey) ?? "null"));
+        setDigitTemplates(readDigitTemplates());
         setInputEventLog(JSON.parse(localStorage.getItem(overlayInputEventLogKey) ?? "[]"));
         setMoveEpisodeLog(JSON.parse(localStorage.getItem(overlayMoveEpisodeLogKey) ?? "[]"));
         setCornerObservation(
@@ -930,13 +953,35 @@ export function VisualOverlay() {
     setAllowOverride(enabled);
     localStorage.setItem(overlayOverrideKey, String(enabled));
   };
-  const changeFramebarDetection = (enabled: boolean) => {
-    setDetectFramebar(enabled);
-    localStorage.setItem(overlayDetectFramebarKey, String(enabled));
+  const changeTextDebug = (enabled: boolean) => {
+    setShowTextDebug(enabled);
+    localStorage.setItem(overlayTextDebugKey, String(enabled));
   };
   const changeInputDetection = (enabled: boolean) => {
     setDetectInput(enabled);
     localStorage.setItem(overlayDetectInputKey, String(enabled));
+  };
+  const saveDigitTemplate = (sample: NumberGlyphSample, digit: string) => {
+    const next = [
+      ...digitTemplates,
+      {
+        id: `digit-${digit}-${Date.now()}`,
+        digit,
+        mask: sample.mask,
+        capturedAt: new Date().toISOString(),
+      },
+    ];
+    writeDigitTemplates(next);
+    setDigitTemplates(next);
+  };
+  const removeDigitTemplate = (id: string) => {
+    const next = digitTemplates.filter((template) => template.id !== id);
+    writeDigitTemplates(next);
+    setDigitTemplates(next);
+  };
+  const clearDigitTemplates = () => {
+    writeDigitTemplates([]);
+    setDigitTemplates([]);
   };
   const changeCornerDetection = (enabled: boolean) => {
     setDetectCorners(enabled);
@@ -1012,6 +1057,12 @@ export function VisualOverlay() {
   const cornerMatches = cornerObservation
     ? findCornerMatches(cornerObservation, cornerTemplates)
     : null;
+  const digitCalibrationRowCount = Math.max(
+    1,
+    inputObservation?.rows.length ?? Math.round(config.inputSegmentCount),
+  );
+  const digitCalibrationSamples =
+    inputObservation?.rows[digitCalibrationRow]?.numberReading?.glyphs ?? [];
   return (
     <Paper variant="outlined" sx={{ p: 3, textAlign: "left" }}>
       <Typography variant="h6">Visual overlay</Typography>
@@ -1019,6 +1070,15 @@ export function VisualOverlay() {
         Basic always-on-top overlay test window. Game capture and visual analysis will be added
         next.
       </Typography>
+      <FormControlLabel
+        control={
+          <Checkbox
+            checked={allowOverride}
+            onChange={(event) => changeOverride(event.target.checked)}
+          />
+        }
+        label="Allow configuration overrides"
+      />
       <StoredAccordion id="overlay-controls" title="Overlay controls" defaultExpanded>
         <Stack direction="row" spacing={1}>
           <Button variant="contained" onClick={showOverlay} disabled={visible}>
@@ -1037,21 +1097,26 @@ export function VisualOverlay() {
           }
           label="Only show when game is focused"
         />
+        <FormControlLabel
+          control={
+            <Checkbox
+              checked={showTextDebug}
+              onChange={(event) => changeTextDebug(event.target.checked)}
+            />
+          }
+          label="Show text debug overlay"
+        />
       </StoredAccordion>
-      <StoredAccordion id="mirror-settings" title="P2 mirror settings" defaultExpanded>
+      <StoredAccordion
+        id="mirror-settings"
+        title="P2 mirror settings"
+        defaultExpanded
+        disabled={!allowOverride}
+      >
         <Typography variant="caption" color="text.secondary" component="div">
           X/Y are measured from the top-left. Width/height are percentages. Changes are saved
           automatically.
         </Typography>
-        <FormControlLabel
-          control={
-            <Checkbox
-              checked={allowOverride}
-              onChange={(event) => changeOverride(event.target.checked)}
-            />
-          }
-          label="Allow configuration overrides"
-        />
         {allowOverride && (
           <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
             {configFields.map(({ key, label }) => (
@@ -1113,6 +1178,194 @@ export function VisualOverlay() {
             </Stack>
           </>
         )}
+        <StoredAccordion id="input-diagnostics" title="Input detection diagnostics" defaultExpanded>
+          <Typography variant="subtitle2">Input display resolver</Typography>
+          <Typography variant="caption" color="text.secondary" component="div">
+            {inputObservation
+              ? `${inputObservation.rows.length} segments detected: ${formatInputDisplayDebug(inputObservation)}`
+              : "No input display snapshot detected yet."}
+          </Typography>
+          <Stack direction="row" spacing={1} sx={{ mt: 1, alignItems: "center" }}>
+            <Button
+              size="small"
+              color="warning"
+              onClick={() => {
+                localStorage.removeItem(overlayInputEventLogKey);
+                setInputEventLog([]);
+              }}
+              disabled={inputEventLog.length === 0}
+            >
+              Clear input events
+            </Button>
+          </Stack>
+          {inputEventLog.length > 0 ? (
+            <Stack spacing={0.5} sx={{ mt: 1, maxHeight: 180, overflowY: "auto" }}>
+              {inputEventLog
+                .slice(-20)
+                .reverse()
+                .map((entry, index) => (
+                  <Typography key={`${entry.timestamp}-${index}`} variant="caption" component="div">
+                    {new Date(entry.timestamp).toLocaleTimeString()} — {entry.signature}
+                    {entry.resolvedInput ? ` => ${entry.resolvedInput.notation}` : ""}
+                    {entry.framebar ? ` (${formatFramebarResolution(entry.framebar)})` : ""}
+                  </Typography>
+                ))}
+            </Stack>
+          ) : (
+            <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
+              No input events resolved yet.
+            </Typography>
+          )}
+        </StoredAccordion>
+        <StoredAccordion
+          id="digit-calibration"
+          title="Digit calibration"
+          defaultExpanded
+          disabled={!allowOverride}
+        >
+          <Typography variant="caption" color="text.secondary" component="div">
+            Show a visible input-history row, then label the detected glyph samples below. Capture
+            several variants of each digit at the current game scale; the reader will use all saved
+            variants together.
+          </Typography>
+          <Typography variant="subtitle2" sx={{ mt: 1 }}>
+            Segment to calibrate
+          </Typography>
+          <Stack direction="row" spacing={0.5} sx={{ mt: 0.5, flexWrap: "wrap" }}>
+            {Array.from({ length: digitCalibrationRowCount }, (_, rowIndex) => (
+              <Button
+                key={rowIndex}
+                size="small"
+                variant={digitCalibrationRow === rowIndex ? "contained" : "outlined"}
+                onClick={() => setDigitCalibrationRow(rowIndex)}
+              >
+                r{rowIndex}
+              </Button>
+            ))}
+          </Stack>
+          <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 0.5 }}>
+            r0 is the newest row; higher numbers are older rows.
+          </Typography>
+          <Typography variant="subtitle2" sx={{ mt: 1 }}>
+            Glyphs from r{digitCalibrationRow}
+          </Typography>
+          {digitCalibrationSamples.length === 0 ? (
+            <Typography variant="caption" color="text.secondary" component="div">
+              No glyph samples detected in this segment. Choose another row or adjust the digit
+              boxes.
+            </Typography>
+          ) : (
+            <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
+              {digitCalibrationSamples.map((sample, index) => (
+                <Box
+                  key={`${sample.x}-${index}`}
+                  sx={{
+                    p: 1,
+                    border: "1px solid",
+                    borderColor: "divider",
+                    borderRadius: 1,
+                    minWidth: 150,
+                  }}
+                >
+                  <Typography variant="caption" color="text.secondary" component="div">
+                    Glyph {index + 1}
+                  </Typography>
+                  <Box
+                    sx={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(5, 8px)",
+                      gap: "1px",
+                      my: 1,
+                    }}
+                  >
+                    {sample.mask.map((value, cellIndex) => (
+                      <Box
+                        key={cellIndex}
+                        sx={{
+                          width: 8,
+                          height: 8,
+                          backgroundColor: `rgba(255,255,255,${Math.max(0.08, Math.min(1, value))})`,
+                          border: "1px solid rgba(255,255,255,0.15)",
+                        }}
+                      />
+                    ))}
+                  </Box>
+                  <Stack direction="row" spacing={0.25} sx={{ flexWrap: "wrap" }}>
+                    {["blank", ...Array.from({ length: 10 }, (_, digit) => String(digit))].map(
+                      (digit) => (
+                        <Button
+                          key={digit}
+                          size="small"
+                          sx={{ minWidth: 24, px: 0.5 }}
+                          onClick={() => saveDigitTemplate(sample, digit)}
+                        >
+                          {digit === "blank" ? "Blank" : digit}
+                        </Button>
+                      ),
+                    )}
+                  </Stack>
+                </Box>
+              ))}
+            </Stack>
+          )}
+          <Stack direction="row" spacing={1} sx={{ mt: 1, alignItems: "center" }}>
+            <Typography variant="caption" color="text.secondary">
+              Saved samples: {digitTemplates.length}
+            </Typography>
+            <Button
+              size="small"
+              color="warning"
+              onClick={clearDigitTemplates}
+              disabled={digitTemplates.length === 0}
+            >
+              Clear digit samples
+            </Button>
+          </Stack>
+          {digitTemplates.length > 0 && (
+            <Stack spacing={0.5} sx={{ mt: 1, maxHeight: 160, overflowY: "auto" }}>
+              {digitTemplates
+                .slice()
+                .reverse()
+                .map((template) => (
+                  <Stack
+                    key={template.id}
+                    direction="row"
+                    spacing={1}
+                    sx={{ alignItems: "center" }}
+                  >
+                    <Typography variant="caption" sx={{ width: 55 }}>
+                      {template.digit === "blank" ? "Blank" : `Digit ${template.digit}`}
+                    </Typography>
+                    <Box
+                      sx={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(5, 4px)",
+                        gap: "1px",
+                      }}
+                    >
+                      {template.mask.map((value, index) => (
+                        <Box
+                          key={index}
+                          sx={{
+                            width: 4,
+                            height: 4,
+                            backgroundColor: `rgba(255,255,255,${Math.max(0.08, Math.min(1, value))})`,
+                          }}
+                        />
+                      ))}
+                    </Box>
+                    <Button
+                      size="small"
+                      color="error"
+                      onClick={() => removeDigitTemplate(template.id)}
+                    >
+                      Remove
+                    </Button>
+                  </Stack>
+                ))}
+            </Stack>
+          )}
+        </StoredAccordion>
       </StoredAccordion>
       <StoredAccordion id="corner-detection" title="Character/support detection" defaultExpanded>
         <FormControlLabel
@@ -1230,16 +1483,12 @@ export function VisualOverlay() {
           </>
         )}
       </StoredAccordion>
-      <StoredAccordion id="framebar-detection" title="Framebar detection" defaultExpanded>
-        <FormControlLabel
-          control={
-            <Checkbox
-              checked={detectFramebar}
-              onChange={(event) => changeFramebarDetection(event.target.checked)}
-            />
-          }
-          label="Detect framebar"
-        />
+      <StoredAccordion
+        id="framebar-detection"
+        title="Framebar settings"
+        defaultExpanded
+        disabled={!allowOverride}
+      >
         {allowOverride && (
           <>
             <Typography variant="subtitle2" sx={{ mt: 2 }}>
@@ -1336,68 +1585,67 @@ export function VisualOverlay() {
           </>
         )}
       </StoredAccordion>
-      {detectFramebar && (
-        <StoredAccordion
-          id="training-calibration"
-          title="Training meter calibration"
-          defaultExpanded
-        >
-          <Typography variant="caption" color="text.secondary" component="div">
-            Show the overlay before capturing. Capture several seconds while the frame meter is
-            visible, then several seconds while it is absent. The detector learns thresholds from
-            the raw game-window capture.
-          </Typography>
-          <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
-            <Button
-              size="small"
-              variant={trainingCalibrationMode === "positive" ? "contained" : "outlined"}
-              onClick={() => changeTrainingCalibrationMode("positive")}
-              disabled={!visible}
-            >
-              Capture training mode
-            </Button>
-            <Button
-              size="small"
-              variant={trainingCalibrationMode === "negative" ? "contained" : "outlined"}
-              onClick={() => changeTrainingCalibrationMode("negative")}
-              disabled={!visible}
-            >
-              Capture non-training
-            </Button>
-            <Button
-              size="small"
-              variant="outlined"
-              onClick={() => changeTrainingCalibrationMode("idle")}
-              disabled={trainingCalibrationMode === "idle"}
-            >
-              Stop capture
-            </Button>
-            <Button
-              size="small"
-              variant="outlined"
-              onClick={fitTrainingCalibration}
-              disabled={
-                trainingCalibration.positive.length < 8 || trainingCalibration.negative.length < 8
-              }
-            >
-              Fit detector
-            </Button>
-            <Button size="small" color="warning" onClick={clearTrainingCalibration}>
-              Clear samples
-            </Button>
-          </Stack>
-          <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
-            {trainingCalibrationMode === "idle"
-              ? "Capture stopped."
-              : `Capturing ${trainingCalibrationMode === "positive" ? "training-mode" : "non-training"} samples.`}{" "}
-            Positive: {trainingCalibration.positive.length}; negative:{" "}
-            {trainingCalibration.negative.length}
-            {trainingCalibration.fitted
-              ? `; fitted accuracy ${(trainingCalibration.fitted.accuracy * 100).toFixed(1)}%`
-              : "; detector not fitted"}
-          </Typography>
-        </StoredAccordion>
-      )}
+      <StoredAccordion
+        id="training-calibration"
+        title="Training meter calibration"
+        defaultExpanded
+        disabled={!allowOverride}
+      >
+        <Typography variant="caption" color="text.secondary" component="div">
+          Show the overlay before capturing. Capture several seconds while the frame meter is
+          visible, then several seconds while it is absent. The detector learns thresholds from the
+          raw game-window capture.
+        </Typography>
+        <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
+          <Button
+            size="small"
+            variant={trainingCalibrationMode === "positive" ? "contained" : "outlined"}
+            onClick={() => changeTrainingCalibrationMode("positive")}
+            disabled={!visible}
+          >
+            Capture training mode
+          </Button>
+          <Button
+            size="small"
+            variant={trainingCalibrationMode === "negative" ? "contained" : "outlined"}
+            onClick={() => changeTrainingCalibrationMode("negative")}
+            disabled={!visible}
+          >
+            Capture non-training
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => changeTrainingCalibrationMode("idle")}
+            disabled={trainingCalibrationMode === "idle"}
+          >
+            Stop capture
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={fitTrainingCalibration}
+            disabled={
+              trainingCalibration.positive.length < 8 || trainingCalibration.negative.length < 8
+            }
+          >
+            Fit detector
+          </Button>
+          <Button size="small" color="warning" onClick={clearTrainingCalibration}>
+            Clear samples
+          </Button>
+        </Stack>
+        <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
+          {trainingCalibrationMode === "idle"
+            ? "Capture stopped."
+            : `Capturing ${trainingCalibrationMode === "positive" ? "training-mode" : "non-training"} samples.`}{" "}
+          Positive: {trainingCalibration.positive.length}; negative:{" "}
+          {trainingCalibration.negative.length}
+          {trainingCalibration.fitted
+            ? `; fitted accuracy ${(trainingCalibration.fitted.accuracy * 100).toFixed(1)}%`
+            : "; detector not fitted"}
+        </Typography>
+      </StoredAccordion>
       <StoredAccordion id="diagnostics" title="Diagnostics and logs">
         <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
           <Typography variant="subtitle2">Unmapped colors</Typography>
@@ -1536,41 +1784,6 @@ export function VisualOverlay() {
                 <Typography key={`${entry.timestamp}-${index}`} variant="caption" component="div">
                   {new Date(entry.timestamp).toLocaleTimeString()} —{" "}
                   {entry.groups.map((group) => `${group.state} × ${group.length}`).join(" → ")}
-                </Typography>
-              ))}
-          </Stack>
-        )}
-        <Typography variant="subtitle2" sx={{ mt: 2 }}>
-          Input display resolver
-        </Typography>
-        <Typography variant="caption" color="text.secondary" component="div">
-          {inputObservation
-            ? `${inputObservation.rows.length} segments detected: ${formatInputDisplayDebug(inputObservation)}`
-            : "No input display snapshot detected yet."}
-        </Typography>
-        <Stack direction="row" spacing={1} sx={{ mt: 1, alignItems: "center" }}>
-          <Button
-            size="small"
-            color="warning"
-            onClick={() => {
-              localStorage.removeItem(overlayInputEventLogKey);
-              setInputEventLog([]);
-            }}
-            disabled={inputEventLog.length === 0}
-          >
-            Clear input events
-          </Button>
-        </Stack>
-        {inputEventLog.length > 0 && (
-          <Stack spacing={0.5} sx={{ mt: 1, maxHeight: 180, overflowY: "auto" }}>
-            {inputEventLog
-              .slice(-20)
-              .reverse()
-              .map((entry, index) => (
-                <Typography key={`${entry.timestamp}-${index}`} variant="caption" component="div">
-                  {new Date(entry.timestamp).toLocaleTimeString()} — {entry.signature}
-                  {entry.resolvedInput ? ` => ${entry.resolvedInput.notation}` : ""}
-                  {entry.framebar ? ` (${formatFramebarResolution(entry.framebar)})` : ""}
                 </Typography>
               ))}
           </Stack>
@@ -1792,6 +2005,10 @@ export function OverlaySurface() {
       const draw = () => {
         if (reconnecting || stopped) return;
         tick += 1;
+        if (debugRef.current) {
+          debugRef.current.style.display =
+            localStorage.getItem(overlayTextDebugKey) === "false" ? "none" : "block";
+        }
         // Keep the capture window synchronized with settings edited in the main window.
         if (tick % 10 === 0) configRef.current = readOverlayConfig();
         const canvas = canvasRef.current;
@@ -1846,6 +2063,222 @@ export function OverlaySurface() {
             const player1DisplayX = width * (config.player1SourceX / 100);
             const player1DisplayY = height * (config.player1SourceY / 100);
             context.clearRect(0, 0, width, height);
+            const drawInputDiagnostics = () => {
+              if (
+                localStorage.getItem(overlayDetectInputKey) === "false" ||
+                trainingMeterRef.current.state !== "training"
+              ) {
+                return;
+              }
+              const inputDisplayX = width * (config.inputSourceX / 100);
+              const inputDisplayY = height * (config.inputSourceY / 100);
+              const inputDisplayWidth = width * (config.inputSourceWidth / 100);
+              const inputDisplayHeight = height * (config.inputSourceHeight / 100);
+              const segmentCount = Math.max(1, Math.round(config.inputSegmentCount));
+              const segmentTop = inputDisplayHeight * (config.inputSegmentTop / 100);
+              const segmentHeight = Math.max(
+                1,
+                inputDisplayHeight * (config.inputSegmentHeight / 100),
+              );
+              const observation = latestInputObservationRef.current;
+              const buttonSlots = inputButtonSlotRatios(config);
+              const buttonColors: Record<string, string> = {
+                A: "#2f72ff",
+                B: "#ffd21f",
+                C: "#ff3b30",
+                S: "#22e6e6",
+              };
+              const markerColors: Record<string, string> = {
+                blue: "#2f72ff",
+                yellow: "#ffd21f",
+                red: "#ff3b30",
+                cyan: "#22e6e6",
+              };
+              const toDisplayX = (sourceX: number) =>
+                inputDisplayX +
+                (sourceX / Math.max(1, observation?.width ?? 100)) * inputDisplayWidth;
+              const toDisplayY = (sourceY: number) =>
+                inputDisplayY +
+                (sourceY / Math.max(1, observation?.height ?? 100)) * inputDisplayHeight;
+
+              context.save();
+              context.lineWidth = 1.5;
+              context.font = "11px monospace";
+              context.textBaseline = "middle";
+              context.strokeStyle = "rgba(0, 229, 255, 0.9)";
+              context.strokeRect(
+                inputDisplayX,
+                inputDisplayY,
+                inputDisplayWidth,
+                inputDisplayHeight,
+              );
+              context.fillStyle = "rgba(0, 0, 0, 0.7)";
+              context.fillRect(inputDisplayX, Math.max(0, inputDisplayY - 16), 190, 15);
+              context.fillStyle = "#22e6e6";
+              context.fillText(
+                "INPUT CAPTURE DEBUG (display only)",
+                inputDisplayX + 4,
+                Math.max(8, inputDisplayY - 8),
+              );
+
+              for (let visualRowIndex = 0; visualRowIndex < segmentCount; visualRowIndex += 1) {
+                const rowTop = inputDisplayY + segmentTop + visualRowIndex * segmentHeight;
+                const rowBottom = rowTop + segmentHeight;
+                const newestRowIndex = segmentCount - visualRowIndex - 1;
+                const row = observation?.rows[newestRowIndex];
+
+                context.strokeStyle = "rgba(255, 255, 255, 0.55)";
+                context.strokeRect(inputDisplayX, rowTop, inputDisplayWidth, segmentHeight);
+                context.fillStyle = "rgba(0, 0, 0, 0.65)";
+                context.fillRect(inputDisplayX + 2, rowTop + 2, 24, 13);
+                context.fillStyle = "white";
+                context.fillText(`r${newestRowIndex}`, inputDisplayX + 5, rowTop + 8);
+
+                const observedJoystick = row?.joystick;
+                const joystickCenterX = observedJoystick
+                  ? toDisplayX(observedJoystick.centerX)
+                  : inputDisplayX + inputDisplayWidth * (config.inputJoystickCenterX / 100);
+                const joystickCenterY = observedJoystick
+                  ? toDisplayY(observedJoystick.centerY)
+                  : rowTop + segmentHeight / 2;
+                const joystickRegionEndX =
+                  inputDisplayX + inputDisplayWidth * (config.inputJoystickRegionEndX / 100);
+                context.strokeStyle = "rgba(77, 142, 255, 0.8)";
+                context.setLineDash([4, 3]);
+                context.strokeRect(
+                  inputDisplayX,
+                  rowTop,
+                  joystickRegionEndX - inputDisplayX,
+                  segmentHeight,
+                );
+                context.setLineDash([]);
+                context.beginPath();
+                context.arc(
+                  joystickCenterX,
+                  joystickCenterY,
+                  observedJoystick
+                    ? Math.max(
+                        6,
+                        (observedJoystick.width / Math.max(1, observation?.width ?? 100)) *
+                          inputDisplayWidth *
+                          0.5,
+                      )
+                    : Math.max(5, inputDisplayWidth * 0.025),
+                  0,
+                  Math.PI * 2,
+                );
+                context.strokeStyle = row?.joystickCheck?.detected
+                  ? "#45ff7a"
+                  : "rgba(77, 142, 255, 0.9)";
+                context.stroke();
+                if (
+                  row?.joystickCheck?.markerX !== undefined &&
+                  row.joystickCheck.markerY !== undefined
+                ) {
+                  context.beginPath();
+                  context.arc(
+                    toDisplayX(row.joystickCheck.markerX),
+                    toDisplayY(row.joystickCheck.markerY),
+                    4,
+                    0,
+                    Math.PI * 2,
+                  );
+                  context.fillStyle = "#ff3b30";
+                  context.fill();
+                }
+
+                buttonSlots.forEach(({ slot, ratio, yRatio }) => {
+                  const buttonX = inputDisplayX + inputDisplayWidth * ratio;
+                  const buttonY = rowTop + segmentHeight * yRatio;
+                  const check = row?.buttonChecks?.find((candidate) => candidate.slot === slot);
+                  const color = buttonColors[slot];
+                  context.beginPath();
+                  context.arc(
+                    buttonX,
+                    buttonY,
+                    Math.max(6, inputDisplayWidth * (config.inputButtonRegionRadius / 100)),
+                    0,
+                    Math.PI * 2,
+                  );
+                  context.strokeStyle = check?.detected ? "#45ff7a" : color;
+                  context.fillStyle = check?.detected
+                    ? "rgba(69, 255, 122, 0.22)"
+                    : "rgba(0, 0, 0, 0.3)";
+                  context.fill();
+                  context.stroke();
+                  context.fillStyle = color;
+                  context.fillText(slot, buttonX - 3, buttonY);
+                  if (check?.marker) {
+                    context.beginPath();
+                    context.arc(
+                      toDisplayX(check.marker.x),
+                      toDisplayY(check.marker.y),
+                      4,
+                      0,
+                      Math.PI * 2,
+                    );
+                    context.fillStyle = markerColors[check.marker.color] ?? color;
+                    context.fill();
+                  }
+                });
+
+                const numberText = row?.numberReading?.text ?? "";
+                const numberDigitXs = Array.from(
+                  { length: 3 },
+                  (_, digitIndex) =>
+                    config.inputNumberDigit1X +
+                    digitIndex * (config.inputNumberDigitWidth + config.inputNumberDigitGap),
+                );
+                numberDigitXs.forEach((digitX) => {
+                  const boxX = inputDisplayX + inputDisplayWidth * (digitX / 100);
+                  const boxY = rowTop + segmentHeight * (config.inputNumberDigitTop / 100);
+                  const boxWidth = inputDisplayWidth * (config.inputNumberDigitWidth / 100);
+                  const boxHeight = segmentHeight * (config.inputNumberDigitHeight / 100);
+                  const glyph = row?.numberReading?.glyphs?.find((sample) => {
+                    const sampleX = (sample.x / Math.max(1, observation?.width ?? 100)) * 100;
+                    return sampleX >= digitX && sampleX <= digitX + config.inputNumberDigitWidth;
+                  });
+                  context.strokeStyle = glyph
+                    ? "rgba(255, 215, 0, 0.95)"
+                    : "rgba(255, 215, 0, 0.45)";
+                  context.strokeRect(boxX, boxY, boxWidth, boxHeight);
+                });
+                if (row?.numberReading && numberText) {
+                  const numberGroupX =
+                    inputDisplayX + inputDisplayWidth * (config.inputNumberDigit1X / 100);
+                  const numberGroupWidth =
+                    inputDisplayWidth *
+                    ((config.inputNumberDigitWidth * 3 + config.inputNumberDigitGap * 2) / 100);
+                  context.fillStyle = "#ffd21f";
+                  context.textAlign = "center";
+                  context.fillText(
+                    `${numberText} (${row.numberReading.confidence.toFixed(2)})`,
+                    numberGroupX + numberGroupWidth / 2,
+                    rowTop +
+                      segmentHeight *
+                        ((config.inputNumberDigitTop + config.inputNumberDigitHeight) / 100) +
+                      8,
+                  );
+                  context.textAlign = "start";
+                }
+
+                if (row?.markers.length) {
+                  row.markers.forEach((marker) => {
+                    context.beginPath();
+                    context.arc(toDisplayX(marker.x), toDisplayY(marker.y), 2.5, 0, Math.PI * 2);
+                    context.fillStyle = markerColors[marker.color] ?? "white";
+                    context.fill();
+                  });
+                }
+
+                context.strokeStyle = "rgba(255, 255, 255, 0.2)";
+                context.beginPath();
+                context.moveTo(inputDisplayX, rowBottom);
+                context.lineTo(inputDisplayX + inputDisplayWidth, rowBottom);
+                context.stroke();
+              }
+              context.restore();
+            };
             // P2 is sampled directly from the raw game-window video. The
             // mirrored copy below is output only and is never used as input.
             if (trainingMeterRef.current.state === "training") {
@@ -1915,6 +2348,16 @@ export function OverlaySurface() {
                   buttonRegionRadius: config.inputButtonRegionRadius,
                   numberStartX: config.inputNumberStartX,
                   numberEndX: config.inputNumberEndX,
+                  numberDigitXs: Array.from(
+                    { length: 3 },
+                    (_, digitIndex) =>
+                      config.inputNumberDigit1X +
+                      digitIndex * (config.inputNumberDigitWidth + config.inputNumberDigitGap),
+                  ),
+                  numberDigitWidth: config.inputNumberDigitWidth,
+                  numberDigitTop: config.inputNumberDigitTop,
+                  numberDigitHeight: config.inputNumberDigitHeight,
+                  digitTemplates: readDigitTemplates(),
                 },
               );
               const inputSignature = formatInputDisplayObservation(inputObservation);
@@ -2007,6 +2450,8 @@ export function OverlaySurface() {
               inputSummaryRef.current = `training mode required (${trainingMeterRef.current.state})`;
             }
 
+            drawInputDiagnostics();
+
             if (
               cornerAnalysisContext &&
               localStorage.getItem(overlayDetectCornersKey) !== "false" &&
@@ -2039,10 +2484,7 @@ export function OverlaySurface() {
               cornerSummaryRef.current = "disabled";
             }
 
-            if (
-              player1AnalysisContext &&
-              localStorage.getItem(overlayDetectFramebarKey) === "true"
-            ) {
+            if (player1AnalysisContext) {
               const player1SourceX = Math.max(0, video.videoWidth * (config.player1SourceX / 100));
               const player1SourceY = Math.max(0, video.videoHeight * (config.player1SourceY / 100));
               const player1SourceWidth = Math.max(
@@ -2323,10 +2765,10 @@ export function OverlaySurface() {
                 }
               }
             } else {
-              player1SummaryRef.current = "disabled";
+              player1SummaryRef.current = "unavailable";
             }
 
-            if (analysisContext && localStorage.getItem(overlayDetectFramebarKey) === "true") {
+            if (analysisContext) {
               const sampleWidth = Math.max(1, Math.round(framebarSourceWidth));
               const sampleHeight = Math.max(1, Math.round(framebarSourceHeight));
               analysisCanvas.width = sampleWidth;
@@ -2605,7 +3047,7 @@ export function OverlaySurface() {
               context.lineWidth = 2;
               context.strokeRect(targetX, targetY, targetWidth, targetHeight);
             } else if (debugRef.current) {
-              debugRef.current.textContent = `Framebar detection disabled\ncapture: ${captureSourceMode}\ninput: ${inputSummaryRef.current}\ninput event: ${inputEventSummaryRef.current}\ninput alignment: ${inputAlignmentSummaryRef.current}\ncorners: ${cornerSummaryRef.current}\nresolved move: ${moveResolutionSummaryRef.current}\nmove framebar source: P1 (P2 reserved for defense)\nP1: ${player1SummaryRef.current}\nmove: ${moveStatusRef.current}`;
+              debugRef.current.textContent = `Framebar analysis unavailable\ncapture: ${captureSourceMode}\ninput: ${inputSummaryRef.current}\ninput event: ${inputEventSummaryRef.current}\ninput alignment: ${inputAlignmentSummaryRef.current}\ncorners: ${cornerSummaryRef.current}\nresolved move: ${moveResolutionSummaryRef.current}\nmove framebar source: P1 (P2 reserved for defense)\nP1: ${player1SummaryRef.current}\nmove: ${moveStatusRef.current}`;
             }
           }
         }
@@ -2645,6 +3087,7 @@ export function OverlaySurface() {
           top: 24,
           right: 24,
           zIndex: 2,
+          display: localStorage.getItem(overlayTextDebugKey) === "false" ? "none" : "block",
           m: 0,
           p: 1,
           boxSizing: "border-box",
