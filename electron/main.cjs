@@ -23,6 +23,7 @@ let overlayEnabled = false;
 const getActiveWindow = async () => (await import("active-win")).activeWindow();
 
 const isDev = !app.isPackaged;
+const overlayAvailable = isDev;
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
 
 function watchElectronFiles() {
@@ -171,6 +172,7 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
 });
 
 function createOverlayWindow() {
+  if (!overlayAvailable) return false;
   overlayEnabled = true;
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     return;
@@ -294,20 +296,27 @@ function createOverlayWindow() {
   };
   overlayMonitor = setInterval(() => void syncOverlayWindow(), 250);
   void syncOverlayWindow();
+  return true;
 }
 
 ipcMain.handle("overlay:show", () => createOverlayWindow());
 ipcMain.handle("overlay:hide", () => {
+  if (!overlayAvailable) return false;
   overlayEnabled = false;
   gameDisplayId = null;
   lastGameBounds = null;
   missedGameFocusChecks = 0;
   overlayWindow?.hide();
+  return true;
 });
-ipcMain.handle("overlay:is-visible", () =>
-  Boolean(overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible()),
+ipcMain.handle(
+  "overlay:is-visible",
+  () =>
+    overlayAvailable &&
+    Boolean(overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible()),
 );
 ipcMain.handle("overlay:set-focus-mode", (_, enabled) => {
+  if (!overlayAvailable) return false;
   onlyShowWhenGameFocused = Boolean(enabled);
   if (!onlyShowWhenGameFocused && lastGameBounds && overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.setBounds(lastGameBounds);
@@ -317,6 +326,7 @@ ipcMain.handle("overlay:set-focus-mode", (_, enabled) => {
 });
 
 ipcMain.handle("overlay:finalize-capture", () => {
+  if (!overlayAvailable) return false;
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.webContents.send("overlay:finalize-capture");
   }
@@ -324,6 +334,7 @@ ipcMain.handle("overlay:finalize-capture", () => {
 });
 
 ipcMain.handle("overlay:begin-capture", () => {
+  if (!overlayAvailable) return false;
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.webContents.send("overlay:begin-capture");
   }
@@ -342,7 +353,7 @@ function captureSessionDirectory(sessionId) {
 }
 
 function captureRootDirectory() {
-  return path.join(app.getPath("videos"), "Avatar App", "captures");
+  return path.join(app.getPath("videos"), "Labatar", "captures");
 }
 
 ipcMain.handle("overlay:get-capture-folder", () => captureRootDirectory());
@@ -428,6 +439,7 @@ function createWindow() {
 }
 
 async function getGameCaptureSource() {
+  if (!overlayAvailable) return null;
   const sources = await desktopCapturer.getSources({ types: ["window"] });
   const displays = screen.getAllDisplays();
   // `display_id` is the authoritative mapping. Source order is not guaranteed
@@ -495,6 +507,7 @@ void app.whenReady().then(() => {
     callback({ video: source });
   });
   ipcMain.handle("overlay:get-capture-source", async () => {
+    if (!overlayAvailable) return null;
     const source = await getGameCaptureSource();
     return source
       ? {

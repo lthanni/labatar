@@ -1,5 +1,5 @@
 {
-  "name": "avatar-app-3",
+  "name": "labatar",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,7 +8,7 @@
     "dev": "vp dev",
     "electron:dev": "concurrently \"vp dev\" \"wait-on http://localhost:5173 && .\\node_modules\\electron\\dist\\electron.exe .\"",
     "build": "tsc && vp build",
-    "electron:build": "pnpm run build && electron-builder",
+    "electron:build": "pnpm run build && electron-builder --publish never",
     "preview": "vp preview",
     "prepare": "vp config"
   },
@@ -18,12 +18,12 @@
     "@mui/material": "^9.4.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
-    "active-win": "^9.0.0",
     "ag-grid-react": "^36.1.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "active-win": "^9.0.0",
     "ag-grid-community": "^36.1.0",
     "concurrently": "^9.2.1",
     "electron": "^39.1.0",
@@ -41,8 +41,11 @@
     }
   },
   "build": {
-    "appId": "com.example.avatarapp",
-    "productName": "Avatar App",
+    "appId": "com.labden.labatar",
+    "productName": "Labatar",
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -50,12 +53,6 @@
     ],
     "win": {
       "target": "nsis"
-    },
-    "mac": {
-      "target": "dmg"
-    },
-    "linux": {
-      "target": "AppImage"
     }
   }
 }

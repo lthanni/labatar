@@ -268,17 +268,18 @@ function ReplayAnalysis() {
 function App() {
   const [tab, setTab] = useState(() => {
     const savedTab = Number(localStorage.getItem("avatar-app-last-tab"));
-    return savedTab === 1 ? 1 : 0;
+    return overlayAvailable && savedTab === 1 ? 1 : 0;
   });
   const [mountedTabs, setMountedTabs] = useState(() => ({
     replay: tab === 0,
-    overlay: tab === 1,
+    overlay: overlayAvailable && tab === 1,
   }));
   const changeTab = (nextTab: number) => {
+    if (nextTab === 1 && !overlayAvailable) return;
     setTab(nextTab);
     setMountedTabs((current) => ({
       replay: current.replay || nextTab === 0,
-      overlay: current.overlay || nextTab === 1,
+      overlay: overlayAvailable && (current.overlay || nextTab === 1),
     }));
     localStorage.setItem("avatar-app-last-tab", String(nextTab));
   };
@@ -287,14 +288,14 @@ function App() {
     <>
       <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)} sx={{ mb: 2 }}>
         <Tab label="Replay analysis" />
-        <Tab label="Visual overlay" />
+        {overlayAvailable && <Tab label="Visual overlay" />}
       </Tabs>
       {mountedTabs.replay && (
         <Box sx={{ display: tab === 0 ? "block" : "none" }}>
           <ReplayAnalysis />
         </Box>
       )}
-      {mountedTabs.overlay && (
+      {overlayAvailable && mountedTabs.overlay && (
         <Box sx={{ display: tab === 1 ? "block" : "none" }}>
           <VisualOverlay />
         </Box>
@@ -307,7 +308,8 @@ if (!root) {
   throw new Error("Root element not found");
 }
 
-const isOverlay = new URLSearchParams(window.location.search).has("overlay");
+const overlayAvailable = import.meta.env.DEV;
+const isOverlay = overlayAvailable && new URLSearchParams(window.location.search).has("overlay");
 if (isOverlay) document.documentElement.classList.add("overlay-mode");
 createRoot(root).render(
   <StrictMode>

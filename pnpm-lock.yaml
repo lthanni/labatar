@@ -136,9 +136,6 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.7
         version: 19.2.7(@types/react@19.2.18)
-      active-win:
-        specifier: ^9.0.0
-        version: 9.0.0(encoding@0.1.13)(supports-color@8.1.1)
       ag-grid-react:
         specifier: ^36.1.0
         version: 36.1.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -149,6 +146,9 @@ importers:
         specifier: ^19.2.8
         version: 19.2.8(react@19.2.8)
     devDependencies:
+      active-win:
+        specifier: ^9.0.0
+        version: 9.0.0(encoding@0.1.13)(supports-color@8.1.1)
       ag-grid-community:
         specifier: ^36.1.0
         version: 36.1.0
