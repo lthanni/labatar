@@ -49,6 +49,25 @@ declare global {
           mode?: "game-window" | "unavailable";
           name?: string;
         } | null>;
+        getCaptureFolder: () => Promise<string>;
+        openCaptureFolder: () => Promise<string>;
+        finalizeCapture: () => Promise<boolean>;
+        beginCapture: () => Promise<boolean>;
+        onCaptureFinalize: (listener: () => void) => () => void;
+        onCaptureBegin: (listener: () => void) => () => void;
+        saveCaptureScreenshot: (request: {
+          sessionId: string;
+          filename: string;
+          data: Uint8Array;
+        }) => Promise<{ path: string }>;
+        saveCaptureVideo: (request: {
+          sessionId: string;
+          data: Uint8Array;
+        }) => Promise<{ path: string }>;
+        saveCaptureSession: (request: {
+          sessionId: string;
+          manifest: unknown;
+        }) => Promise<{ path: string }>;
       };
     };
   }

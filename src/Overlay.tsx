@@ -7,6 +7,7 @@ import {
   Button,
   Checkbox,
   FormControlLabel,
+  LinearProgress,
   Paper,
   Stack,
   TextField,
@@ -73,6 +74,9 @@ const overlayConfigKey = "avatar-overlay-config";
 const overlayOverrideKey = "avatar-overlay-allow-override";
 const overlayDetectCornersKey = "avatar-overlay-detect-corners";
 const overlayTextDebugKey = "avatar-overlay-show-text-debug";
+const overlayCaptureEnabledKey = "avatar-overlay-capture-enabled";
+const overlayCaptureRequestedKey = "avatar-overlay-capture-requested";
+const overlayCaptureSessionKey = "avatar-overlay-capture-session";
 type OverlayConfig = {
   sourceX: number;
   sourceY: number;
@@ -394,6 +398,59 @@ type FramebarTimelineSample = {
   player1Phases: FramePhaseCounts;
   player2Phases?: DefensivePhaseCounts;
 };
+type MovePhase = "startup" | "active" | "recovery" | "other";
+type MoveKeyframeCapture = {
+  index: number;
+  phase: MovePhase;
+  captureFrame: number;
+  timestamp: string;
+  mediaTime: number;
+  durationFrames: number;
+  durationMs: number;
+  similarity: number;
+  screenshotPath?: string;
+};
+type CaptureSessionSample = {
+  captureFrame: number;
+  timestamp: string;
+  timestampMs: number;
+  mediaTime: number;
+  player1: string;
+  player2: string;
+  player1Phases: FramePhaseCounts;
+  player2Phases: DefensivePhaseCounts;
+  player1Phase: MovePhase;
+  input?: string;
+};
+type CaptureQuality = {
+  requestedFrameRate: number;
+  sourceFrameRate: number | null;
+  observedFrameRate: number | null;
+  framesCaptured: number;
+  droppedFrames: number;
+  duplicateFrames: number;
+  quality: "measuring" | "good" | "degraded";
+  warning?: string;
+};
+type CaptureSessionManifest = {
+  sessionId: string;
+  startedAt: string;
+  updatedAt?: string;
+  status: "active" | "processing" | "complete";
+  captureSourceId: string | null;
+  captureSourceMode: string;
+  sourceWidth: number;
+  sourceHeight: number;
+  videoPath?: string;
+  videoMimeType?: string;
+  captureQuality: CaptureQuality;
+  samples: CaptureSessionSample[];
+  moves: MoveEpisode[];
+};
+type CaptureSessionStatus = Pick<
+  CaptureSessionManifest,
+  "sessionId" | "status" | "updatedAt" | "captureQuality"
+>;
 type FramebarResolution = FramebarTimelineSample & { offsetMs: number };
 type InputEventRecord = {
   timestamp: string;
@@ -409,6 +466,12 @@ type MoveEpisode = {
   endedAt: string | null;
   inputEvents: InputEventRecord[];
   framebarSamples: Array<{ timestamp: string; player1: string; player2: string }>;
+  keyframes?: MoveKeyframeCapture[];
+  captureSessionId?: string;
+  captureStartFrame?: number;
+  captureEndFrame?: number;
+  mediaStartTime?: number;
+  mediaEndTime?: number;
   resolvedMove?: {
     notation: string;
     phases: FramePhaseCounts;
@@ -416,6 +479,42 @@ type MoveEpisode = {
     framebarTimestamp: string;
   };
 };
+
+function createCaptureSessionId() {
+  const suffix =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID().slice(0, 8)
+      : Math.random().toString(36).slice(2, 10);
+  return `session-${new Date()
+    .toISOString()
+    .replace(/[^0-9]/g, "")
+    .slice(0, 14)}-${suffix}`;
+}
+
+function createCaptureQuality(): CaptureQuality {
+  return {
+    requestedFrameRate: 60,
+    sourceFrameRate: null,
+    observedFrameRate: null,
+    framesCaptured: 0,
+    droppedFrames: 0,
+    duplicateFrames: 0,
+    quality: "measuring",
+  };
+}
+
+function currentMovePhase(groups: FramebarGroup[]): MovePhase {
+  for (const group of [...groups].reverse()) {
+    const state = group.state.toLowerCase().replace(/[\s_-]+/g, "");
+    if (state === "idle" || state === "empty" || state === "unmapped") continue;
+    if (state.includes("recovery") || state.includes("recover")) return "recovery";
+    if (state.includes("active") || state.includes("hit") || state.includes("hitpause")) {
+      return "active";
+    }
+    if (state.includes("startup") || state.includes("start")) return "startup";
+  }
+  return "other";
+}
 
 function resolveFramebarAt(
   timeline: FramebarTimelineSample[],
@@ -841,6 +940,23 @@ export function VisualOverlay() {
   const [showTextDebug, setShowTextDebug] = useState(
     () => localStorage.getItem(overlayTextDebugKey) !== "false",
   );
+  const [captureEnabled, setCaptureEnabled] = useState(
+    () => localStorage.getItem(overlayCaptureEnabledKey) !== "false",
+  );
+  const [captureRequested, setCaptureRequested] = useState(
+    () => localStorage.getItem(overlayCaptureRequestedKey) === "true",
+  );
+  const [captureSession, setCaptureSession] = useState<CaptureSessionStatus | null>(() => {
+    try {
+      return JSON.parse(
+        localStorage.getItem(overlayCaptureSessionKey) ?? "null",
+      ) as CaptureSessionStatus | null;
+    } catch {
+      return null;
+    }
+  });
+  const [captureFolder, setCaptureFolder] = useState<string | null>(null);
+  const [captureFolderError, setCaptureFolderError] = useState<string | null>(null);
   const [allowOverride, setAllowOverride] = useState(
     () => localStorage.getItem(overlayOverrideKey) === "true",
   );
@@ -926,6 +1042,12 @@ export function VisualOverlay() {
         setDigitTemplates(readDigitTemplates());
         setInputEventLog(JSON.parse(localStorage.getItem(overlayInputEventLogKey) ?? "[]"));
         setMoveEpisodeLog(JSON.parse(localStorage.getItem(overlayMoveEpisodeLogKey) ?? "[]"));
+        setCaptureSession(
+          JSON.parse(
+            localStorage.getItem(overlayCaptureSessionKey) ?? "null",
+          ) as CaptureSessionStatus | null,
+        );
+        setCaptureRequested(localStorage.getItem(overlayCaptureRequestedKey) === "true");
         setCornerObservation(
           JSON.parse(
             localStorage.getItem(cornerObservationKey) ?? "null",
@@ -939,6 +1061,12 @@ export function VisualOverlay() {
     refreshUnmapped();
     const timer = window.setInterval(refreshUnmapped, 500);
     return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    void window.electronAPI?.overlay
+      .getCaptureFolder()
+      .then(setCaptureFolder)
+      .catch(() => undefined);
   }, []);
   const updateConfig = (key: keyof OverlayConfig, value: string) => {
     const next = { ...config, [key]: Number(value) };
@@ -956,6 +1084,38 @@ export function VisualOverlay() {
   const changeTextDebug = (enabled: boolean) => {
     setShowTextDebug(enabled);
     localStorage.setItem(overlayTextDebugKey, String(enabled));
+  };
+  const changeCaptureEnabled = (enabled: boolean) => {
+    setCaptureEnabled(enabled);
+    localStorage.setItem(overlayCaptureEnabledKey, String(enabled));
+    if (!enabled) {
+      setCaptureSession(null);
+      setCaptureRequested(false);
+      localStorage.setItem(overlayCaptureRequestedKey, "false");
+    }
+  };
+  const beginCapture = async () => {
+    if (!captureEnabled) return;
+    setCaptureRequested(true);
+    localStorage.setItem(overlayCaptureRequestedKey, "true");
+    if (!visible) await showOverlay();
+    await window.electronAPI?.overlay.beginCapture();
+  };
+  const openCaptureFolder = async () => {
+    try {
+      const folder = await window.electronAPI?.overlay.openCaptureFolder();
+      if (folder) {
+        setCaptureFolder(folder);
+        setCaptureFolderError(null);
+      }
+    } catch (error) {
+      setCaptureFolderError(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const finalizeCapture = async () => {
+    setCaptureRequested(false);
+    localStorage.setItem(overlayCaptureRequestedKey, "false");
+    await window.electronAPI?.overlay.finalizeCapture();
   };
   const changeInputDetection = (enabled: boolean) => {
     setDetectInput(enabled);
@@ -1106,6 +1266,108 @@ export function VisualOverlay() {
           }
           label="Show text debug overlay"
         />
+      </StoredAccordion>
+      <StoredAccordion id="capture-recording" title="Capture recording" defaultExpanded>
+        <FormControlLabel
+          control={
+            <Checkbox
+              checked={captureEnabled}
+              onChange={(event) => changeCaptureEnabled(event.target.checked)}
+            />
+          }
+          label="Save capture sessions and move screenshots"
+        />
+        <Typography variant="caption" color="text.secondary" component="div">
+          The raw game capture is recorded while the overlay runs. When capture stops, each move is
+          decoded and visually distinct poses are saved as screenshots with their durations.
+        </Typography>
+        <Stack spacing={0.5} sx={{ mt: 1 }}>
+          <Typography variant="body2">
+            Status:{" "}
+            {captureEnabled ? (captureSession?.status ?? "waiting for capture") : "disabled"}
+          </Typography>
+          {captureSession?.captureQuality && (
+            <Stack spacing={0.25}>
+              <Typography
+                variant="caption"
+                color={
+                  captureSession.captureQuality.quality === "degraded"
+                    ? "warning.main"
+                    : "text.secondary"
+                }
+              >
+                Capture quality:{" "}
+                {captureSession.captureQuality.quality === "good"
+                  ? "60 FPS verified"
+                  : captureSession.captureQuality.quality === "degraded"
+                    ? "60 FPS not verified"
+                    : "measuring…"}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                Source {captureSession.captureQuality.sourceFrameRate?.toFixed(1) ?? "?"} FPS ·
+                observed {captureSession.captureQuality.observedFrameRate?.toFixed(1) ?? "?"} FPS ·{" "}
+                {captureSession.captureQuality.framesCaptured} frames ·{" "}
+                {captureSession.captureQuality.droppedFrames} dropped ·{" "}
+                {captureSession.captureQuality.duplicateFrames} duplicated
+              </Typography>
+              {captureSession.captureQuality.warning && (
+                <Typography variant="caption" color="warning.main">
+                  {captureSession.captureQuality.warning}
+                </Typography>
+              )}
+            </Stack>
+          )}
+          {captureSession && (
+            <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
+              Session: {captureSession.sessionId}
+              {captureSession.updatedAt
+                ? ` — updated ${new Date(captureSession.updatedAt).toLocaleTimeString()}`
+                : ""}
+            </Typography>
+          )}
+          <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
+            Output: {captureFolder ?? "Resolving capture folder…"}
+          </Typography>
+        </Stack>
+        {captureSession?.status === "processing" && (
+          <Stack spacing={0.5} sx={{ mt: 1 }}>
+            <LinearProgress />
+            <Typography variant="caption" color="text.secondary">
+              Extracting unique keyframes from the recorded video… This may take a moment.
+            </Typography>
+          </Stack>
+        )}
+        <Button
+          variant="outlined"
+          size="small"
+          sx={{ mt: 1 }}
+          onClick={() => void openCaptureFolder()}
+        >
+          Open capture folder
+        </Button>
+        <Button
+          variant="contained"
+          size="small"
+          sx={{ mt: 1, ml: 1 }}
+          disabled={!captureEnabled || captureRequested || captureSession?.status === "processing"}
+          onClick={() => void beginCapture()}
+        >
+          Begin capture
+        </Button>
+        <Button
+          variant="contained"
+          size="small"
+          sx={{ mt: 1, ml: 1 }}
+          disabled={!captureEnabled || !captureRequested || captureSession?.status !== "active"}
+          onClick={() => void finalizeCapture()}
+        >
+          Finalize recording and extract keyframes
+        </Button>
+        {captureFolderError && (
+          <Typography variant="caption" color="error" component="div" sx={{ mt: 0.5 }}>
+            {captureFolderError}
+          </Typography>
+        )}
       </StoredAccordion>
       <StoredAccordion
         id="mirror-settings"
@@ -1926,6 +2188,20 @@ export function OverlaySurface() {
   });
   const waitingForPlayer1IdleRef = useRef(true);
   const activeMoveEpisodeRef = useRef<MoveEpisode | null>(null);
+  const captureSessionRef = useRef<CaptureSessionManifest>({
+    sessionId: createCaptureSessionId(),
+    startedAt: new Date().toISOString(),
+    status: "active",
+    captureSourceId: null,
+    captureSourceMode: "unknown",
+    sourceWidth: 0,
+    sourceHeight: 0,
+    captureQuality: createCaptureQuality(),
+    samples: [],
+    moves: [],
+  });
+  const captureSaveChainRef = useRef(Promise.resolve());
+  const captureFrameSequenceRef = useRef(0);
   const moveStatusRef = useRef("waiting for P1 framebar idle");
   const inputTimelineRef = useRef<TimedInputEvent[]>([]);
   const lastPlayer1FramebarSignatureRef = useRef("");
@@ -1940,6 +2216,17 @@ export function OverlaySurface() {
     return () => window.removeEventListener("storage", syncConfig);
   }, []);
   useEffect(() => {
+    const syncTextDebugVisibility = () => {
+      if (debugRef.current) {
+        debugRef.current.style.display =
+          localStorage.getItem(overlayTextDebugKey) === "false" ? "none" : "block";
+      }
+    };
+    syncTextDebugVisibility();
+    window.addEventListener("storage", syncTextDebugVisibility);
+    return () => window.removeEventListener("storage", syncTextDebugVisibility);
+  }, []);
+  useEffect(() => {
     let frame = 0;
     let retryTimer = 0;
     let stopped = false;
@@ -1949,6 +2236,19 @@ export function OverlaySurface() {
     let reconnecting = false;
     let tick = 0;
     let stream: MediaStream | null = null;
+    let stopRecording: (() => void) | null = null;
+    let beginRecording: (() => void) | null = null;
+    let recordingFinalized = false;
+    let qualityWindowStartedAt = 0;
+    let qualityWindowFrameCount = 0;
+    let lastMediaTime: number | null = null;
+    let lastPresentedFrames: number | null = null;
+    const finalizeSubscription = window.electronAPI?.overlay.onCaptureFinalize(() => {
+      stopRecording?.();
+    });
+    const beginSubscription = window.electronAPI?.overlay.onCaptureBegin(() => {
+      beginRecording?.();
+    });
     const analysisCanvas = document.createElement("canvas");
     const analysisContext = analysisCanvas.getContext("2d", { willReadFrequently: true });
     const inputAnalysisCanvas = document.createElement("canvas");
@@ -1963,7 +2263,95 @@ export function OverlaySurface() {
     const cornerAnalysisContext = cornerAnalysisCanvas.getContext("2d", {
       willReadFrequently: true,
     });
+    const persistCaptureSession = (status: CaptureSessionManifest["status"]) => {
+      if (localStorage.getItem(overlayCaptureEnabledKey) === "false") return;
+      const session = captureSessionRef.current;
+      session.status = status;
+      const updatedAt = new Date().toISOString();
+      localStorage.setItem(
+        overlayCaptureSessionKey,
+        JSON.stringify({
+          sessionId: session.sessionId,
+          status,
+          updatedAt,
+          captureQuality: session.captureQuality,
+        }),
+      );
+      const manifest: CaptureSessionManifest = {
+        ...session,
+        updatedAt,
+        samples: session.samples.slice(-3600),
+        moves: session.moves.slice(-100),
+      };
+      const save = window.electronAPI?.overlay.saveCaptureSession({
+        sessionId: session.sessionId,
+        manifest,
+      });
+      captureSaveChainRef.current = captureSaveChainRef.current
+        .catch(() => undefined)
+        .then(() => save)
+        .then(() => undefined);
+    };
+    const updateCaptureQuality = (
+      callbackNow: number,
+      frameMetadata?: { mediaTime: number; presentedFrames?: number },
+    ) => {
+      if (localStorage.getItem(overlayCaptureRequestedKey) !== "true") return;
+      const quality = captureSessionRef.current.captureQuality;
+      const mediaTime = frameMetadata?.mediaTime;
+      if (mediaTime !== undefined && lastMediaTime !== null) {
+        const sourceFrameRate = quality.sourceFrameRate ?? quality.requestedFrameRate;
+        const expectedFrameDuration = 1 / Math.max(1, sourceFrameRate);
+        const mediaDelta = mediaTime - lastMediaTime;
+        const presentedDelta =
+          frameMetadata?.presentedFrames !== undefined && lastPresentedFrames !== null
+            ? frameMetadata.presentedFrames - lastPresentedFrames
+            : null;
+        if (mediaDelta <= 0.0001) {
+          quality.duplicateFrames += 1;
+        } else if (presentedDelta === null && mediaDelta > expectedFrameDuration * 1.75) {
+          quality.droppedFrames += Math.max(1, Math.round(mediaDelta / expectedFrameDuration) - 1);
+        }
+        if (presentedDelta !== null && presentedDelta > 1) {
+          quality.droppedFrames += presentedDelta - 1;
+        }
+      }
+      if (mediaTime !== undefined) lastMediaTime = mediaTime;
+      if (frameMetadata?.presentedFrames !== undefined) {
+        lastPresentedFrames = frameMetadata.presentedFrames;
+      }
+      quality.framesCaptured += 1;
+      qualityWindowFrameCount += 1;
+      if (!qualityWindowStartedAt) qualityWindowStartedAt = callbackNow;
+      const windowDuration = callbackNow - qualityWindowStartedAt;
+      if (windowDuration < 1000) return;
+      quality.observedFrameRate = (qualityWindowFrameCount / windowDuration) * 1000;
+      qualityWindowStartedAt = callbackNow;
+      qualityWindowFrameCount = 0;
+      const sourceIsStable = quality.sourceFrameRate === null || quality.sourceFrameRate >= 59.5;
+      const observedIsStable = quality.observedFrameRate >= 58.5;
+      quality.quality =
+        sourceIsStable &&
+        observedIsStable &&
+        quality.droppedFrames === 0 &&
+        quality.duplicateFrames === 0
+          ? "good"
+          : "degraded";
+      if (quality.sourceFrameRate !== null && quality.sourceFrameRate < 59.5) {
+        quality.warning = `Capture source reports ${quality.sourceFrameRate.toFixed(1)} FPS; 60 FPS is unavailable from this source.`;
+      } else if (quality.observedFrameRate < 58.5) {
+        quality.warning = `Observed ${quality.observedFrameRate.toFixed(1)} FPS; the capture is dropping or delaying frames.`;
+      } else if (quality.droppedFrames > 0) {
+        quality.warning = `${quality.droppedFrames} frame${quality.droppedFrames === 1 ? "" : "s"} appear to have been dropped.`;
+      } else if (quality.duplicateFrames > 0) {
+        quality.warning = `${quality.duplicateFrames} duplicate frame${quality.duplicateFrames === 1 ? "" : "s"} appear in the capture.`;
+      } else {
+        quality.warning = "60 FPS capture verified over the latest sample window.";
+      }
+      persistCaptureSession("active");
+    };
     const start = async () => {
+      let sourceFrameRate: number | null = null;
       try {
         await new Promise((resolve) => setTimeout(resolve, 1000));
         if (stopped) return;
@@ -1975,6 +2363,7 @@ export function OverlaySurface() {
             mandatory: {
               chromeMediaSource: "desktop",
               chromeMediaSourceId: captureSource.id,
+              maxFrameRate: 60,
             },
           } as MediaTrackConstraints,
         });
@@ -1985,6 +2374,15 @@ export function OverlaySurface() {
         captureSourceId = captureSource.id;
         captureSourceMode = captureSource.mode ?? "unknown";
         reconnecting = false;
+        const captureTrack = stream.getVideoTracks()[0];
+        try {
+          await captureTrack?.applyConstraints({ frameRate: { ideal: 60, max: 60 } });
+        } catch {
+          // Some desktop capture providers reject post-acquisition constraints.
+        }
+        const captureSettings = captureTrack?.getSettings();
+        sourceFrameRate =
+          typeof captureSettings?.frameRate === "number" ? captureSettings.frameRate : null;
         const video = videoRef.current;
         if (!video) throw new Error("Capture video element is unavailable");
         video.srcObject = stream;
@@ -1994,17 +2392,337 @@ export function OverlaySurface() {
         stream = null;
         if (!stopped) {
           const message = error instanceof Error ? error.message : String(error);
-          if (debugRef.current)
+          if (debugRef.current) {
+            debugRef.current.style.display =
+              localStorage.getItem(overlayTextDebugKey) === "false" ? "none" : "block";
             debugRef.current.textContent = `Capture unavailable\n${message}\nRetrying...`;
+          }
           retryTimer = window.setTimeout(() => void start(), 1000);
         }
         return;
       }
       const video = videoRef.current;
       if (!video || stopped) return;
-      const draw = () => {
+      captureSessionRef.current.status = "active";
+      captureSessionRef.current.captureSourceId = captureSourceId || null;
+      captureSessionRef.current.captureSourceMode = captureSourceMode;
+      captureSessionRef.current.sourceWidth = video.videoWidth;
+      captureSessionRef.current.sourceHeight = video.videoHeight;
+      captureSessionRef.current.captureQuality.sourceFrameRate = sourceFrameRate;
+      captureSessionRef.current.captureQuality.quality = "measuring";
+      captureSessionRef.current.captureQuality.warning =
+        sourceFrameRate !== null && sourceFrameRate < 59.5
+          ? `Capture source reports ${sourceFrameRate.toFixed(1)} FPS; measuring actual delivery.`
+          : undefined;
+      if (localStorage.getItem(overlayCaptureRequestedKey) === "true") {
+        persistCaptureSession("active");
+      }
+
+      let recordingChunks: Blob[] = [];
+      let recordingMimeType = "video/webm";
+      let mediaRecorder: MediaRecorder | null = null;
+      const screenshotCanvas = document.createElement("canvas");
+      const screenshotContext = screenshotCanvas.getContext("2d");
+      const saveCanvasAsScreenshot = async (canvas: HTMLCanvasElement, filename: string) => {
+        if (
+          !window.electronAPI?.overlay ||
+          localStorage.getItem(overlayCaptureEnabledKey) === "false"
+        ) {
+          return null;
+        }
+        const blob = await new Promise<Blob | null>((resolve) =>
+          canvas.toBlob(resolve, "image/png"),
+        );
+        if (!blob) return null;
+        const result = await window.electronAPI.overlay.saveCaptureScreenshot({
+          sessionId: captureSessionRef.current.sessionId,
+          filename,
+          data: new Uint8Array(await blob.arrayBuffer()),
+        });
+        return result.path;
+      };
+      const seekVideo = (target: HTMLVideoElement, time: number) =>
+        new Promise<void>((resolve) => {
+          if (Math.abs(target.currentTime - time) < 0.0005) {
+            resolve();
+            return;
+          }
+          let timeout = 0;
+          const finish = () => {
+            window.clearTimeout(timeout);
+            target.removeEventListener("seeked", finish);
+            resolve();
+          };
+          target.addEventListener("seeked", finish, { once: true });
+          target.currentTime = time;
+          timeout = window.setTimeout(finish, 1000);
+        });
+      const phaseAtTime = (time: number) => {
+        const sample = captureSessionRef.current.samples.reduce<CaptureSessionSample | null>(
+          (best, candidate) => {
+            if (candidate.mediaTime > time) return best;
+            return !best || candidate.mediaTime > best.mediaTime ? candidate : best;
+          },
+          null,
+        );
+        return sample?.player1Phase ?? "other";
+      };
+      const sampleAtTime = (time: number) =>
+        captureSessionRef.current.samples.reduce<CaptureSessionSample | null>(
+          (best, candidate) =>
+            !best || Math.abs(candidate.mediaTime - time) < Math.abs(best.mediaTime - time)
+              ? candidate
+              : best,
+          null,
+        );
+      const processRecordedMove = async (recordedVideo: Blob, move: MoveEpisode) => {
+        if (move.mediaStartTime === undefined || move.mediaEndTime === undefined) return move;
+        const extractedVideo = document.createElement("video");
+        extractedVideo.muted = true;
+        extractedVideo.preload = "auto";
+        const objectUrl = URL.createObjectURL(recordedVideo);
+        extractedVideo.src = objectUrl;
+        try {
+          await new Promise<void>((resolve, reject) => {
+            extractedVideo.addEventListener("loadedmetadata", () => resolve(), { once: true });
+            extractedVideo.addEventListener(
+              "error",
+              () => reject(new Error("Recorded video could not be decoded")),
+              { once: true },
+            );
+            extractedVideo.load();
+          });
+          const start = Math.max(0, move.mediaStartTime - 0.02);
+          const recordedEnd = Number.isFinite(extractedVideo.duration)
+            ? extractedVideo.duration
+            : move.mediaEndTime + 0.02;
+          const end = Math.min(recordedEnd, move.mediaEndTime + 0.02);
+          if (end <= start) return move;
+          const analysisCanvas = document.createElement("canvas");
+          analysisCanvas.width = 80;
+          analysisCanvas.height = 80;
+          const analysisContext = analysisCanvas.getContext("2d", { willReadFrequently: true });
+          if (!analysisContext || !screenshotContext) return move;
+          screenshotCanvas.width = extractedVideo.videoWidth;
+          screenshotCanvas.height = extractedVideo.videoHeight;
+          const config = configRef.current;
+          const roiX = extractedVideo.videoWidth * (config.p1CharacterX / 100);
+          const roiY = extractedVideo.videoHeight * (config.p1CharacterY / 100);
+          const roiWidth = extractedVideo.videoWidth * (config.p1CharacterWidth / 100);
+          const roiHeight = extractedVideo.videoHeight * (config.p1CharacterHeight / 100);
+          const measuredTimes = captureSessionRef.current.samples
+            .filter((sample) => sample.mediaTime >= start && sample.mediaTime <= end)
+            .map((sample) => sample.mediaTime)
+            .filter((time, index, times) => index === 0 || time > times[index - 1]);
+          const frameRate =
+            captureSessionRef.current.captureQuality.observedFrameRate ??
+            captureSessionRef.current.captureQuality.sourceFrameRate ??
+            60;
+          const analysisTimes =
+            measuredTimes.length >= 2
+              ? [start, ...measuredTimes.filter((time) => time > start && time < end), end]
+              : Array.from(
+                  { length: Math.max(1, Math.ceil((end - start) * frameRate)) },
+                  (_, index) => Math.min(end, start + index / frameRate),
+                );
+          const frameCount = analysisTimes.length;
+          const visualChangeThreshold = 0.035;
+          let previousPixels: Uint8ClampedArray | null = null;
+          let representative: {
+            canvas: HTMLCanvasElement;
+            time: number;
+            similarity: number;
+          } | null = null;
+          let representativeIndex = 0;
+          const keyframes: MoveKeyframeCapture[] = [];
+          const saveRepresentative = async (endTime: number, durationFrames: number) => {
+            if (!representative) return;
+            const sample = sampleAtTime(representative.time);
+            const index = keyframes.length + 1;
+            const filename = `keyframe-${String(index).padStart(3, "0")}-frame-${sample?.captureFrame ?? representativeIndex}.png`;
+            const screenshotPath = await saveCanvasAsScreenshot(representative.canvas, filename);
+            keyframes.push({
+              index,
+              phase: phaseAtTime(representative.time),
+              captureFrame: sample?.captureFrame ?? move.captureStartFrame ?? 0,
+              timestamp: sample?.timestamp ?? move.startedAt,
+              mediaTime: representative.time,
+              durationFrames: Math.max(1, durationFrames),
+              durationMs: Math.max(1, Math.round((endTime - representative.time) * 1000)),
+              similarity: representative.similarity,
+              screenshotPath: screenshotPath ?? undefined,
+            });
+          };
+          for (let index = 0; index < frameCount; index += 1) {
+            const time = analysisTimes[index];
+            await seekVideo(extractedVideo, time);
+            analysisContext.drawImage(
+              extractedVideo,
+              roiX,
+              roiY,
+              roiWidth,
+              roiHeight,
+              0,
+              0,
+              analysisCanvas.width,
+              analysisCanvas.height,
+            );
+            const pixels = analysisContext.getImageData(
+              0,
+              0,
+              analysisCanvas.width,
+              analysisCanvas.height,
+            ).data;
+            let difference = 1;
+            if (previousPixels) {
+              let totalDifference = 0;
+              for (let pixel = 0; pixel < pixels.length; pixel += 4) {
+                totalDifference +=
+                  Math.abs(pixels[pixel] - previousPixels[pixel]) +
+                  Math.abs(pixels[pixel + 1] - previousPixels[pixel + 1]) +
+                  Math.abs(pixels[pixel + 2] - previousPixels[pixel + 2]);
+              }
+              difference = totalDifference / ((pixels.length / 4) * 3 * 255);
+            }
+            if (!representative || difference >= visualChangeThreshold) {
+              if (representative) await saveRepresentative(time, index - representativeIndex);
+              screenshotContext.clearRect(0, 0, screenshotCanvas.width, screenshotCanvas.height);
+              screenshotContext.drawImage(
+                extractedVideo,
+                0,
+                0,
+                screenshotCanvas.width,
+                screenshotCanvas.height,
+              );
+              representative = {
+                canvas: document.createElement("canvas"),
+                time,
+                similarity: 1 - difference,
+              };
+              representative.canvas.width = screenshotCanvas.width;
+              representative.canvas.height = screenshotCanvas.height;
+              representative.canvas.getContext("2d")?.drawImage(screenshotCanvas, 0, 0);
+              representativeIndex = index;
+            }
+            previousPixels = new Uint8ClampedArray(pixels);
+          }
+          await saveRepresentative(end, frameCount - representativeIndex);
+          return { ...move, keyframes };
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+        }
+      };
+      const updateStoredMove = (move: MoveEpisode) => {
+        let moveLog: MoveEpisode[] = [];
+        try {
+          moveLog = JSON.parse(localStorage.getItem(overlayMoveEpisodeLogKey) ?? "[]");
+        } catch {
+          moveLog = [];
+        }
+        const index = moveLog.findIndex((entry) => entry.startedAt === move.startedAt);
+        if (index >= 0) moveLog[index] = move;
+        else moveLog.push(move);
+        localStorage.setItem(overlayMoveEpisodeLogKey, JSON.stringify(moveLog.slice(-100)));
+      };
+      const processRecordedSession = async () => {
+        persistCaptureSession("processing");
+        if (!recordingChunks.length) {
+          persistCaptureSession("complete");
+          return;
+        }
+        const recordedVideo = new Blob(recordingChunks, { type: recordingMimeType });
+        try {
+          const videoResult = await window.electronAPI?.overlay.saveCaptureVideo({
+            sessionId: captureSessionRef.current.sessionId,
+            data: new Uint8Array(await recordedVideo.arrayBuffer()),
+          });
+          captureSessionRef.current.videoPath = videoResult?.path;
+        } catch {
+          captureSessionRef.current.videoPath = undefined;
+        }
+        captureSessionRef.current.videoMimeType = recordingMimeType;
+        for (const move of captureSessionRef.current.moves) {
+          try {
+            const processedMove = await processRecordedMove(recordedVideo, move);
+            Object.assign(move, processedMove);
+            updateStoredMove(move);
+          } catch {
+            // Preserve the move timing and framebar data if video decoding fails.
+          }
+          persistCaptureSession("active");
+        }
+        persistCaptureSession("complete");
+      };
+      const startRecording = () => {
+        if (mediaRecorder?.state === "inactive") mediaRecorder = null;
+        if (recordingFinalized) {
+          recordingChunks = [];
+          recordingFinalized = false;
+          captureSessionRef.current = {
+            sessionId: createCaptureSessionId(),
+            startedAt: new Date().toISOString(),
+            status: "active",
+            captureSourceId: captureSourceId || null,
+            captureSourceMode,
+            sourceWidth: video.videoWidth,
+            sourceHeight: video.videoHeight,
+            captureQuality: createCaptureQuality(),
+            samples: [],
+            moves: [],
+          };
+          captureSessionRef.current.captureQuality.sourceFrameRate = sourceFrameRate;
+          qualityWindowStartedAt = 0;
+          qualityWindowFrameCount = 0;
+          lastMediaTime = null;
+          lastPresentedFrames = null;
+          persistCaptureSession("active");
+        }
+        if (
+          localStorage.getItem(overlayCaptureEnabledKey) === "false" ||
+          localStorage.getItem(overlayCaptureRequestedKey) !== "true" ||
+          !stream ||
+          typeof MediaRecorder === "undefined" ||
+          mediaRecorder
+        ) {
+          return;
+        }
+        const mimeType = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"].find(
+          (candidate) => MediaRecorder.isTypeSupported(candidate),
+        );
+        try {
+          mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+          recordingMimeType = mediaRecorder.mimeType || mimeType || "video/webm";
+          mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) recordingChunks.push(event.data);
+          };
+          mediaRecorder.onstop = () => void processRecordedSession();
+          mediaRecorder.start(1000);
+        } catch {
+          mediaRecorder = null;
+        }
+      };
+      beginRecording = startRecording;
+      if (localStorage.getItem(overlayCaptureRequestedKey) === "true") startRecording();
+      stopRecording = () => {
+        if (recordingFinalized) return;
+        recordingFinalized = true;
+        localStorage.setItem(overlayCaptureRequestedKey, "false");
+        if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+        else void processRecordedSession();
+      };
+      const draw = (
+        frameMetadata?: { mediaTime: number; presentedFrames?: number },
+        callbackNow = performance.now(),
+      ) => {
         if (reconnecting || stopped) return;
         tick += 1;
+        const captureFrame = ++captureFrameSequenceRef.current;
+        const captureTimestampMs = Date.now();
+        const mediaTime = frameMetadata?.mediaTime ?? video.currentTime;
+        updateCaptureQuality(callbackNow, {
+          mediaTime,
+          presentedFrames: frameMetadata?.presentedFrames,
+        });
         if (debugRef.current) {
           debugRef.current.style.display =
             localStorage.getItem(overlayTextDebugKey) === "false" ? "none" : "block";
@@ -2673,12 +3391,16 @@ export function OverlaySurface() {
                     recentInputEvent ?? findPrecedingButtonInput(inputTimelineRef.current, now);
                   waitingForPlayer1IdleRef.current = false;
                   if (precipitatingInput) {
-                    activeMoveEpisodeRef.current = {
+                    const startedEpisode: MoveEpisode = {
                       startedAt: new Date(now).toISOString(),
                       endedAt: null,
                       inputEvents: [precipitatingInput],
                       framebarSamples: [],
+                      captureSessionId: captureSessionRef.current.sessionId,
+                      captureStartFrame: captureFrame,
+                      mediaStartTime: mediaTime,
                     };
+                    activeMoveEpisodeRef.current = startedEpisode;
                     moveResolutionSummaryRef.current = `${precipitatingInput.resolvedInput?.notation ?? precipitatingInput.signature}: waiting for P1 framebar to stop`;
                     moveStatusRef.current = "P1 framebar activity; resolving preceding input";
                   } else {
@@ -2728,23 +3450,17 @@ export function OverlaySurface() {
                       endedAt,
                       framebarSamples: episode.framebarSamples.slice(-200),
                       resolvedMove,
+                      captureEndFrame: captureFrame,
+                      mediaEndTime: mediaTime,
                     };
                     if (resolvedMove) {
                       const { startup, active, recovery } = resolvedMove.phases;
                       const { hitstun, blockstun } = resolvedMove.opponentPhases;
                       moveResolutionSummaryRef.current = `${resolvedMove.notation}: startup ${startup}, active ${active}, recovery ${recovery}, hitstun ${hitstun}, blockstun ${blockstun}`;
                     }
-                    let moveLog: MoveEpisode[] = [];
-                    try {
-                      moveLog = JSON.parse(localStorage.getItem(overlayMoveEpisodeLogKey) ?? "[]");
-                    } catch {
-                      moveLog = [];
-                    }
-                    moveLog.push(completedMove);
-                    localStorage.setItem(
-                      overlayMoveEpisodeLogKey,
-                      JSON.stringify(moveLog.slice(-100)),
-                    );
+                    updateStoredMove(completedMove);
+                    captureSessionRef.current.moves.push(completedMove);
+                    persistCaptureSession(stopped ? "complete" : "active");
                     activeMoveEpisodeRef.current = null;
                     moveStatusRef.current = "P1 framebar stopped; move ended";
                   }
@@ -2862,7 +3578,7 @@ export function OverlaySurface() {
                 if (debugRef.current) {
                   debugRef.current.textContent = `Training meter inactive\n${trainingMeterSummaryRef.current}\ninput: ${inputSummaryRef.current}\ninput event: ${inputEventSummaryRef.current}\ninput alignment: ${inputAlignmentSummaryRef.current}\ncorners: ${cornerSummaryRef.current}\nresolved move: ${moveResolutionSummaryRef.current}\nmove framebar source: P1 (P2 reserved for defense)\nP1: ${player1SummaryRef.current}\nmove: ${moveStatusRef.current}`;
                 }
-                frame = requestAnimationFrame(draw);
+                scheduleFrame();
                 return;
               }
               let idlePixels = 0;
@@ -2960,6 +3676,26 @@ export function OverlaySurface() {
               });
               framebarStateRef.current.player2 = groups;
               const player2Phases = summarizeDefensivePhases(groups);
+              if (localStorage.getItem(overlayCaptureEnabledKey) !== "false") {
+                captureSessionRef.current.samples.push({
+                  captureFrame,
+                  timestamp: new Date(captureTimestampMs).toISOString(),
+                  timestampMs: captureTimestampMs,
+                  mediaTime,
+                  player1: formatFramebarGroups(framebarStateRef.current.player1),
+                  player2: formatFramebarGroups(groups),
+                  player1Phases: summarizeFramePhases(framebarStateRef.current.player1),
+                  player2Phases,
+                  player1Phase: currentMovePhase(framebarStateRef.current.player1),
+                  input: stableResolvedInputRef.current?.notation,
+                });
+                if (captureSessionRef.current.samples.length > 3600) {
+                  captureSessionRef.current.samples.splice(
+                    0,
+                    captureSessionRef.current.samples.length - 3600,
+                  );
+                }
+              }
               if (debugRef.current) {
                 const unmappedSummary = [...unmappedColors.entries()]
                   .sort((left, right) => right[1] - left[1])
@@ -3051,7 +3787,13 @@ export function OverlaySurface() {
             }
           }
         }
-        frame = requestAnimationFrame(draw);
+        scheduleFrame();
+      };
+      const scheduleFrame = () => {
+        // Keep the analysis loop alive even when the capture video is hidden
+        // from the compositor. Some Chromium builds do not deliver
+        // requestVideoFrameCallback callbacks for non-visible video elements.
+        frame = requestAnimationFrame((now) => draw(undefined, now));
       };
       draw();
     };
@@ -3060,7 +3802,11 @@ export function OverlaySurface() {
       stopped = true;
       window.clearTimeout(retryTimer);
       cancelAnimationFrame(frame);
+      stopRecording?.();
+      finalizeSubscription?.();
+      beginSubscription?.();
       stream?.getTracks().forEach((track) => track.stop());
+      if (!stopRecording) persistCaptureSession("complete");
     };
   }, []);
   return (
@@ -3071,6 +3817,7 @@ export function OverlaySurface() {
           top: 24,
           left: 24,
           zIndex: 2,
+          pointerEvents: "none",
           p: 2,
           color: "white",
           backgroundColor: "red",
@@ -3105,10 +3852,28 @@ export function OverlaySurface() {
       >
         Waiting for capture...
       </Box>
-      <video ref={videoRef} style={{ display: "none" }} />
+      <video
+        ref={videoRef}
+        muted
+        aria-hidden="true"
+        style={{
+          position: "fixed",
+          width: 1,
+          height: 1,
+          opacity: 0,
+          pointerEvents: "none",
+        }}
+      />
       <canvas
         ref={canvasRef}
-        style={{ position: "fixed", inset: 0, width: "100%", height: "100%" }}
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1,
+          width: "100%",
+          height: "100%",
+          pointerEvents: "none",
+        }}
       />
     </>
   );

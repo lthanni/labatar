@@ -5,6 +5,7 @@ const {
   ipcMain,
   screen,
   session,
+  shell,
   desktopCapturer,
 } = require("electron");
 const path = require("node:path");
@@ -313,6 +314,84 @@ ipcMain.handle("overlay:set-focus-mode", (_, enabled) => {
     overlayWindow.showInactive();
   }
   return onlyShowWhenGameFocused;
+});
+
+ipcMain.handle("overlay:finalize-capture", () => {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send("overlay:finalize-capture");
+  }
+  return true;
+});
+
+ipcMain.handle("overlay:begin-capture", () => {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send("overlay:begin-capture");
+  }
+  return true;
+});
+
+function safeCaptureName(value, fallback) {
+  const name = String(value ?? "")
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/^\.+$/, "");
+  return name || fallback;
+}
+
+function captureSessionDirectory(sessionId) {
+  return path.join(captureRootDirectory(), safeCaptureName(sessionId, "session"));
+}
+
+function captureRootDirectory() {
+  return path.join(app.getPath("videos"), "Avatar App", "captures");
+}
+
+ipcMain.handle("overlay:get-capture-folder", () => captureRootDirectory());
+
+ipcMain.handle("overlay:open-capture-folder", async () => {
+  const directory = captureRootDirectory();
+  await fs.promises.mkdir(directory, { recursive: true });
+  const error = await shell.openPath(directory);
+  if (error) throw new Error(error);
+  return directory;
+});
+
+ipcMain.handle("overlay:save-capture-screenshot", async (_, request) => {
+  const directory = captureSessionDirectory(request?.sessionId);
+  const filename = safeCaptureName(request?.filename, "capture.png");
+  const data = request?.data;
+  if (!data || (!ArrayBuffer.isView(data) && !(data instanceof ArrayBuffer))) {
+    throw new Error("Capture screenshot data is missing or invalid");
+  }
+  const bytes = ArrayBuffer.isView(data)
+    ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+    : Buffer.from(new Uint8Array(data));
+  await fs.promises.mkdir(directory, { recursive: true });
+  const filePath = path.join(directory, filename);
+  await fs.promises.writeFile(filePath, bytes);
+  return { path: filePath };
+});
+
+ipcMain.handle("overlay:save-capture-video", async (_, request) => {
+  const directory = captureSessionDirectory(request?.sessionId);
+  const data = request?.data;
+  if (!data || (!ArrayBuffer.isView(data) && !(data instanceof ArrayBuffer))) {
+    throw new Error("Capture video data is missing or invalid");
+  }
+  const bytes = ArrayBuffer.isView(data)
+    ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+    : Buffer.from(new Uint8Array(data));
+  await fs.promises.mkdir(directory, { recursive: true });
+  const filePath = path.join(directory, "session.webm");
+  await fs.promises.writeFile(filePath, bytes);
+  return { path: filePath };
+});
+
+ipcMain.handle("overlay:save-capture-session", async (_, request) => {
+  const directory = captureSessionDirectory(request?.sessionId);
+  await fs.promises.mkdir(directory, { recursive: true });
+  const filePath = path.join(directory, "session.json");
+  await fs.promises.writeFile(filePath, JSON.stringify(request?.manifest ?? {}, null, 2), "utf8");
+  return { path: filePath };
 });
 
 ipcMain.handle("replays:get-folder", () => readSettings().replaysFolder ?? null);
