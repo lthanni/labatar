@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getFolder: () => ipcRenderer.invoke("replays:get-folder"),
     selectFolder: () => ipcRenderer.invoke("replays:select-folder"),
     scanFolder: (folder) => ipcRenderer.invoke("replays:scan-folder", folder),
+    showInFolder: (request) => ipcRenderer.invoke("replays:show-in-folder", request),
     zip: (request) => ipcRenderer.invoke("replays:zip", request),
     onScanProgress: (listener) => {
       const handler = (_, progress) => listener(progress);

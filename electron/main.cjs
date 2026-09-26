@@ -147,8 +147,20 @@ async function parseReplayFile(filePath, rootFolder = path.dirname(filePath)) {
     player1Character: characters.player1,
     player2Character: characters.player2,
     winner,
-    player1Support: formatSupport(characters.player1, fields.P1_SupportCharId),
-    player2Support: formatSupport(characters.player2, fields.P2_SupportCharId),
+    player1Support: formatSupport(
+      characters.player1,
+      fields.P1_SupportCharId ??
+        fields.P1_SupportCharID ??
+        fields.SupportCharIdP1 ??
+        fields.SupportCharIDP1,
+    ),
+    player2Support: formatSupport(
+      characters.player2,
+      fields.P2_SupportCharId ??
+        fields.P2_SupportCharID ??
+        fields.SupportCharIdP2 ??
+        fields.SupportCharIDP2,
+    ),
     roundScore:
       fields.TM_WinsT1 && fields.TM_WinsT2
         ? `${fields.TM_WinsT1} - ${fields.TM_WinsT2}`
@@ -255,6 +267,49 @@ function runPowerShellZip(sourceFolder, destination) {
     });
   });
 }
+
+async function resolveReplayPath(rootFolder, replayId) {
+  const normalizedId = replayId.replaceAll("/", path.sep);
+  const candidate = path.resolve(rootFolder, normalizedId);
+  const relativeCandidate = path.relative(rootFolder, candidate);
+  if (
+    relativeCandidate.startsWith(".." + path.sep) ||
+    relativeCandidate === ".." ||
+    path.isAbsolute(relativeCandidate)
+  ) {
+    throw new Error("A selected replay is outside the replay folder.");
+  }
+  const realCandidate = await fs.promises.realpath(candidate);
+  const realRelativeCandidate = path.relative(rootFolder, realCandidate);
+  if (
+    realRelativeCandidate.startsWith(".." + path.sep) ||
+    realRelativeCandidate === ".." ||
+    path.isAbsolute(realRelativeCandidate)
+  ) {
+    throw new Error("A selected replay is outside the replay folder.");
+  }
+  const stat = await fs.promises.stat(realCandidate);
+  if (!stat.isFile()) throw new Error(`Replay file not found: ${replayId}`);
+  return realCandidate;
+}
+
+ipcMain.handle("replays:show-in-folder", async (_, request) => {
+  const folder = readSettings().replaysFolder;
+  const requestedIds = [
+    ...new Set(
+      Array.isArray(request?.ids)
+        ? request.ids.filter((id) => typeof id === "string" && id.length > 0)
+        : [],
+    ),
+  ];
+  if (!folder) throw new Error("Select a replay folder before opening Explorer.");
+  if (requestedIds.length === 0) throw new Error("No replay files were selected.");
+
+  const rootFolder = await fs.promises.realpath(folder);
+  const replayPath = await resolveReplayPath(rootFolder, requestedIds[0]);
+  if (requestedIds.length === 1) shell.showItemInFolder(replayPath);
+  else await shell.openPath(path.dirname(replayPath));
+});
 
 ipcMain.handle("replays:zip", async (_, request) => {
   const folder = readSettings().replaysFolder;
@@ -563,9 +618,15 @@ ipcMain.handle("replays:get-folder", () => {
 });
 
 ipcMain.handle("replays:select-folder", async () => {
+  const savedFolder = readSettings().replaysFolder;
+  const defaultPath =
+    (savedFolder && fs.existsSync(savedFolder) && savedFolder) ||
+    (fs.existsSync(defaultReplaysFolder) && defaultReplaysFolder) ||
+    app.getPath("home");
   const result = await dialog.showOpenDialog({
     title: "Select replay folder",
     properties: ["openDirectory", "createDirectory"],
+    defaultPath,
   });
 
   if (result.canceled || result.filePaths.length === 0) return null;
