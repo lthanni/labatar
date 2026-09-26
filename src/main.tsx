@@ -32,9 +32,15 @@ declare global {
       replays: {
         getFolder: () => Promise<string | null>;
         selectFolder: () => Promise<string | null>;
-        scanFolder: (
-          folder: string,
-        ) => Promise<{ games: ReplayRow[]; playerCounts: Record<string, number> }>;
+        scanFolder: (folder: string) => Promise<{
+          games: ReplayRow[];
+          playerCounts: Record<string, number>;
+          duplicateCount: number;
+        }>;
+        zip: (request: { ids: string[]; suggestedName: string }) => Promise<{
+          path: string;
+          fileCount: number;
+        } | null>;
         onScanProgress: (
           listener: (progress: { completed: number; total: number; phase: "scanning" }) => void,
         ) => () => void;
@@ -82,6 +88,7 @@ function ReplayFolderPicker({
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState({ completed: 0, total: 0 });
   const [error, setError] = useState<string | null>(null);
+  const [duplicateCount, setDuplicateCount] = useState(0);
   const scanGeneration = useRef(0);
   const scan = useCallback(
     async (selectedFolder: string | null) => {
@@ -89,12 +96,15 @@ function ReplayFolderPicker({
       const generation = ++scanGeneration.current;
       setLoading(true);
       setError(null);
+      setDuplicateCount(0);
       setProgress({ completed: 0, total: 0 });
       try {
         const result = await window.electronAPI.replays.scanFolder(selectedFolder);
         if (generation !== scanGeneration.current) return;
         onData(result.games, result.playerCounts);
-        setProgress({ completed: result.games.length, total: result.games.length });
+        setDuplicateCount(result.duplicateCount);
+        const scannedCount = result.games.length + result.duplicateCount;
+        setProgress({ completed: scannedCount, total: scannedCount });
       } catch (scanError) {
         if (generation !== scanGeneration.current) return;
         setError(scanError instanceof Error ? scanError.message : String(scanError));
@@ -160,6 +170,11 @@ function ReplayFolderPicker({
               : "Finding replay files..."}
           </Typography>
         </Stack>
+      )}
+      {duplicateCount > 0 && (
+        <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
+          Ignored {duplicateCount} duplicate replay file{duplicateCount === 1 ? "" : "s"}.
+        </Typography>
       )}
       {error && (
         <Typography variant="caption" color="error" component="div" sx={{ mt: 1 }}>

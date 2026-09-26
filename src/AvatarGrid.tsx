@@ -2,13 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import type { ColDef, ICellRendererParams, ValueGetterParams } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import {
+  Alert,
   Checkbox,
+  Divider,
   FormControl,
   InputLabel,
   LinearProgress,
   ListItemText,
+  Menu,
   MenuItem,
   Pagination,
+  Snackbar,
   Select,
   Stack,
   Typography,
@@ -43,6 +47,8 @@ type SessionRow = {
 type DisplayRow =
   | (SessionRow & { kind: "session" })
   | (ReplayRow & { kind: "game"; sessionId: string });
+type ExportMessage = { severity: "success" | "error"; text: string };
+type ContextMenuState = { data: DisplayRow; mouseX: number; mouseY: number } | null;
 
 function formatReplayTimestamp(timestamp: string | null) {
   if (!timestamp) return "";
@@ -254,6 +260,8 @@ export function AvatarGrid({
   );
   const [sessionProgress, setSessionProgress] = useState({ completed: 0, total: 0 });
   const [isPreparingSessions, setIsPreparingSessions] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
+  const [exportMessage, setExportMessage] = useState<ExportMessage | null>(null);
   useEffect(() => {
     let active = true;
     setIsPreparingSessions(true);
@@ -349,6 +357,30 @@ export function AvatarGrid({
       ]),
     [expandedSessions, pagedSessions],
   );
+  const exportContextRow = async () => {
+    if (!contextMenu || !window.electronAPI) return;
+    const { data } = contextMenu;
+    const ids = data.kind === "session" ? data.games.map((game) => game.id) : [data.id];
+    const suggestedName =
+      data.kind === "session"
+        ? `Labatar set - ${data.started} vs ${data.opponent}`
+        : `Labatar replay - ${data.timestamp ?? data.id}`;
+    setContextMenu(null);
+    try {
+      const result = await window.electronAPI.replays.zip({ ids, suggestedName });
+      if (result) {
+        setExportMessage({
+          severity: "success",
+          text: `Created ZIP with ${result.fileCount} replay${result.fileCount === 1 ? "" : "s"}: ${result.path}`,
+        });
+      }
+    } catch (error) {
+      setExportMessage({
+        severity: "error",
+        text: `Could not create ZIP: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  };
   const columnDefs = useMemo<ColDef<DisplayRow>[]>(
     () => [
       {
@@ -482,7 +514,6 @@ export function AvatarGrid({
         </Stack>
       )}
       <Stack
-        direction={{ xs: "column", md: "row" }}
         spacing={1}
         sx={{
           mb: 1,
@@ -492,38 +523,81 @@ export function AvatarGrid({
           borderRadius: 1,
         }}
       >
-        <SetFilter
-          label="Opponent"
-          values={filterValues.opponent}
-          selected={filters.opponent}
-          onChange={(value) => setFilters((current) => ({ ...current, opponent: value }))}
-        />
-        <SetFilter
-          label="POI character / support"
-          values={filterValues.poi}
-          selected={filters.poi}
-          onChange={(value) => setFilters((current) => ({ ...current, poi: value }))}
-        />
-        <SetFilter
-          label="POI support"
-          values={filterValues.poiSupport}
-          selected={filters.poiSupport}
-          onChange={(value) => setFilters((current) => ({ ...current, poiSupport: value }))}
-        />
-        <SetFilter
-          label="Opponent character"
-          values={filterValues.opponentCharacter}
-          selected={filters.opponentCharacter}
-          onChange={(value) =>
-            setFilters((current) => ({ ...current, opponentCharacter: value, opponentSupport: [] }))
-          }
-        />
-        <SetFilter
-          label="Opponent support"
-          values={filterValues.opponentSupport}
-          selected={filters.opponentSupport}
-          onChange={(value) => setFilters((current) => ({ ...current, opponentSupport: value }))}
-        />
+        <Typography variant="subtitle2" color="text.secondary">
+          Filters
+        </Typography>
+        <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+          <Stack
+            spacing={0.5}
+            sx={{ flex: 1, p: 1, border: 1, borderColor: "divider", borderRadius: 1 }}
+          >
+            <Typography variant="caption" color="text.secondary">
+              POI
+            </Typography>
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+              <SetFilter
+                label="Character"
+                values={filterValues.poi}
+                selected={filters.poi}
+                onChange={(value) => setFilters((current) => ({ ...current, poi: value }))}
+              />
+              <SetFilter
+                label="Support"
+                values={filterValues.poiSupport}
+                selected={filters.poiSupport}
+                onChange={(value) => setFilters((current) => ({ ...current, poiSupport: value }))}
+              />
+            </Stack>
+          </Stack>
+          <Divider orientation="vertical" flexItem sx={{ display: { xs: "none", md: "block" } }} />
+          <Stack
+            spacing={0.5}
+            sx={{
+              flex: 1,
+              p: 1,
+              border: 1,
+              borderColor: "divider",
+              borderRadius: 1,
+              alignItems: { md: "flex-end" },
+            }}
+          >
+            <Typography variant="caption" color="text.secondary">
+              Opponent
+            </Typography>
+            <Stack
+              direction={{ xs: "column", sm: "row" }}
+              spacing={1}
+              sx={{ justifyContent: { md: "flex-end" } }}
+            >
+              <SetFilter
+                label="Player"
+                values={filterValues.opponent}
+                selected={filters.opponent}
+                onChange={(value) => setFilters((current) => ({ ...current, opponent: value }))}
+              />
+              <SetFilter
+                label="Character"
+                values={filterValues.opponentCharacter}
+                selected={filters.opponentCharacter}
+                onChange={(value) =>
+                  setFilters((current) => ({
+                    ...current,
+                    opponentCharacter: value,
+                    opponentSupport: [],
+                  }))
+                }
+              />
+              <SetFilter
+                label="Support"
+                values={filterValues.opponentSupport}
+                selected={filters.opponentSupport}
+                onChange={(value) =>
+                  setFilters((current) => ({ ...current, opponentSupport: value }))
+                }
+              />
+            </Stack>
+          </Stack>
+        </Stack>
       </Stack>
       <div className="ag-theme-quartz-dark" style={{ height: 500, width: "100%" }}>
         <AgGridReact<DisplayRow>
@@ -532,6 +606,16 @@ export function AvatarGrid({
           defaultColDef={{ sortable: true, filter: true, resizable: true }}
           autoSizeStrategy={{ type: "fitGridWidth" }}
           getRowId={({ data }) => data.id}
+          onCellContextMenu={(params) => {
+            const event = params.event;
+            if (!params.data || !(event instanceof MouseEvent)) return;
+            event.preventDefault();
+            setContextMenu({
+              data: params.data,
+              mouseX: event.clientX,
+              mouseY: event.clientY,
+            });
+          }}
         />
       </div>
       <Stack
@@ -558,6 +642,31 @@ export function AvatarGrid({
           disabled={pageCount <= 1}
         />
       </Stack>
+      <Menu
+        open={contextMenu !== null}
+        onClose={() => setContextMenu(null)}
+        anchorReference="anchorPosition"
+        anchorPosition={
+          contextMenu ? { top: contextMenu.mouseY, left: contextMenu.mouseX } : undefined
+        }
+      >
+        <MenuItem onClick={() => void exportContextRow()}>
+          {contextMenu?.data.kind === "session"
+            ? `Export set as ZIP (${contextMenu.data.games.length} replays)`
+            : "Export replay as ZIP"}
+        </MenuItem>
+      </Menu>
+      <Snackbar
+        open={exportMessage !== null}
+        autoHideDuration={7000}
+        onClose={() => setExportMessage(null)}
+      >
+        {exportMessage ? (
+          <Alert onClose={() => setExportMessage(null)} severity={exportMessage.severity}>
+            {exportMessage.text}
+          </Alert>
+        ) : undefined}
+      </Snackbar>
     </>
   );
 }

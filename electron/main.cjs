@@ -10,6 +10,8 @@ const {
 } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
+const { createHash } = require("node:crypto");
+const { spawn } = require("node:child_process");
 const supportMap = require("./support-map.json");
 const characterMap = require("./character-map.json");
 let overlayWindow = null;
@@ -24,6 +26,14 @@ const getActiveWindow = async () => (await import("active-win")).activeWindow();
 
 const isDev = !app.isPackaged;
 const overlayAvailable = isDev;
+const defaultReplaysFolder = path.join(
+  "C:\\",
+  "Program Files (x86)",
+  "Steam",
+  "steamapps",
+  "common",
+  "Avatar Legends The Fighting Game",
+);
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
 
 function watchElectronFiles() {
@@ -97,8 +107,10 @@ function formatCharacter(character) {
   );
 }
 
-async function parseReplayFile(filePath) {
-  const content = await fs.promises.readFile(filePath, "latin1");
+async function parseReplayFile(filePath, rootFolder = path.dirname(filePath)) {
+  const contentBuffer = await fs.promises.readFile(filePath);
+  const content = contentBuffer.toString("latin1");
+  const contentHash = createHash("sha256").update(contentBuffer).digest("hex");
   const fields = {};
   for (const match of content.match(/[ -~]{3,}/g) ?? []) {
     const separator = match.indexOf(" = ");
@@ -106,6 +118,7 @@ async function parseReplayFile(filePath) {
   }
 
   const fileName = path.basename(filePath);
+  const replayId = path.relative(rootFolder, filePath).split(path.sep).join("/");
   const names = {
     player1: cleanReplayName(fields.ReplayInfo_P1Name ?? "Player 1"),
     player2: cleanReplayName(fields.ReplayInfo_P2Name ?? "Player 2"),
@@ -126,7 +139,8 @@ async function parseReplayFile(filePath) {
     : null;
 
   return {
-    id: fileName,
+    id: replayId,
+    contentHash,
     timestamp,
     player1: names.player1,
     player2: names.player2,
@@ -142,16 +156,46 @@ async function parseReplayFile(filePath) {
   };
 }
 
+async function findReplayFiles(folder) {
+  const replayFiles = [];
+  const directories = [folder];
+
+  while (directories.length > 0) {
+    const currentDirectory = directories.pop();
+    let entries;
+    try {
+      entries = await fs.promises.readdir(currentDirectory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const entryPath = path.join(currentDirectory, entry.name);
+      if (entry.isDirectory()) directories.push(entryPath);
+      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".dlr")) {
+        replayFiles.push(entryPath);
+      }
+    }
+  }
+
+  return replayFiles.sort((left, right) => left.localeCompare(right));
+}
+
 ipcMain.handle("replays:scan-folder", async (event, folder) => {
-  if (!folder || !fs.existsSync(folder)) return { games: [], playerCounts: {} };
-  const entries = fs
-    .readdirSync(folder, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".dlr"));
-  const total = entries.length;
+  if (!folder || !fs.existsSync(folder)) return { games: [], playerCounts: {}, duplicateCount: 0 };
+  const replayFiles = await findReplayFiles(folder);
+  const total = replayFiles.length;
   const games = [];
+  const seenReplayHashes = new Set();
+  let duplicateCount = 0;
   event.sender.send("replays:scan-progress", { completed: 0, total, phase: "scanning" });
-  for (const [index, entry] of entries.entries()) {
-    games.push(await parseReplayFile(path.join(folder, entry.name)));
+  for (const [index, filePath] of replayFiles.entries()) {
+    const { contentHash, ...game } = await parseReplayFile(filePath, folder);
+    if (seenReplayHashes.has(contentHash)) duplicateCount += 1;
+    else {
+      seenReplayHashes.add(contentHash);
+      games.push(game);
+    }
     event.sender.send("replays:scan-progress", {
       completed: index + 1,
       total,
@@ -168,7 +212,114 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
     playerCounts[game.player1] = (playerCounts[game.player1] ?? 0) + 1;
     playerCounts[game.player2] = (playerCounts[game.player2] ?? 0) + 1;
   }
-  return { games, playerCounts };
+  return { games, playerCounts, duplicateCount };
+});
+
+function safeZipName(value) {
+  const name = String(value ?? "Labatar replays")
+    .replace(/[<>:"/\\|?*]/g, "_")
+    .split("")
+    .filter((character) => character.charCodeAt(0) >= 0x20)
+    .join("")
+    .trim()
+    .replace(/[. ]+$/, "");
+  return name || "Labatar replays";
+}
+
+function quotePowerShellString(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function runPowerShellZip(sourceFolder, destination) {
+  return new Promise((resolve, reject) => {
+    const command = [
+      "$ErrorActionPreference = 'Stop'",
+      `$sourceFolder = ${quotePowerShellString(sourceFolder)}`,
+      `$destination = ${quotePowerShellString(destination)}`,
+      "$source = Join-Path $sourceFolder '*'",
+      "Compress-Archive -Path $source -DestinationPath $destination -CompressionLevel Optimal -Force",
+    ].join("; ");
+    const child = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+      { windowsHide: true },
+    );
+    let errorOutput = "";
+    child.stderr.on("data", (chunk) => {
+      errorOutput += chunk.toString();
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(errorOutput.trim() || `PowerShell exited with code ${code}`));
+    });
+  });
+}
+
+ipcMain.handle("replays:zip", async (_, request) => {
+  const folder = readSettings().replaysFolder;
+  const requestedIds = [
+    ...new Set(
+      Array.isArray(request?.ids)
+        ? request.ids.filter((id) => typeof id === "string" && id.length > 0)
+        : [],
+    ),
+  ];
+  if (!folder) throw new Error("Select a replay folder before exporting replays.");
+  if (requestedIds.length === 0) throw new Error("No replay files were selected.");
+
+  const rootFolder = await fs.promises.realpath(folder);
+  const files = [];
+  for (const replayId of requestedIds) {
+    const normalizedId = replayId.replaceAll("/", path.sep);
+    const candidate = path.resolve(rootFolder, normalizedId);
+    const relativeCandidate = path.relative(rootFolder, candidate);
+    if (
+      relativeCandidate.startsWith(".." + path.sep) ||
+      relativeCandidate === ".." ||
+      path.isAbsolute(relativeCandidate)
+    ) {
+      throw new Error("A selected replay is outside the replay folder.");
+    }
+    const realCandidate = await fs.promises.realpath(candidate);
+    const realRelativeCandidate = path.relative(rootFolder, realCandidate);
+    if (
+      realRelativeCandidate.startsWith(".." + path.sep) ||
+      realRelativeCandidate === ".." ||
+      path.isAbsolute(realRelativeCandidate)
+    ) {
+      throw new Error("A selected replay is outside the replay folder.");
+    }
+    const stat = await fs.promises.stat(realCandidate);
+    if (!stat.isFile()) throw new Error(`Replay file not found: ${replayId}`);
+    files.push({ source: realCandidate, relative: realRelativeCandidate });
+  }
+
+  const defaultName = `${safeZipName(request?.suggestedName)}.zip`;
+  const result = await dialog.showSaveDialog({
+    title: "Export replays as ZIP",
+    defaultPath: path.join(app.getPath("downloads"), defaultName),
+    filters: [{ name: "ZIP archive", extensions: ["zip"] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+
+  const destination = result.filePath.toLowerCase().endsWith(".zip")
+    ? result.filePath
+    : `${result.filePath}.zip`;
+  const stagingFolder = await fs.promises.mkdtemp(
+    path.join(app.getPath("temp"), "labatar-replays-"),
+  );
+  try {
+    for (const file of files) {
+      const stagedPath = path.join(stagingFolder, file.relative);
+      await fs.promises.mkdir(path.dirname(stagedPath), { recursive: true });
+      await fs.promises.copyFile(file.source, stagedPath);
+    }
+    await runPowerShellZip(stagingFolder, destination);
+    return { path: destination, fileCount: files.length };
+  } finally {
+    await fs.promises.rm(stagingFolder, { recursive: true, force: true });
+  }
 });
 
 function createOverlayWindow() {
@@ -405,7 +556,11 @@ ipcMain.handle("overlay:save-capture-session", async (_, request) => {
   return { path: filePath };
 });
 
-ipcMain.handle("replays:get-folder", () => readSettings().replaysFolder ?? null);
+ipcMain.handle("replays:get-folder", () => {
+  const savedFolder = readSettings().replaysFolder;
+  if (savedFolder) return savedFolder;
+  return fs.existsSync(defaultReplaysFolder) ? defaultReplaysFolder : null;
+});
 
 ipcMain.handle("replays:select-folder", async () => {
   const result = await dialog.showOpenDialog({
