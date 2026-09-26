@@ -8,7 +8,7 @@ Download the latest Windows installer from the [GitHub Releases page](https://gi
 
 Run the `.exe` installer and launch Labatar from the Start menu. Windows may show a SmartScreen warning because the installer is not currently code-signed; verify that the installer came from the Labatar GitHub Releases page before continuing.
 
-## Replay analysis
+## Match history
 
 1. Launch Labatar.
 2. Choose your replay folder. Labatar starts with the usual Steam installation folder when it exists:

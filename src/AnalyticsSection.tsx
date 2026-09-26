@@ -735,7 +735,7 @@ export function AnalyticsSection({
           )
         : [],
     [chartGames, playerOfInterest],
-  ).slice(0, 12);
+  ).slice(0, 8);
   const timelineData = useMemo(
     () => (playerOfInterest ? buildTimeline(chartGames, playerOfInterest) : []),
     [chartGames, playerOfInterest],
@@ -836,7 +836,7 @@ export function AnalyticsSection({
               <BarChart data={opponentData} layout="vertical" margin={{ left: 20, right: 20 }}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis type="number" domain={[0, 100]} unit="%" />
-                <YAxis type="category" dataKey="name" width={120} />
+                <YAxis type="category" dataKey="name" width={120} interval={0} />
                 <Tooltip />
                 <Bar dataKey="winRate" name="Win rate" fill="#ce93d8" radius={[0, 4, 4, 0]} />
               </BarChart>

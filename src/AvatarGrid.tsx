@@ -538,7 +538,7 @@ export function AvatarGrid({
           columnDefs={columnDefs}
           rowData={displayRows}
           defaultColDef={{ sortable: true, filter: true, resizable: true }}
-          autoSizeStrategy={{ type: "fitGridWidth" }}
+          autoSizeStrategy={{ type: "fitCellContents" }}
           getRowId={({ data }) => data.id}
           onCellContextMenu={(params) => {
             const event = params.event;

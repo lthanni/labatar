@@ -7,6 +7,7 @@ import {
   Card,
   CardContent,
   FormControl,
+  IconButton,
   InputLabel,
   LinearProgress,
   MenuItem,
@@ -17,6 +18,7 @@ import {
   Tabs,
   TextField,
   ThemeProvider,
+  Tooltip,
   Typography,
   createTheme,
 } from "@mui/material";
@@ -154,6 +156,10 @@ function ReplayFolderPicker({
     }
   };
 
+  const refreshFolder = () => {
+    void scan(folder);
+  };
+
   return (
     <Paper variant="outlined" sx={{ p: 2, textAlign: "left" }}>
       <Stack
@@ -173,6 +179,33 @@ function ReplayFolderPicker({
           <Button variant="contained" onClick={chooseFolder} disabled={loading}>
             Choose folder
           </Button>
+          <Tooltip title="Refresh replay files">
+            <span>
+              <IconButton
+                aria-label="Refresh replay files"
+                onClick={refreshFolder}
+                disabled={!folder || loading}
+                size="small"
+              >
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  width="22"
+                  height="22"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M20 11a8.1 8.1 0 0 0-14.8-4.5L3 9" />
+                  <path d="M3 4v5h5" />
+                  <path d="M4 13a8.1 8.1 0 0 0 14.8 4.5L21 15" />
+                  <path d="M21 20v-5h-5" />
+                </svg>
+              </IconButton>
+            </span>
+          </Tooltip>
         </Stack>
         <Stack
           direction="row"
@@ -446,7 +479,7 @@ function App() {
   return (
     <>
       <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)} sx={{ mb: 2 }}>
-        <Tab label="Replay analysis" />
+        <Tab label="Match history" />
         {overlayAvailable && <Tab label="Visual overlay" />}
       </Tabs>
       {mountedTabs.replay && (
