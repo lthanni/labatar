@@ -1,19 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ColDef, ICellRendererParams, ValueGetterParams } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
+import { AnalyticsSection, type AnalysisSummary } from "./AnalyticsSection";
 import {
   Alert,
-  Checkbox,
-  Divider,
-  FormControl,
-  InputLabel,
   LinearProgress,
-  ListItemText,
   Menu,
   MenuItem,
   Pagination,
   Snackbar,
-  Select,
   Stack,
   Typography,
 } from "@mui/material";
@@ -57,41 +52,6 @@ function formatReplayTimestamp(timestamp: string | null) {
   const [, year, month, day, hour, minute] = match;
   const currentYear = new Date().getFullYear().toString();
   return `${year === currentYear ? "" : `${year} `}${month}/${day} ${hour}:${minute}`;
-}
-
-function SetFilter({
-  label,
-  values,
-  selected,
-  onChange,
-}: {
-  label: string;
-  values: string[];
-  selected: string[];
-  onChange: (value: string[]) => void;
-}) {
-  return (
-    <FormControl
-      size="small"
-      sx={{ minWidth: 190, backgroundColor: "background.paper", borderRadius: 1 }}
-    >
-      <InputLabel>{label}</InputLabel>
-      <Select
-        multiple
-        value={selected}
-        label={label}
-        renderValue={(items) => items.join(", ")}
-        onChange={(event) => onChange(event.target.value as string[])}
-      >
-        {values.map((value) => (
-          <MenuItem key={value} value={value}>
-            <Checkbox checked={selected.includes(value)} />
-            <ListItemText primary={value} />
-          </MenuItem>
-        ))}
-      </Select>
-    </FormControl>
-  );
 }
 
 function makeSessions(games: ReplayRow[], poi: string | null): SessionRow[] {
@@ -239,20 +199,57 @@ function makeSessionsAsync(
   });
 }
 
+function projectSession(session: SessionRow, games: ReplayRow[], poi: string | null): SessionRow {
+  const wins = games.filter((game) => game.winner === poi).length;
+  const losses = games.filter((game) => game.winner !== "Unknown" && game.winner !== poi).length;
+  const first = games[0];
+  return {
+    ...session,
+    started: first.timestamp ?? "Unknown",
+    finished: games.at(-1)?.timestamp ?? "Unknown",
+    record: `${wins} - ${losses}`,
+    playerCharacters: [
+      ...new Set(
+        games.map((game) => (poi === game.player1 ? game.player1Character : game.player2Character)),
+      ),
+    ].join(", "),
+    playerSupports: [
+      ...new Set(
+        games.map((game) => (poi === game.player1 ? game.player1Support : game.player2Support)),
+      ),
+    ].join(", "),
+    opponentCharacters: [
+      ...new Set(
+        games.map((game) => (poi === game.player1 ? game.player2Character : game.player1Character)),
+      ),
+    ].join(", "),
+    opponentSupports: [
+      ...new Set(
+        games.map((game) => (poi === game.player1 ? game.player2Support : game.player1Support)),
+      ),
+    ].join(", "),
+    games,
+  };
+}
+
 export function AvatarGrid({
   rowData,
   playerOfInterest,
+  dateFrom,
+  dateTo,
+  invalidDateRange,
+  onSummaryChange,
 }: {
   rowData: ReplayRow[];
   playerOfInterest: string | null;
+  dateFrom: string;
+  dateTo: string;
+  invalidDateRange: boolean;
+  onSummaryChange: (summary: AnalysisSummary) => void;
 }) {
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
   const [filters, setFilters] = useState({
     opponent: [] as string[],
-    poi: [] as string[],
-    poiSupport: [] as string[],
-    opponentCharacter: [] as string[],
-    opponentSupport: [] as string[],
   });
   const [page, setPage] = useState(1);
   const [sessionRows, setSessionRows] = useState<SessionRow[]>(() =>
@@ -262,6 +259,7 @@ export function AvatarGrid({
   const [isPreparingSessions, setIsPreparingSessions] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [exportMessage, setExportMessage] = useState<ExportMessage | null>(null);
+  const [selectedMatchupGameIds, setSelectedMatchupGameIds] = useState<string[] | null>(null);
   useEffect(() => {
     let active = true;
     setIsPreparingSessions(true);
@@ -277,26 +275,13 @@ export function AvatarGrid({
       active = false;
     };
   }, [rowData, playerOfInterest]);
+  useEffect(() => {
+    setSelectedMatchupGameIds(null);
+  }, [playerOfInterest, rowData]);
   const matchesOtherFilters = (session: SessionRow, ignored: keyof typeof filters) =>
-    (ignored === "opponent" ||
-      filters.opponent.length === 0 ||
-      filters.opponent.includes(session.opponent)) &&
-    (ignored === "poi" ||
-      filters.poi.length === 0 ||
-      filters.poi.some((value) => session.playerCharacters.split(", ").includes(value))) &&
-    (ignored === "poiSupport" ||
-      filters.poiSupport.length === 0 ||
-      filters.poiSupport.some((value) => session.playerSupports.split(", ").includes(value))) &&
-    (ignored === "opponentCharacter" ||
-      filters.opponentCharacter.length === 0 ||
-      filters.opponentCharacter.some((value) =>
-        session.opponentCharacters.split(", ").includes(value),
-      )) &&
-    (ignored === "opponentSupport" ||
-      filters.opponentSupport.length === 0 ||
-      filters.opponentSupport.some((value) =>
-        session.opponentSupports.split(", ").includes(value),
-      ));
+    ignored === "opponent" ||
+    filters.opponent.length === 0 ||
+    filters.opponent.includes(session.opponent);
   const filterValues = useMemo(() => {
     const valuesFor = (
       ignored: keyof typeof filters,
@@ -309,43 +294,30 @@ export function AvatarGrid({
       ].sort();
     return {
       opponent: valuesFor("opponent", (session) => [session.opponent]),
-      poi: valuesFor("poi", (session) => session.playerCharacters.split(", ")),
-      poiSupport: valuesFor("poiSupport", (session) => session.playerSupports.split(", ")),
-      opponentCharacter: valuesFor("opponentCharacter", (session) =>
-        session.opponentCharacters.split(", "),
-      ),
-      opponentSupport: valuesFor("opponentSupport", (session) =>
-        session.opponentSupports.split(", "),
-      ),
     };
   }, [sessionRows, filters]);
   const filteredSessions = useMemo(
     () =>
       sessionRows.filter(
-        (session) =>
-          (filters.opponent.length === 0 || filters.opponent.includes(session.opponent)) &&
-          (filters.poi.length === 0 ||
-            filters.poi.some((value) => session.playerCharacters.split(", ").includes(value))) &&
-          (filters.poiSupport.length === 0 ||
-            filters.poiSupport.some((value) =>
-              session.playerSupports.split(", ").includes(value),
-            )) &&
-          (filters.opponentCharacter.length === 0 ||
-            filters.opponentCharacter.some((value) =>
-              session.opponentCharacters.split(", ").includes(value),
-            )) &&
-          (filters.opponentSupport.length === 0 ||
-            filters.opponentSupport.some((value) =>
-              session.opponentSupports.split(", ").includes(value),
-            )),
+        (session) => filters.opponent.length === 0 || filters.opponent.includes(session.opponent),
       ),
     [sessionRows, filters],
   );
-  const pageCount = Math.max(1, Math.ceil(filteredSessions.length / SETS_PER_PAGE));
+  const tableSessions = useMemo(() => {
+    if (selectedMatchupGameIds === null) return filteredSessions;
+    const selectedIds = new Set(selectedMatchupGameIds);
+    return filteredSessions.flatMap((session) => {
+      const matchingGames = session.games.filter((game) => selectedIds.has(game.id));
+      return matchingGames.length > 0
+        ? [projectSession(session, matchingGames, playerOfInterest)]
+        : [];
+    });
+  }, [filteredSessions, playerOfInterest, selectedMatchupGameIds]);
+  const pageCount = Math.max(1, Math.ceil(tableSessions.length / SETS_PER_PAGE));
   const currentPage = Math.min(page, pageCount);
   const pagedSessions = useMemo(
-    () => filteredSessions.slice((currentPage - 1) * SETS_PER_PAGE, currentPage * SETS_PER_PAGE),
-    [currentPage, filteredSessions],
+    () => tableSessions.slice((currentPage - 1) * SETS_PER_PAGE, currentPage * SETS_PER_PAGE),
+    [currentPage, tableSessions],
   );
   const displayRows = useMemo<DisplayRow[]>(
     () =>
@@ -356,6 +328,10 @@ export function AvatarGrid({
           : []),
       ]),
     [expandedSessions, pagedSessions],
+  );
+  const filteredGames = useMemo(
+    () => filteredSessions.flatMap((session) => session.games),
+    [filteredSessions],
   );
   const exportContextRow = async () => {
     if (!contextMenu || !window.electronAPI) return;
@@ -378,6 +354,20 @@ export function AvatarGrid({
       setExportMessage({
         severity: "error",
         text: `Could not create ZIP: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  };
+  const showContextInExplorer = async () => {
+    if (!contextMenu || !window.electronAPI) return;
+    const { data } = contextMenu;
+    const ids = data.kind === "session" ? data.games.map((game) => game.id) : [data.id];
+    setContextMenu(null);
+    try {
+      await window.electronAPI.replays.showInFolder({ ids });
+    } catch (error) {
+      setExportMessage({
+        severity: "error",
+        text: `Could not open File Explorer: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
   };
@@ -442,7 +432,7 @@ export function AvatarGrid({
         flex: 1,
       },
       {
-        headerName: "POI character",
+        headerName: "Player of interest character",
         valueGetter: ({ data }: ValueGetterParams<DisplayRow>) =>
           !data
             ? ""
@@ -454,7 +444,7 @@ export function AvatarGrid({
         flex: 1,
       },
       {
-        headerName: "POI support",
+        headerName: "Player of interest support",
         valueGetter: ({ data }: ValueGetterParams<DisplayRow>) =>
           !data
             ? ""
@@ -513,94 +503,38 @@ export function AvatarGrid({
           </Typography>
         </Stack>
       )}
-      <Stack
-        spacing={1}
-        sx={{
-          mb: 1,
-          p: 1,
-          textAlign: "left",
-          backgroundColor: "background.paper",
-          borderRadius: 1,
+      <AnalyticsSection
+        games={filteredGames}
+        sessions={filteredSessions}
+        playerOfInterest={playerOfInterest}
+        dateFrom={dateFrom}
+        dateTo={dateTo}
+        invalidDateRange={invalidDateRange}
+        onSummaryChange={onSummaryChange}
+        opponentFilterValues={{
+          players: filterValues.opponent,
         }}
-      >
-        <Typography variant="subtitle2" color="text.secondary">
-          Filters
-        </Typography>
-        <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
-          <Stack
-            spacing={0.5}
-            sx={{ flex: 1, p: 1, border: 1, borderColor: "divider", borderRadius: 1 }}
-          >
-            <Typography variant="caption" color="text.secondary">
-              POI
-            </Typography>
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
-              <SetFilter
-                label="Character"
-                values={filterValues.poi}
-                selected={filters.poi}
-                onChange={(value) => setFilters((current) => ({ ...current, poi: value }))}
-              />
-              <SetFilter
-                label="Support"
-                values={filterValues.poiSupport}
-                selected={filters.poiSupport}
-                onChange={(value) => setFilters((current) => ({ ...current, poiSupport: value }))}
-              />
-            </Stack>
-          </Stack>
-          <Divider orientation="vertical" flexItem sx={{ display: { xs: "none", md: "block" } }} />
-          <Stack
-            spacing={0.5}
-            sx={{
-              flex: 1,
-              p: 1,
-              border: 1,
-              borderColor: "divider",
-              borderRadius: 1,
-              alignItems: { md: "flex-end" },
-            }}
-          >
-            <Typography variant="caption" color="text.secondary">
-              Opponent
-            </Typography>
-            <Stack
-              direction={{ xs: "column", sm: "row" }}
-              spacing={1}
-              sx={{ justifyContent: { md: "flex-end" } }}
-            >
-              <SetFilter
-                label="Player"
-                values={filterValues.opponent}
-                selected={filters.opponent}
-                onChange={(value) => setFilters((current) => ({ ...current, opponent: value }))}
-              />
-              <SetFilter
-                label="Character"
-                values={filterValues.opponentCharacter}
-                selected={filters.opponentCharacter}
-                onChange={(value) =>
-                  setFilters((current) => ({
-                    ...current,
-                    opponentCharacter: value,
-                    opponentSupport: [],
-                  }))
-                }
-              />
-              <SetFilter
-                label="Support"
-                values={filterValues.opponentSupport}
-                selected={filters.opponentSupport}
-                onChange={(value) =>
-                  setFilters((current) => ({ ...current, opponentSupport: value }))
-                }
-              />
-            </Stack>
-          </Stack>
-        </Stack>
-      </Stack>
+        selectedOpponentPlayers={filters.opponent}
+        onOpponentPlayersChange={(value) =>
+          setFilters((current) => ({ ...current, opponent: value }))
+        }
+        onMatchupGameIdsChange={(ids) =>
+          setSelectedMatchupGameIds((current) => {
+            if (ids === null) return current === null ? current : null;
+            if (
+              current &&
+              current.length === ids.length &&
+              current.every((id, index) => id === ids[index])
+            ) {
+              return current;
+            }
+            return ids;
+          })
+        }
+      />
       <div className="ag-theme-quartz-dark" style={{ height: 500, width: "100%" }}>
         <AgGridReact<DisplayRow>
+          theme="legacy"
           columnDefs={columnDefs}
           rowData={displayRows}
           defaultColDef={{ sortable: true, filter: true, resizable: true }}
@@ -624,12 +558,12 @@ export function AvatarGrid({
         sx={{ mt: 1, alignItems: { sm: "center" }, justifyContent: "space-between" }}
       >
         <Typography variant="caption" color="text.secondary">
-          {filteredSessions.length === 0
+          {tableSessions.length === 0
             ? "No sets"
             : `Showing ${(currentPage - 1) * SETS_PER_PAGE + 1}-${Math.min(
                 currentPage * SETS_PER_PAGE,
-                filteredSessions.length,
-              )} of ${filteredSessions.length} sets`}
+                tableSessions.length,
+              )} of ${tableSessions.length} sets`}
         </Typography>
         <Pagination
           count={pageCount}
@@ -650,6 +584,11 @@ export function AvatarGrid({
           contextMenu ? { top: contextMenu.mouseY, left: contextMenu.mouseX } : undefined
         }
       >
+        <MenuItem onClick={() => void showContextInExplorer()}>
+          {contextMenu?.data.kind === "session"
+            ? "Show set folder in File Explorer"
+            : "Show game in File Explorer"}
+        </MenuItem>
         <MenuItem onClick={() => void exportContextRow()}>
           {contextMenu?.data.kind === "session"
             ? `Export set as ZIP (${contextMenu.data.games.length} replays)`

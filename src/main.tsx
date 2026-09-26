@@ -4,6 +4,8 @@ import "./style.css";
 import {
   Box,
   Button,
+  Card,
+  CardContent,
   FormControl,
   InputLabel,
   LinearProgress,
@@ -13,6 +15,7 @@ import {
   Stack,
   Tab,
   Tabs,
+  TextField,
   ThemeProvider,
   Typography,
   createTheme,
@@ -23,6 +26,7 @@ import { AllCommunityModule } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-quartz.css";
 import { AvatarGrid, type ReplayRow } from "./AvatarGrid";
+import type { AnalysisSummary } from "./AnalyticsSection";
 import { useCallback } from "react";
 import { OverlaySurface, VisualOverlay } from "./Overlay";
 
@@ -37,6 +41,7 @@ declare global {
           playerCounts: Record<string, number>;
           duplicateCount: number;
         }>;
+        showInFolder: (request: { ids: string[] }) => Promise<void>;
         zip: (request: { ids: string[]; suggestedName: string }) => Promise<{
           path: string;
           fileCount: number;
@@ -81,8 +86,18 @@ declare global {
 
 function ReplayFolderPicker({
   onData,
+  dateFrom,
+  dateTo,
+  invalidDateRange,
+  onDateFromChange,
+  onDateToChange,
 }: {
   onData: (games: ReplayRow[], counts: Record<string, number>) => void;
+  dateFrom: string;
+  dateTo: string;
+  invalidDateRange: boolean;
+  onDateFromChange: (value: string) => void;
+  onDateToChange: (value: string) => void;
 }) {
   const [folder, setFolder] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -142,21 +157,55 @@ function ReplayFolderPicker({
   return (
     <Paper variant="outlined" sx={{ p: 2, textAlign: "left" }}>
       <Stack
-        direction={{ xs: "column", sm: "row" }}
+        direction={{ xs: "column", lg: "row" }}
         spacing={2}
-        sx={{ alignItems: { sm: "center" } }}
+        sx={{ alignItems: { lg: "center" } }}
       >
-        <Box sx={{ flex: 1, minWidth: 0 }}>
-          <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-            Replay folder
+        <Stack direction="row" spacing={2} sx={{ alignItems: "center", minWidth: 0 }}>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+              Replay folder
+            </Typography>
+            <Typography variant="body2" color="text.secondary" noWrap title={folder ?? undefined}>
+              {folder ?? "No replay folder selected"}
+            </Typography>
+          </Box>
+          <Button variant="contained" onClick={chooseFolder} disabled={loading}>
+            Choose folder
+          </Button>
+        </Stack>
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ alignItems: "center", justifyContent: "flex-end", ml: { lg: "auto" } }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            Date range
           </Typography>
-          <Typography variant="body2" color="text.secondary" noWrap title={folder ?? undefined}>
-            {folder ?? "No replay folder selected"}
+          <TextField
+            label="From"
+            type="date"
+            size="small"
+            value={dateFrom}
+            onChange={(event) => onDateFromChange(event.target.value)}
+            error={invalidDateRange}
+            slotProps={{ inputLabel: { shrink: true } }}
+            sx={{ width: 145 }}
+          />
+          <Typography variant="body2" color="text.secondary">
+            –
           </Typography>
-        </Box>
-        <Button variant="contained" onClick={chooseFolder} disabled={loading}>
-          Choose folder
-        </Button>
+          <TextField
+            label="To"
+            type="date"
+            size="small"
+            value={dateTo}
+            onChange={(event) => onDateToChange(event.target.value)}
+            error={invalidDateRange}
+            slotProps={{ inputLabel: { shrink: true } }}
+            sx={{ width: 145 }}
+          />
+        </Stack>
       </Stack>
       {loading && (
         <Stack spacing={0.5} sx={{ mt: 1 }}>
@@ -196,10 +245,55 @@ const darkTheme = createTheme({
   },
 });
 
+function getLocalDateKey(timestamp: string | null) {
+  if (!timestamp) return null;
+  const date = new Date(timestamp.replace(" ", "T"));
+  if (Number.isNaN(date.getTime())) return null;
+  return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
+    .map((value, index) => (index === 0 ? String(value) : String(value).padStart(2, "0")))
+    .join("-");
+}
+
+function getReplayDateRange(games: ReplayRow[]) {
+  const dates = games
+    .map((game) => getLocalDateKey(game.timestamp))
+    .filter((date): date is string => Boolean(date))
+    .sort();
+  return { from: dates[0] ?? "", to: dates.at(-1) ?? "" };
+}
+
+function SummaryCard({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return (
+    <Card variant="outlined">
+      <CardContent sx={{ py: 1.25, "&:last-child": { pb: 1.25 } }}>
+        <Typography variant="caption" color="text.secondary">
+          {label}
+        </Typography>
+        <Typography variant="h5" sx={{ lineHeight: 1.2 }}>
+          {value}
+        </Typography>
+        {detail && (
+          <Typography variant="caption" color="text.secondary">
+            {detail}
+          </Typography>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function ReplayAnalysis() {
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
   const [overridePlayer, setOverridePlayer] = useState<string | null>(null);
+  const [analysisSummary, setAnalysisSummary] = useState<AnalysisSummary>({
+    games: 0,
+    sessions: 0,
+    wins: 0,
+    losses: 0,
+    opponents: 0,
+    winRate: 0,
+  });
   const [isGridPending, startGridTransition] = useTransition();
   const onData = useCallback((nextGames: ReplayRow[], counts: Record<string, number>) => {
     startGridTransition(() => {
@@ -226,15 +320,26 @@ function ReplayAnalysis() {
       setOverridePlayer(nextPlayer);
     });
   };
+  const replayDateRange = useMemo(() => getReplayDateRange(relevantGames), [relevantGames]);
+  const [dateFromOverride, setDateFromOverride] = useState<string | null>(null);
+  const [dateToOverride, setDateToOverride] = useState<string | null>(null);
+  const dateFrom = dateFromOverride ?? replayDateRange.from;
+  const dateTo = dateToOverride ?? replayDateRange.to;
+  const invalidDateRange = Boolean(dateFrom && dateTo && dateFrom > dateTo);
+  const onSummaryChange = useCallback((nextSummary: AnalysisSummary) => {
+    setAnalysisSummary(nextSummary);
+  }, []);
 
   return (
     <>
-      <ReplayFolderPicker onData={onData} />
-      <Typography variant="body2" sx={{ my: 1, textAlign: "left" }}>
-        {playerOfInterest
-          ? `Player of interest: ${playerOfInterest} (${playerCounts[playerOfInterest]} appearances)`
-          : "No replay data loaded"}
-      </Typography>
+      <ReplayFolderPicker
+        onData={onData}
+        dateFrom={dateFrom}
+        dateTo={dateTo}
+        invalidDateRange={invalidDateRange}
+        onDateFromChange={setDateFromOverride}
+        onDateToChange={setDateToOverride}
+      />
       {isPreparingGrid && (
         <Stack spacing={0.5} sx={{ mb: 1, textAlign: "left" }}>
           <LinearProgress />
@@ -243,39 +348,78 @@ function ReplayAnalysis() {
           </Typography>
         </Stack>
       )}
-      <Stack direction="row" spacing={2} sx={{ mb: 1, alignItems: "center" }}>
-        <FormControl
-          size="small"
-          sx={{ minWidth: 240, backgroundColor: "background.paper", borderRadius: 1 }}
+      <Stack
+        direction={{ xs: "column", lg: "row" }}
+        spacing={2}
+        sx={{ mb: 1, alignItems: { lg: "center" }, justifyContent: "flex-start" }}
+      >
+        <Stack
+          direction={{ xs: "column", sm: "row" }}
+          spacing={1.5}
+          sx={{ alignItems: { sm: "center" }, flexWrap: "wrap" }}
         >
-          <InputLabel id="player-override-label">Player of interest</InputLabel>
-          <Select
-            labelId="player-override-label"
-            value={playerOfInterest ?? ""}
-            label="Player of interest"
-            onChange={(event) => onPlayerOverride(event.target.value)}
+          <FormControl
+            size="small"
+            sx={{ minWidth: 240, backgroundColor: "background.paper", borderRadius: 1 }}
           >
-            {Object.entries(playerCounts)
-              .sort((a, b) => b[1] - a[1])
-              .map(([name, count]) => (
-                <MenuItem key={name} value={name}>
-                  {name} ({count})
-                </MenuItem>
-              ))}
-          </Select>
-        </FormControl>
-        <Button
-          variant="outlined"
-          disabled={!overridePlayer}
-          onClick={() => setOverridePlayer(null)}
+            <InputLabel id="player-override-label">Player of interest</InputLabel>
+            <Select
+              labelId="player-override-label"
+              value={playerOfInterest ?? ""}
+              label="Player of interest"
+              onChange={(event) => onPlayerOverride(event.target.value)}
+            >
+              {Object.entries(playerCounts)
+                .sort((a, b) => b[1] - a[1])
+                .map(([name, count]) => (
+                  <MenuItem key={name} value={name}>
+                    {name} ({count})
+                  </MenuItem>
+                ))}
+            </Select>
+          </FormControl>
+          <Button
+            variant="outlined"
+            disabled={!overridePlayer}
+            onClick={() => setOverridePlayer(null)}
+          >
+            Use auto-detected
+          </Button>
+          <Typography variant="caption" color="text.secondary">
+            {overridePlayer ? "Overridden" : "Auto-determined"}
+          </Typography>
+        </Stack>
+        <Box
+          sx={{
+            display: "grid",
+            gridTemplateColumns: {
+              xs: "repeat(2, minmax(0, 1fr))",
+              sm: "repeat(3, minmax(0, 180px))",
+            },
+            gap: 1,
+          }}
         >
-          Use auto-detected
-        </Button>
-        <Typography variant="caption" color="text.secondary">
-          {overridePlayer ? "Overridden" : "Auto-determined"}
-        </Typography>
+          <SummaryCard
+            label="Games"
+            value={String(analysisSummary.games)}
+            detail={`${analysisSummary.sessions} sets`}
+          />
+          <SummaryCard
+            label="Record"
+            value={`${analysisSummary.wins}–${analysisSummary.losses}`}
+            detail={`${analysisSummary.winRate}% (${analysisSummary.wins + analysisSummary.losses} total)`}
+          />
+          <SummaryCard label="Opponents" value={String(analysisSummary.opponents)} />
+        </Box>
       </Stack>
-      <AvatarGrid rowData={relevantGames} playerOfInterest={playerOfInterest} />
+      <AvatarGrid
+        rowData={relevantGames}
+        playerOfInterest={playerOfInterest}
+        dateFrom={dateFrom}
+        dateTo={dateTo}
+        invalidDateRange={invalidDateRange}
+        onSummaryChange={onSummaryChange}
+      />
     </>
   );
 }
