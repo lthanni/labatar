@@ -1,6 +1,6 @@
 {
   "name": "labatar",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -19,6 +19,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "ag-grid-react": "^36.1.0",
+    "electron-updater": "^6.8.9",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "recharts": "^3.10.1"
@@ -55,6 +56,12 @@
     ],
     "win": {
       "target": "nsis"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "lthanni",
+      "repo": "labatar",
+      "releaseType": "release"
     }
   }
 }

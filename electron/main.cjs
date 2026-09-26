@@ -12,6 +12,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { createHash } = require("node:crypto");
 const { spawn } = require("node:child_process");
+const { autoUpdater } = require("electron-updater");
 const supportMap = require("./support-map.json");
 const characterMap = require("./character-map.json");
 let overlayWindow = null;
@@ -22,6 +23,7 @@ let lastGameBounds = null;
 let lastGameWindowTitle = null;
 let missedGameFocusChecks = 0;
 let overlayEnabled = false;
+let updateCheckPromise = null;
 const getActiveWindow = async () => (await import("active-win")).activeWindow();
 
 const isDev = !app.isPackaged;
@@ -68,6 +70,102 @@ function writeSettings(settings) {
   fs.mkdirSync(app.getPath("userData"), { recursive: true });
   fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
 }
+
+function sendUpdateStatus(status) {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send("updates:status", status);
+  }
+}
+
+function updateInfo(info) {
+  return {
+    version: info?.version,
+    releaseDate: info?.releaseDate,
+  };
+}
+
+async function checkForUpdates() {
+  if (isDev) {
+    return { state: "dev", currentVersion: app.getVersion() };
+  }
+  if (updateCheckPromise) return updateCheckPromise;
+
+  updateCheckPromise = autoUpdater
+    .checkForUpdates()
+    .then((result) => ({
+      state: result?.updateInfo?.version === app.getVersion() ? "not-available" : "checking",
+      currentVersion: app.getVersion(),
+      ...updateInfo(result?.updateInfo),
+    }))
+    .catch((error) => {
+      const status = {
+        state: "error",
+        currentVersion: app.getVersion(),
+        error: error instanceof Error ? error.message : String(error),
+      };
+      sendUpdateStatus(status);
+      return status;
+    })
+    .finally(() => {
+      updateCheckPromise = null;
+    });
+  return updateCheckPromise;
+}
+
+function configureAutoUpdater() {
+  if (isDev) return;
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on("checking-for-update", () => {
+    sendUpdateStatus({ state: "checking", currentVersion: app.getVersion() });
+  });
+  autoUpdater.on("update-available", (info) => {
+    sendUpdateStatus({
+      state: "available",
+      currentVersion: app.getVersion(),
+      ...updateInfo(info),
+    });
+  });
+  autoUpdater.on("update-not-available", (info) => {
+    sendUpdateStatus({
+      state: "not-available",
+      currentVersion: app.getVersion(),
+      ...updateInfo(info),
+    });
+  });
+  autoUpdater.on("download-progress", (progress) => {
+    sendUpdateStatus({
+      state: "downloading",
+      currentVersion: app.getVersion(),
+      percent: progress.percent,
+    });
+  });
+  autoUpdater.on("update-downloaded", (info) => {
+    sendUpdateStatus({
+      state: "downloaded",
+      currentVersion: app.getVersion(),
+      ...updateInfo(info),
+    });
+  });
+  autoUpdater.on("error", (error) => {
+    sendUpdateStatus({
+      state: "error",
+      currentVersion: app.getVersion(),
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+}
+
+ipcMain.handle("updates:check", () => checkForUpdates());
+ipcMain.handle("updates:download", async () => {
+  if (isDev) return { state: "dev", currentVersion: app.getVersion() };
+  await autoUpdater.downloadUpdate();
+  return { state: "downloaded", currentVersion: app.getVersion() };
+});
+ipcMain.handle("updates:install", () => {
+  if (!isDev) autoUpdater.quitAndInstall();
+  return { state: "installing", currentVersion: app.getVersion() };
+});
 
 function cleanReplayName(value) {
   return value
@@ -734,6 +832,8 @@ void app.whenReady().then(() => {
       : null;
   });
   createWindow();
+  configureAutoUpdater();
+  if (!isDev) setTimeout(() => void checkForUpdates(), 4000);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
