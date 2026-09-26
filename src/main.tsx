@@ -6,7 +6,6 @@ import {
   Button,
   Card,
   CardContent,
-  Alert,
   FormControl,
   InputLabel,
   LinearProgress,
@@ -31,23 +30,6 @@ import type { AnalysisSummary } from "./AnalyticsSection";
 import { useCallback } from "react";
 import { OverlaySurface, VisualOverlay } from "./Overlay";
 
-type UpdateStatus = {
-  state:
-    | "idle"
-    | "checking"
-    | "available"
-    | "downloading"
-    | "downloaded"
-    | "not-available"
-    | "error"
-    | "dev"
-    | "installing";
-  currentVersion: string;
-  version?: string;
-  percent?: number;
-  error?: string;
-};
-
 declare global {
   interface Window {
     electronAPI?: {
@@ -67,12 +49,6 @@ declare global {
         onScanProgress: (
           listener: (progress: { completed: number; total: number; phase: "scanning" }) => void,
         ) => () => void;
-      };
-      updates: {
-        check: () => Promise<UpdateStatus>;
-        download: () => Promise<UpdateStatus>;
-        install: () => Promise<UpdateStatus>;
-        onStatus: (listener: (status: UpdateStatus) => void) => () => void;
       };
       overlay: {
         show: () => Promise<void>;
@@ -306,86 +282,6 @@ function SummaryCard({ label, value, detail }: { label: string; value: string; d
   );
 }
 
-function UpdateNotice() {
-  const [status, setStatus] = useState<UpdateStatus>({ state: "idle", currentVersion: "" });
-  const [isChecking, setIsChecking] = useState(false);
-  const updates = window.electronAPI?.updates;
-
-  useEffect(() => {
-    if (!updates || import.meta.env.DEV) return;
-    const unsubscribe = updates.onStatus(setStatus);
-    const timer = window.setTimeout(() => {
-      void updates.check();
-    }, 4000);
-    return () => {
-      window.clearTimeout(timer);
-      unsubscribe();
-    };
-  }, [updates]);
-
-  if (!updates || import.meta.env.DEV) return null;
-
-  const check = async () => {
-    setIsChecking(true);
-    try {
-      await updates.check();
-    } finally {
-      setIsChecking(false);
-    }
-  };
-
-  const action =
-    status.state === "available" ? (
-      <Button color="inherit" size="small" onClick={() => void updates.download()}>
-        Download update
-      </Button>
-    ) : status.state === "downloaded" ? (
-      <Button color="inherit" size="small" onClick={() => void updates.install()}>
-        Restart and install
-      </Button>
-    ) : undefined;
-
-  return (
-    <Stack spacing={1} sx={{ mb: 1, textAlign: "left" }}>
-      <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-        <Button size="small" onClick={() => void check()} disabled={isChecking}>
-          {isChecking ? "Checking for updates…" : "Check for updates"}
-        </Button>
-        {status.state === "not-available" && (
-          <Typography variant="caption" color="text.secondary">
-            You’re up to date.
-          </Typography>
-        )}
-      </Stack>
-      {status.state === "available" && (
-        <Alert severity="info" action={action}>
-          Labatar {status.version ? `v${status.version}` : "update"} is available.
-        </Alert>
-      )}
-      {status.state === "downloading" && (
-        <Box>
-          <Typography variant="caption" color="text.secondary">
-            Downloading update
-            {typeof status.percent === "number" ? ` (${Math.round(status.percent)}%)` : "…"}
-          </Typography>
-          <LinearProgress
-            variant={typeof status.percent === "number" ? "determinate" : "indeterminate"}
-            value={status.percent}
-          />
-        </Box>
-      )}
-      {status.state === "downloaded" && (
-        <Alert severity="success" action={action}>
-          The update is ready to install.
-        </Alert>
-      )}
-      {status.state === "error" && (
-        <Alert severity="warning">Could not check for updates. You can try again later.</Alert>
-      )}
-    </Stack>
-  );
-}
-
 function ReplayAnalysis() {
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
@@ -549,7 +445,6 @@ function App() {
 
   return (
     <>
-      <UpdateNotice />
       <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)} sx={{ mb: 2 }}>
         <Tab label="Replay analysis" />
         {overlayAvailable && <Tab label="Visual overlay" />}

@@ -3,6 +3,7 @@ const {
   BrowserWindow,
   dialog,
   ipcMain,
+  Menu,
   screen,
   session,
   shell,
@@ -24,6 +25,11 @@ let lastGameWindowTitle = null;
 let missedGameFocusChecks = 0;
 let overlayEnabled = false;
 let updateCheckPromise = null;
+let updateDownloadPromise = null;
+let updateMenuItem = null;
+let updateState = "idle";
+let latestUpdateInfo = null;
+let mainWindow = null;
 const getActiveWindow = async () => (await import("active-win")).activeWindow();
 
 const isDev = !app.isPackaged;
@@ -71,12 +77,6 @@ function writeSettings(settings) {
   fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
 }
 
-function sendUpdateStatus(status) {
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) window.webContents.send("updates:status", status);
-  }
-}
-
 function updateInfo(info) {
   return {
     version: info?.version,
@@ -84,27 +84,100 @@ function updateInfo(info) {
   };
 }
 
-async function checkForUpdates() {
+function setUpdateMenuState(state, info = null) {
+  updateState = state;
+  latestUpdateInfo = info ? updateInfo(info) : latestUpdateInfo;
+  if (!updateMenuItem) return;
+
+  const labels = {
+    idle: "Check for Updates...",
+    checking: "Checking for Updates...",
+    available: `Download Update${latestUpdateInfo?.version ? ` (v${latestUpdateInfo.version})` : ""}...`,
+    downloading: "Downloading Update...",
+    downloaded: "Restart and Install Update",
+    error: "Check for Updates...",
+  };
+  updateMenuItem.label = labels[state] ?? labels.idle;
+  updateMenuItem.enabled = !["checking", "downloading"].includes(state);
+}
+
+async function showUpdateError(error) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  await dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    title: "Update check failed",
+    message: "Labatar could not check for updates.",
+    detail: error instanceof Error ? error.message : String(error),
+    buttons: ["OK"],
+  });
+}
+
+async function promptDownloadUpdate(info) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: "info",
+    title: "Update available",
+    message: `Labatar ${info?.version ? `v${info.version} ` : ""}is available.`,
+    detail: "Download the update now? Labatar will ask before restarting to install it.",
+    buttons: ["Download Update", "Later"],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (result.response === 0) void downloadUpdate();
+}
+
+async function promptInstallUpdate() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: "info",
+    title: "Update ready",
+    message: "The Labatar update is ready to install.",
+    detail: "Restart Labatar now to finish updating?",
+    buttons: ["Restart and Install", "Later"],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (result.response === 0) autoUpdater.quitAndInstall();
+}
+
+function downloadUpdate() {
+  if (isDev) return Promise.resolve(null);
+  if (updateDownloadPromise) return updateDownloadPromise;
+  setUpdateMenuState("downloading");
+  updateDownloadPromise = autoUpdater
+    .downloadUpdate()
+    .catch((error) => {
+      setUpdateMenuState("error");
+      void showUpdateError(error);
+      return null;
+    })
+    .finally(() => {
+      updateDownloadPromise = null;
+    });
+  return updateDownloadPromise;
+}
+
+function handleUpdateMenuClick() {
+  if (updateState === "available") return void downloadUpdate();
+  if (updateState === "downloaded") return void promptInstallUpdate();
+  void checkForUpdates(true);
+}
+
+async function checkForUpdates(showErrors = false) {
   if (isDev) {
-    return { state: "dev", currentVersion: app.getVersion() };
+    if (showErrors) await showUpdateError("Updates are only available in installed builds.");
+    return null;
   }
   if (updateCheckPromise) return updateCheckPromise;
 
+  setUpdateMenuState("checking");
   updateCheckPromise = autoUpdater
     .checkForUpdates()
-    .then((result) => ({
-      state: result?.updateInfo?.version === app.getVersion() ? "not-available" : "checking",
-      currentVersion: app.getVersion(),
-      ...updateInfo(result?.updateInfo),
-    }))
+    .then((result) => result)
     .catch((error) => {
-      const status = {
-        state: "error",
-        currentVersion: app.getVersion(),
-        error: error instanceof Error ? error.message : String(error),
-      };
-      sendUpdateStatus(status);
-      return status;
+      setUpdateMenuState("error");
+      if (showErrors) void showUpdateError(error);
+      return null;
     })
     .finally(() => {
       updateCheckPromise = null;
@@ -117,55 +190,28 @@ function configureAutoUpdater() {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.on("checking-for-update", () => {
-    sendUpdateStatus({ state: "checking", currentVersion: app.getVersion() });
+    setUpdateMenuState("checking");
   });
   autoUpdater.on("update-available", (info) => {
-    sendUpdateStatus({
-      state: "available",
-      currentVersion: app.getVersion(),
-      ...updateInfo(info),
-    });
+    setUpdateMenuState("available", info);
+    void promptDownloadUpdate(info);
   });
   autoUpdater.on("update-not-available", (info) => {
-    sendUpdateStatus({
-      state: "not-available",
-      currentVersion: app.getVersion(),
-      ...updateInfo(info),
-    });
+    setUpdateMenuState("idle", info);
   });
   autoUpdater.on("download-progress", (progress) => {
-    sendUpdateStatus({
-      state: "downloading",
-      currentVersion: app.getVersion(),
-      percent: progress.percent,
-    });
+    setUpdateMenuState("downloading");
+    if (updateMenuItem)
+      updateMenuItem.label = `Downloading Update (${Math.round(progress.percent)}%)...`;
   });
   autoUpdater.on("update-downloaded", (info) => {
-    sendUpdateStatus({
-      state: "downloaded",
-      currentVersion: app.getVersion(),
-      ...updateInfo(info),
-    });
+    setUpdateMenuState("downloaded", info);
+    void promptInstallUpdate();
   });
-  autoUpdater.on("error", (error) => {
-    sendUpdateStatus({
-      state: "error",
-      currentVersion: app.getVersion(),
-      error: error instanceof Error ? error.message : String(error),
-    });
+  autoUpdater.on("error", () => {
+    setUpdateMenuState("error");
   });
 }
-
-ipcMain.handle("updates:check", () => checkForUpdates());
-ipcMain.handle("updates:download", async () => {
-  if (isDev) return { state: "dev", currentVersion: app.getVersion() };
-  await autoUpdater.downloadUpdate();
-  return { state: "downloaded", currentVersion: app.getVersion() };
-});
-ipcMain.handle("updates:install", () => {
-  if (!isDev) autoUpdater.quitAndInstall();
-  return { state: "installing", currentVersion: app.getVersion() };
-});
 
 function cleanReplayName(value) {
   return value
@@ -744,12 +790,68 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  mainWindow = window;
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = null;
+  });
 
   if (isDev) {
     void window.loadURL("http://localhost:5173");
   } else {
     void window.loadFile(path.join(__dirname, "../dist/index.html"));
   }
+}
+
+function buildApplicationMenu() {
+  const template = [
+    {
+      label: "File",
+      submenu: [{ role: "quit", label: "Exit" }],
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" },
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "forceReload" },
+        { role: "toggleDevTools", enabled: isDev },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+      ],
+    },
+    {
+      label: "Window",
+      submenu: [{ role: "minimize" }, { role: "zoom" }, { role: "close" }],
+    },
+    {
+      label: "Help",
+      submenu: [
+        {
+          label: "Check for Updates...",
+          click: handleUpdateMenuClick,
+        },
+      ],
+    },
+  ];
+  const menu = Menu.buildFromTemplate(template);
+  updateMenuItem = menu.items.at(-1)?.submenu?.items[0] ?? null;
+  setUpdateMenuState(updateState);
+  Menu.setApplicationMenu(menu);
 }
 
 async function getGameCaptureSource() {
@@ -831,6 +933,7 @@ void app.whenReady().then(() => {
         }
       : null;
   });
+  buildApplicationMenu();
   createWindow();
   configureAutoUpdater();
   if (!isDev) setTimeout(() => void checkForUpdates(), 4000);

@@ -20,7 +20,7 @@ The app scans `.dlr` files recursively, ignores duplicate file contents, and sup
 
 ## Updates
 
-Installed releases check GitHub Releases for updates when the app starts. You can also use **Check for updates** in the app. When an update is available, Labatar downloads it after you choose **Download update**, then offers **Restart and install**.
+Installed releases check GitHub Releases for updates when the app starts. You can also use **Help > Check for Updates...** in the native application menu. When an update is available, Labatar offers native Windows prompts to download and install it.
 
 Updates are available for installed Windows builds. Development runs and unpacked test builds do not use the updater.
 
