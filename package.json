@@ -1,6 +1,6 @@
 {
   "name": "labatar",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -56,6 +56,9 @@
     ],
     "win": {
       "target": "nsis"
+    },
+    "nsis": {
+      "artifactName": "Labatar-Setup-${version}.${ext}"
     },
     "publish": {
       "provider": "github",
