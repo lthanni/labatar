@@ -141,6 +141,27 @@ function formatMmrChange(value: number | null) {
   return `${value > 0 ? "+" : ""}${formatRatingValue(value)}`;
 }
 
+function getMmrChangeCellStyle(value: unknown) {
+  const change =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number.parseFloat(value)
+        : Number.NaN;
+  if (!Number.isFinite(change) || change === 0) return undefined;
+
+  const intensity = Math.min(Math.abs(change) / 25, 1);
+  const neutral = [176, 190, 197];
+  const target = change > 0 ? [129, 199, 132] : [239, 154, 154];
+  const color = neutral.map((channel, index) =>
+    Math.round(channel + (target[index] - channel) * intensity),
+  );
+  return {
+    color: `rgb(${color.join(", ")})`,
+    fontWeight: intensity >= 0.5 ? 600 : 400,
+  };
+}
+
 type MatchScore = readonly [number, number];
 
 function parseMatchScore(roundScore: string): MatchScore | null {
@@ -641,6 +662,7 @@ export function AvatarGrid({
             : data?.kind === "game"
               ? formatMmrChange(getReplayMmrChange(data, playerOfInterest))
               : "",
+        cellStyle: ({ value }) => getMmrChangeCellStyle(value),
         flex: 1,
       },
       {
