@@ -65,6 +65,7 @@ type TimelineRow = {
   wins: number;
   losses: number;
   winRate: number;
+  mmr: number | null;
 };
 
 type MatchupStats = { games: number; wins: number; losses: number };
@@ -102,6 +103,13 @@ function getOpponent(game: ReplayRow, poi: string) {
 
 function getOpponentCharacter(game: ReplayRow, poi: string) {
   return poi === game.player1 ? game.player2Character : game.player1Character;
+}
+
+function getPoiMmr(game: ReplayRow, poi: string) {
+  if (game.ratings?.mode.trim().toLowerCase() !== "ranked") return null;
+  const rating = poi === game.player1 ? game.ratings.player1 : game.ratings.player2;
+  if (rating.characterMmr !== null && rating.characterMmr >= 0) return rating.characterMmr;
+  return rating.rating;
 }
 
 function getMatchupKey(game: ReplayRow, poi: string) {
@@ -163,27 +171,51 @@ function buildPerformance(
 }
 
 function buildTimeline(games: ReplayRow[], poi: string): TimelineRow[] {
-  const stats = new Map<string, { games: number; wins: number; losses: number }>();
+  const stats = new Map<
+    string,
+    {
+      games: number;
+      wins: number;
+      losses: number;
+      mmr: number | null;
+      latestMmrTimestamp: number;
+    }
+  >();
   for (const game of games) {
     const date = parseTimestamp(game.timestamp);
     if (!date) continue;
+    const timestamp = date.getTime();
     date.setDate(date.getDate() - date.getDay());
     const period = localDateKey(date);
-    const current = stats.get(period) ?? { games: 0, wins: 0, losses: 0 };
+    const current = stats.get(period) ?? {
+      games: 0,
+      wins: 0,
+      losses: 0,
+      mmr: null,
+      latestMmrTimestamp: Number.NEGATIVE_INFINITY,
+    };
     current.games += 1;
     if (isWin(game, poi)) current.wins += 1;
     else if (isLoss(game, poi)) current.losses += 1;
+    const mmr = getPoiMmr(game, poi);
+    if (mmr !== null && timestamp >= current.latestMmrTimestamp) {
+      current.mmr = mmr;
+      current.latestMmrTimestamp = timestamp;
+    }
     stats.set(period, current);
   }
   return [...stats.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([period, current]) => ({
+    .map(([period, { games, wins, losses, mmr }]) => ({
       period: new Date(`${period}T00:00:00`).toLocaleDateString(undefined, {
         month: "short",
         day: "numeric",
       }),
-      ...current,
-      winRate: getWinRate(current.wins, current.losses),
+      games,
+      wins,
+      losses,
+      winRate: getWinRate(wins, losses),
+      mmr,
     }));
 }
 
@@ -789,8 +821,8 @@ export function AnalyticsSection({
           </ChartPanel>
         </Box>
         <ChartPanel
-          title="Activity and win rate"
-          subtitle="Games grouped by week for selected matchups"
+          title="Activity, win rate, and MMR"
+          subtitle="Games, win rate, and ranked MMR grouped by week for selected matchups"
         >
           {timelineData.length === 0 ? (
             <EmptyChart />
@@ -800,6 +832,7 @@ export function AnalyticsSection({
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="period" minTickGap={28} />
                 <YAxis yAxisId="games" allowDecimals={false} />
+                <YAxis yAxisId="mmr" orientation="left" allowDecimals={false} />
                 <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" />
                 <Tooltip />
                 <Legend />
@@ -823,6 +856,14 @@ export function AnalyticsSection({
                   dataKey="winRate"
                   stroke="#ffcc80"
                   name="Win rate"
+                />
+                <Line
+                  yAxisId="mmr"
+                  type="monotone"
+                  dataKey="mmr"
+                  stroke="#90caf9"
+                  name="Ranked MMR"
+                  connectNulls={false}
                 />
               </LineChart>
             </ResponsiveContainer>

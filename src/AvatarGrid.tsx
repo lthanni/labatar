@@ -26,6 +26,20 @@ export type ReplayRow = {
   player1Support: string;
   player2Support: string;
   roundScore: string;
+  ratings: ReplayRatings | null;
+};
+export type ReplayRating = {
+  rating: number | null;
+  deviation: number | null;
+  volatility: number | null;
+  characterMmr: number | null;
+  mmrChange: number | null;
+};
+export type ReplayRatings = {
+  mode: string;
+  affectsRank: boolean | null;
+  player1: ReplayRating;
+  player2: ReplayRating;
 };
 type SessionRow = {
   id: string;
@@ -36,6 +50,9 @@ type SessionRow = {
   playerSupports: string;
   opponentCharacters: string;
   opponentSupports: string;
+  mode: string;
+  playerMmrAtStart: string;
+  playerMmrChange: string;
   games: ReplayRow[];
 };
 type DisplayRow =
@@ -51,6 +68,77 @@ function formatReplayTimestamp(timestamp: string | null) {
   const [, year, month, day, hour, minute] = match;
   const currentYear = new Date().getFullYear().toString();
   return `${year === currentYear ? "" : `${year} `}${month}/${day} ${hour}:${minute}`;
+}
+
+function formatRatingValue(value: number | null) {
+  if (value === null) return null;
+  return Number.isInteger(value) ? String(value) : value.toFixed(3);
+}
+
+function getReplayMode(game: ReplayRow) {
+  return game.ratings?.mode.trim().toLowerCase() ?? null;
+}
+
+function getReplayRating(game: ReplayRow, poi: string | null) {
+  if (!game.ratings) return null;
+  const playerIsPlayer1 = poi === null || poi === game.player1;
+  return playerIsPlayer1 ? game.ratings.player1 : game.ratings.player2;
+}
+
+function getReplayMmr(game: ReplayRow, poi: string | null) {
+  const characterMmr = getReplayCharacterMmr(game, poi);
+  if (characterMmr !== null) return characterMmr;
+  return getReplayRating(game, poi)?.rating ?? null;
+}
+
+function getReplayCharacterMmr(game: ReplayRow, poi: string | null) {
+  const rating = getReplayRating(game, poi);
+  if (!rating) return null;
+  if (rating.characterMmr !== null && rating.characterMmr >= 0) return rating.characterMmr;
+  return null;
+}
+
+function getSessionMode(games: ReplayRow[]) {
+  return [...new Set(games.map(getReplayMode).filter(Boolean))].join(", ");
+}
+
+function getSessionMmrAtStart(games: ReplayRow[], poi: string | null) {
+  const rankedGames = games.filter((game) => getReplayMode(game) === "ranked");
+  if (rankedGames.length === 0) return "";
+  const firstGame = rankedGames.at(-1)!;
+  const postGameMmr = getReplayCharacterMmr(firstGame, poi);
+  const firstGameChange = getReplayMmrChange(firstGame, poi);
+  const startMmr =
+    postGameMmr !== null && firstGameChange !== null
+      ? postGameMmr - firstGameChange
+      : getReplayMmr(firstGame, poi);
+  return formatRatingValue(startMmr) ?? "";
+}
+
+function getSessionMmrChange(games: ReplayRow[], poi: string | null) {
+  const rankedGames = games.filter((game) => getReplayMode(game) === "ranked");
+  if (rankedGames.length === 0) return "";
+  const gameChanges = rankedGames.map((game) => getReplayMmrChange(game, poi));
+  if (gameChanges.every((change): change is number => change !== null)) {
+    const change = gameChanges.reduce((total, current) => total + current, 0);
+    return `${change > 0 ? "+" : ""}${formatRatingValue(change)}`;
+  }
+  if (rankedGames.length < 2) return "";
+  const startMmr = getReplayMmr(rankedGames.at(-1)!, poi);
+  const endMmr = getReplayMmr(rankedGames[0], poi);
+  if (startMmr === null || endMmr === null) return "";
+  const change = endMmr - startMmr;
+  return `${change > 0 ? "+" : ""}${formatRatingValue(change)}`;
+}
+
+function getReplayMmrChange(game: ReplayRow, poi: string | null) {
+  if (getReplayMode(game) !== "ranked") return null;
+  return getReplayRating(game, poi)?.mmrChange ?? null;
+}
+
+function formatMmrChange(value: number | null) {
+  if (value === null) return "";
+  return `${value > 0 ? "+" : ""}${formatRatingValue(value)}`;
 }
 
 type MatchScore = readonly [number, number];
@@ -102,6 +190,18 @@ function appendToSessions(sessions: ReplayRow[][], game: ReplayRow) {
 
   const previous = currentSession.at(-1);
   if (!previous || getMatchupKey(previous) !== getMatchupKey(game)) {
+    sessions.push([game]);
+    return;
+  }
+
+  const gameMode = getReplayMode(game);
+  if (
+    gameMode &&
+    currentSession.some((candidate) => {
+      const candidateMode = getReplayMode(candidate);
+      return candidateMode !== null && candidateMode !== gameMode;
+    })
+  ) {
     sessions.push([game]);
     return;
   }
@@ -186,6 +286,9 @@ function makeSessions(games: ReplayRow[], poi: string | null): SessionRow[] {
           ),
         ),
       ].join(", "),
+      mode: getSessionMode(sessionGames),
+      playerMmrAtStart: getSessionMmrAtStart(sessionGames, poi),
+      playerMmrChange: getSessionMmrChange(sessionGames, poi),
       games: sessionGames,
     };
   });
@@ -254,6 +357,9 @@ function makeSessionsAsync(
                     ),
                   ),
                 ].join(", "),
+                mode: getSessionMode(sessionGames),
+                playerMmrAtStart: getSessionMmrAtStart(sessionGames, poi),
+                playerMmrChange: getSessionMmrChange(sessionGames, poi),
                 games: sessionGames,
               };
             }),
@@ -293,6 +399,9 @@ function projectSession(session: SessionRow, games: ReplayRow[], poi: string | n
         games.map((game) => (poi === game.player1 ? game.player2Support : game.player1Support)),
       ),
     ].join(", "),
+    mode: getSessionMode(games),
+    playerMmrAtStart: getSessionMmrAtStart(games, poi),
+    playerMmrChange: getSessionMmrChange(games, poi),
     games,
   };
 }
@@ -510,6 +619,28 @@ export function AvatarGrid({
               : playerOfInterest === data.player1
                 ? data.player1Support
                 : data.player2Support,
+        flex: 1,
+      },
+      {
+        headerName: "Mode",
+        valueGetter: ({ data }: ValueGetterParams<DisplayRow>) =>
+          !data ? "" : data.kind === "session" ? data.mode : (getReplayMode(data) ?? ""),
+        flex: 0.8,
+      },
+      {
+        headerName: "Player MMR at set start",
+        valueGetter: ({ data }: ValueGetterParams<DisplayRow>) =>
+          data?.kind === "session" ? data.playerMmrAtStart : "",
+        flex: 1,
+      },
+      {
+        headerName: "Player MMR change",
+        valueGetter: ({ data }: ValueGetterParams<DisplayRow>) =>
+          data?.kind === "session"
+            ? data.playerMmrChange
+            : data?.kind === "game"
+              ? formatMmrChange(getReplayMmrChange(data, playerOfInterest))
+              : "",
         flex: 1,
       },
       {

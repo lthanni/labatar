@@ -7,7 +7,9 @@ import {
   Button,
   Card,
   CardContent,
+  Checkbox,
   FormControl,
+  FormControlLabel,
   IconButton,
   InputLabel,
   LinearProgress,
@@ -56,7 +58,11 @@ declare global {
           fileCount: number;
         } | null>;
         onScanProgress: (
-          listener: (progress: { completed: number; total: number; phase: "scanning" }) => void,
+          listener: (progress: {
+            completed: number;
+            total: number;
+            phase: "logs" | "scanning";
+          }) => void,
         ) => () => void;
       };
       overlay: {
@@ -106,6 +112,10 @@ function ReplayFolderPicker({
   invalidDateRange,
   onDateFromChange,
   onDateToChange,
+  rankedOnly,
+  onRankedOnlyChange,
+  rankAffectingOnly,
+  onRankAffectingOnlyChange,
 }: {
   onData: (games: ReplayRow[], counts: Record<string, number>) => void;
   dateFrom: string;
@@ -113,10 +123,18 @@ function ReplayFolderPicker({
   invalidDateRange: boolean;
   onDateFromChange: (value: string) => void;
   onDateToChange: (value: string) => void;
+  rankedOnly: boolean;
+  onRankedOnlyChange: (value: boolean) => void;
+  rankAffectingOnly: boolean;
+  onRankAffectingOnlyChange: (value: boolean) => void;
 }) {
   const [folder, setFolder] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState({ completed: 0, total: 0 });
+  const [progress, setProgress] = useState<{
+    completed: number;
+    total: number;
+    phase: "logs" | "scanning";
+  }>({ completed: 0, total: 0, phase: "scanning" });
   const [error, setError] = useState<string | null>(null);
   const [duplicateCount, setDuplicateCount] = useState(0);
   const scanGeneration = useRef(0);
@@ -127,14 +145,14 @@ function ReplayFolderPicker({
       setLoading(true);
       setError(null);
       setDuplicateCount(0);
-      setProgress({ completed: 0, total: 0 });
+      setProgress({ completed: 0, total: 0, phase: "logs" });
       try {
         const result = await window.electronAPI.replays.scanFolder(selectedFolder);
         if (generation !== scanGeneration.current) return;
         onData(result.games, result.playerCounts);
         setDuplicateCount(result.duplicateCount);
         const scannedCount = result.games.length + result.duplicateCount;
-        setProgress({ completed: scannedCount, total: scannedCount });
+        setProgress({ completed: scannedCount, total: scannedCount, phase: "scanning" });
       } catch (scanError) {
         if (generation !== scanGeneration.current) return;
         setError(scanError instanceof Error ? scanError.message : String(scanError));
@@ -148,7 +166,7 @@ function ReplayFolderPicker({
   useEffect(() => {
     let active = true;
     const unsubscribe = window.electronAPI?.replays.onScanProgress((nextProgress) => {
-      setProgress({ completed: nextProgress.completed, total: nextProgress.total });
+      setProgress(nextProgress);
     });
     void window.electronAPI?.replays.getFolder().then((savedFolder) => {
       if (!active) return;
@@ -251,6 +269,27 @@ function ReplayFolderPicker({
             slotProps={{ inputLabel: { shrink: true } }}
             sx={{ width: 145 }}
           />
+          <FormControlLabel
+            control={
+              <Checkbox
+                size="small"
+                checked={rankedOnly}
+                onChange={(event) => onRankedOnlyChange(event.target.checked)}
+              />
+            }
+            label="Ranked only"
+          />
+          <FormControlLabel
+            control={
+              <Checkbox
+                size="small"
+                checked={rankAffectingOnly}
+                disabled={!rankedOnly}
+                onChange={(event) => onRankAffectingOnlyChange(event.target.checked)}
+              />
+            }
+            label="Games which affect rank only"
+          />
         </Stack>
       </Stack>
       {loading && (
@@ -260,9 +299,13 @@ function ReplayFolderPicker({
             value={progress.total > 0 ? (progress.completed / progress.total) * 100 : undefined}
           />
           <Typography variant="caption" color="text.secondary">
-            {progress.total > 0
-              ? `Loading replay ${progress.completed} of ${progress.total}...`
-              : "Finding replay files..."}
+            {progress.phase === "logs"
+              ? progress.total > 0
+                ? `Loading rating logs ${progress.completed} of ${progress.total}...`
+                : "Finding rating logs..."
+              : progress.total > 0
+                ? `Loading replay ${progress.completed} of ${progress.total}...`
+                : "Finding replay files..."}
           </Typography>
         </Stack>
       )}
@@ -306,6 +349,23 @@ function getReplayDateRange(games: ReplayRow[]) {
     .filter((date): date is string => Boolean(date))
     .sort();
   return { from: dates[0] ?? "", to: dates.at(-1) ?? "" };
+}
+
+function isRankedReplay(game: ReplayRow) {
+  return game.ratings?.mode.trim().toLowerCase() === "ranked";
+}
+
+function affectsRank(game: ReplayRow) {
+  return game.ratings?.affectsRank !== false;
+}
+
+function getPlayerCounts(games: ReplayRow[]) {
+  const counts: Record<string, number> = {};
+  for (const game of games) {
+    counts[game.player1] = (counts[game.player1] ?? 0) + 1;
+    counts[game.player2] = (counts[game.player2] ?? 0) + 1;
+  }
+  return counts;
 }
 
 function SummaryCard({ label, value, detail }: { label: string; value: string; detail?: string }) {
@@ -368,6 +428,8 @@ function ReplayAnalysis() {
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
   const [overridePlayer, setOverridePlayer] = useState<string | null>(null);
+  const [rankedOnly, setRankedOnly] = useState(false);
+  const [rankAffectingOnly, setRankAffectingOnly] = useState(false);
   const [analysisSummary, setAnalysisSummary] = useState<AnalysisSummary>({
     games: 0,
     sessions: 0,
@@ -387,14 +449,23 @@ function ReplayAnalysis() {
   const deferredGames = useDeferredValue(games);
   const isGridStale = deferredGames !== games;
   const isPreparingGrid = isGridPending || isGridStale;
-  const automaticPlayer = Object.entries(playerCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  const modeFilteredGames = useMemo(() => {
+    const modeGames = rankedOnly ? deferredGames.filter(isRankedReplay) : deferredGames;
+    return rankedOnly && rankAffectingOnly ? modeGames.filter(affectsRank) : modeGames;
+  }, [deferredGames, rankedOnly, rankAffectingOnly]);
+  const visiblePlayerCounts = useMemo(
+    () => (rankedOnly ? getPlayerCounts(modeFilteredGames) : playerCounts),
+    [modeFilteredGames, playerCounts, rankedOnly],
+  );
+  const automaticPlayer =
+    Object.entries(visiblePlayerCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
   const playerOfInterest = overridePlayer ?? automaticPlayer;
   const relevantGames = useMemo(
     () =>
-      deferredGames.filter(
+      modeFilteredGames.filter(
         (game) => game.player1 === playerOfInterest || game.player2 === playerOfInterest,
       ),
-    [deferredGames, playerOfInterest],
+    [modeFilteredGames, playerOfInterest],
   );
 
   const onPlayerOverride = (nextPlayer: string) => {
@@ -421,6 +492,14 @@ function ReplayAnalysis() {
         invalidDateRange={invalidDateRange}
         onDateFromChange={setDateFromOverride}
         onDateToChange={setDateToOverride}
+        rankedOnly={rankedOnly}
+        onRankedOnlyChange={(nextRankedOnly) => {
+          setRankedOnly(nextRankedOnly);
+          if (!nextRankedOnly) setRankAffectingOnly(false);
+          setOverridePlayer(null);
+        }}
+        rankAffectingOnly={rankAffectingOnly}
+        onRankAffectingOnlyChange={setRankAffectingOnly}
       />
       {isPreparingGrid && (
         <Stack spacing={0.5} sx={{ mb: 1, textAlign: "left" }}>
@@ -451,7 +530,7 @@ function ReplayAnalysis() {
               label="Player of interest"
               onChange={(event) => onPlayerOverride(event.target.value)}
             >
-              {Object.entries(playerCounts)
+              {Object.entries(visiblePlayerCounts)
                 .sort((a, b) => b[1] - a[1])
                 .map(([name, count]) => (
                   <MenuItem key={name} value={name}>

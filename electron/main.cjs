@@ -11,6 +11,7 @@ const {
 } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
+const readline = require("node:readline");
 const { createHash } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { autoUpdater } = require("electron-updater");
@@ -265,7 +266,222 @@ function formatCharacter(character) {
   );
 }
 
-async function parseReplayFile(filePath, rootFolder = path.dirname(filePath)) {
+function parseNumericValue(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseReplayRatings(value, pendingVolatility, pendingMmrChange, pendingCharacters) {
+  const match = value.match(
+    /^\s*([^|]+?)\s*\|\s*P1 glicko\s+([^/|]+)\/([^|]+)\s+charMMR\s+([^|]+)\s*\|\s*P2 glicko\s+([^/|]+)\/([^|]+)\s+charMMR\s+([^|]+)\s*$/i,
+  );
+  if (!match) return null;
+
+  const makeRating = (rating, deviation, characterMmr, volatility) => ({
+    rating: parseNumericValue(rating),
+    deviation: parseNumericValue(deviation),
+    volatility: volatility ?? null,
+    characterMmr: parseNumericValue(characterMmr),
+  });
+  const makePlayerRating = (rating, deviation, characterMmr, volatility, mmrChange) => ({
+    ...makeRating(rating, deviation, characterMmr, volatility),
+    mmrChange: mmrChange ?? null,
+  });
+  const playerMmr = [parseNumericValue(match[4]), parseNumericValue(match[7])];
+  const mmrChanges = assignMmrChangesToPlayers(pendingMmrChange, pendingCharacters, playerMmr);
+  return {
+    mode: match[1].trim(),
+    affectsRank: pendingMmrChange?.affectsRank ?? null,
+    player1: makePlayerRating(
+      match[2],
+      match[3],
+      match[4],
+      pendingVolatility?.player1 ?? null,
+      mmrChanges.player1,
+    ),
+    player2: makePlayerRating(
+      match[5],
+      match[6],
+      match[7],
+      pendingVolatility?.player2 ?? null,
+      mmrChanges.player2,
+    ),
+  };
+}
+
+function parseCharacterMmrChange(line) {
+  const match = line.match(
+    /Character rating recompute:\s*(.*?)\s+(-?\d+(?:\.\d+)?)\/rd[^\s]+\s*->\s*(-?\d+(?:\.\d+)?)\/rd[^\s]+\s*\(([+-]?\d+(?:\.\d+)?)\)\s+vs\s+(.*?)\s+(-?\d+(?:\.\d+)?)\/rd[^\s]+\s*->\s*(-?\d+(?:\.\d+)?)\/rd[^\s]+/i,
+  );
+  if (!match) return null;
+  return {
+    characters: [match[1].trim(), match[5].trim()],
+    newRatings: [parseNumericValue(match[3]), parseNumericValue(match[7])],
+    affectsRank: !/dead game:\s*set scoring over/i.test(line),
+    changes: [
+      parseNumericValue(match[4]),
+      parseNumericValue(match[7]) - parseNumericValue(match[6]),
+    ],
+  };
+}
+
+function normalizeMatchCharacter(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function assignMmrChangesToPlayers(matchChange, pendingCharacters = {}, playerMmr = []) {
+  const changes = [null, null];
+  const matchedIndexes = [null, null];
+  const used = new Set();
+  if (!matchChange) return { player1: null, player2: null };
+  for (const [playerIndex, mmr] of playerMmr.entries()) {
+    if (mmr === null || mmr < 0) continue;
+    const matchedIndex = matchChange.newRatings.findIndex(
+      (candidate, candidateIndex) => !used.has(candidateIndex) && candidate === mmr,
+    );
+    if (matchedIndex >= 0) {
+      matchedIndexes[playerIndex] = matchedIndex;
+      used.add(matchedIndex);
+    }
+  }
+  for (const [playerIndex, playerKey] of ["player1", "player2"].entries()) {
+    if (matchedIndexes[playerIndex] !== null) continue;
+    const character = pendingCharacters[playerKey];
+    const normalizedCharacter = character ? normalizeMatchCharacter(character) : null;
+    if (!normalizedCharacter) continue;
+    const changeIndex = matchChange.characters.findIndex(
+      (candidate, candidateIndex) =>
+        !used.has(candidateIndex) && normalizeMatchCharacter(candidate) === normalizedCharacter,
+    );
+    if (changeIndex >= 0) {
+      matchedIndexes[playerIndex] = changeIndex;
+      used.add(changeIndex);
+    }
+  }
+  let fallbackIndex = 0;
+  for (const playerIndex of [0, 1]) {
+    if (matchedIndexes[playerIndex] !== null) continue;
+    while (used.has(fallbackIndex)) fallbackIndex += 1;
+    matchedIndexes[playerIndex] = fallbackIndex;
+    used.add(fallbackIndex);
+  }
+  for (const [playerIndex, changeIndex] of matchedIndexes.entries()) {
+    changes[playerIndex] = matchChange.changes[changeIndex] ?? null;
+  }
+  return { player1: changes[0], player2: changes[1] };
+}
+
+function parseSetNewMatchGlicko(line) {
+  const playerMatch = line.match(/SetNewMatch:\s*Player\s+([12]):\s*(.*?)\s*\(SteamID:/i);
+  if (!playerMatch) return null;
+  const glickoMatch = line.match(
+    /Glicko:\s*\[\s*R:\s*([^:]+):\s*D:\s*([^:]+):\s*Vol:\s*([^\]]+)\]/i,
+  );
+  return {
+    player: playerMatch[1] === "1" ? "player1" : "player2",
+    character: playerMatch[2].trim(),
+    volatility: glickoMatch ? parseNumericValue(glickoMatch[3]) : null,
+  };
+}
+
+async function findLogFiles(folder) {
+  const folderName = path.basename(folder).toLowerCase();
+  const candidates = new Set([
+    folderName === "logs" ? folder : path.join(folder, "logs"),
+    folderName === "replays" ? path.join(path.dirname(folder), "logs") : null,
+  ]);
+  const logFiles = [];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    let entries;
+    try {
+      entries = await fs.promises.readdir(candidate, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const directories = [candidate];
+    while (directories.length > 0) {
+      const currentDirectory = directories.pop();
+      let currentEntries;
+      try {
+        currentEntries =
+          currentDirectory === candidate
+            ? entries
+            : await fs.promises.readdir(currentDirectory, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of currentEntries) {
+        const entryPath = path.join(currentDirectory, entry.name);
+        if (entry.isDirectory()) directories.push(entryPath);
+        else if (entry.isFile() && entry.name.toLowerCase().endsWith(".txt")) {
+          logFiles.push(entryPath);
+        }
+      }
+    }
+  }
+  return [...new Set(logFiles)].sort((left, right) => left.localeCompare(right));
+}
+
+async function readReplayRatings(folder, onProgress) {
+  const logFiles = await findLogFiles(folder);
+  const ratingsByReplayName = new Map();
+  for (const [index, logFile] of logFiles.entries()) {
+    let pendingRatings = null;
+    const pendingVolatility = {};
+    const pendingCharacters = {};
+    let pendingMmrChange = null;
+    const input = fs.createReadStream(logFile, { encoding: "latin1" });
+    const lines = readline.createInterface({ input, crlfDelay: Infinity });
+    for await (const line of lines) {
+      const glicko = parseSetNewMatchGlicko(line);
+      if (glicko) {
+        if (glicko.player === "player1") {
+          pendingCharacters.player1 = null;
+          pendingCharacters.player2 = null;
+          pendingMmrChange = null;
+        }
+        pendingVolatility[glicko.player] = glicko.volatility;
+        pendingCharacters[glicko.player] = glicko.character;
+      }
+
+      const mmrChange = parseCharacterMmrChange(line);
+      if (mmrChange) {
+        pendingMmrChange = mmrChange;
+      }
+
+      const gatheredRatings = line.match(/Gathered ratings for header:\s*(.*)$/i);
+      const writtenRatings = line.match(/Wrote ratings to header\s*\(([^)]*glicko[^)]*)\)/i);
+      if (gatheredRatings || writtenRatings) {
+        pendingRatings = parseReplayRatings(
+          gatheredRatings?.[1] ?? writtenRatings[1],
+          pendingVolatility,
+          pendingMmrChange,
+          pendingCharacters,
+        );
+      }
+
+      const replayMatch = line.match(/Successfully wrote replay file:\s*(.*?\.dlr)/i);
+      if (replayMatch && pendingRatings) {
+        ratingsByReplayName.set(path.win32.basename(replayMatch[1]), pendingRatings);
+        pendingRatings = null;
+        pendingVolatility.player1 = null;
+        pendingVolatility.player2 = null;
+        pendingCharacters.player1 = null;
+        pendingCharacters.player2 = null;
+        pendingMmrChange = null;
+      }
+    }
+    onProgress?.(index + 1, logFiles.length);
+  }
+  return ratingsByReplayName;
+}
+
+async function parseReplayFile(
+  filePath,
+  rootFolder = path.dirname(filePath),
+  ratingsByReplayName = new Map(),
+) {
   const contentBuffer = await fs.promises.readFile(filePath);
   const content = contentBuffer.toString("latin1");
   const contentHash = createHash("sha256").update(contentBuffer).digest("hex");
@@ -323,6 +539,7 @@ async function parseReplayFile(filePath, rootFolder = path.dirname(filePath)) {
       fields.TM_WinsT1 && fields.TM_WinsT2
         ? `${fields.TM_WinsT1} - ${fields.TM_WinsT2}`
         : "Unknown",
+    ratings: ratingsByReplayName.get(fileName) ?? null,
   };
 }
 
@@ -358,9 +575,17 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
   const games = [];
   const seenReplayHashes = new Set();
   let duplicateCount = 0;
+  event.sender.send("replays:scan-progress", { completed: 0, total: 0, phase: "logs" });
+  const ratingsByReplayName = await readReplayRatings(folder, (completed, logTotal) => {
+    event.sender.send("replays:scan-progress", {
+      completed,
+      total: logTotal,
+      phase: "logs",
+    });
+  });
   event.sender.send("replays:scan-progress", { completed: 0, total, phase: "scanning" });
   for (const [index, filePath] of replayFiles.entries()) {
-    const { contentHash, ...game } = await parseReplayFile(filePath, folder);
+    const { contentHash, ...game } = await parseReplayFile(filePath, folder, ratingsByReplayName);
     if (seenReplayHashes.has(contentHash)) duplicateCount += 1;
     else {
       seenReplayHashes.add(contentHash);
