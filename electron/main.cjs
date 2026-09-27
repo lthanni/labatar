@@ -84,9 +84,19 @@ function updateInfo(info) {
   };
 }
 
-function setUpdateMenuState(state, info = null) {
+function sendUpdateStatus(state, info = null, details = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("updates:status", {
+    state,
+    ...updateInfo(info ?? latestUpdateInfo),
+    ...details,
+  });
+}
+
+function setUpdateMenuState(state, info = null, details = {}) {
   updateState = state;
   latestUpdateInfo = info ? updateInfo(info) : latestUpdateInfo;
+  sendUpdateStatus(state, latestUpdateInfo, details);
   if (!updateMenuItem) return;
 
   const labels = {
@@ -95,6 +105,7 @@ function setUpdateMenuState(state, info = null) {
     available: `Download Update${latestUpdateInfo?.version ? ` (v${latestUpdateInfo.version})` : ""}...`,
     downloading: "Downloading Update...",
     downloaded: "Restart and Install Update",
+    "not-available": "Check for Updates...",
     error: "Check for Updates...",
   };
   updateMenuItem.label = labels[state] ?? labels.idle;
@@ -198,10 +209,10 @@ function configureAutoUpdater() {
     void promptDownloadUpdate(info);
   });
   autoUpdater.on("update-not-available", (info) => {
-    setUpdateMenuState("idle", info);
+    setUpdateMenuState("not-available", info);
   });
   autoUpdater.on("download-progress", (progress) => {
-    setUpdateMenuState("downloading");
+    setUpdateMenuState("downloading", null, { percent: progress.percent });
     if (updateMenuItem)
       updateMenuItem.label = `Downloading Update (${Math.round(progress.percent)}%)...`;
   });

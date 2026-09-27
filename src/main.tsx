@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import {
+  Alert,
   Box,
   Button,
   Card,
@@ -35,6 +36,9 @@ import { OverlaySurface, VisualOverlay } from "./Overlay";
 declare global {
   interface Window {
     electronAPI?: {
+      updates: {
+        onStatus: (listener: (status: UpdateStatus) => void) => () => void;
+      };
       replays: {
         getFolder: () => Promise<string | null>;
         selectFolder: () => Promise<string | null>;
@@ -85,6 +89,12 @@ declare global {
     };
   }
 }
+
+type UpdateStatus = {
+  state: "checking" | "available" | "downloading" | "downloaded" | "not-available" | "error";
+  version?: string;
+  percent?: number;
+};
 
 function ReplayFolderPicker({
   onData,
@@ -315,6 +325,42 @@ function SummaryCard({ label, value, detail }: { label: string; value: string; d
   );
 }
 
+function UpdateStatusBanner({
+  status,
+  onClose,
+}: {
+  status: UpdateStatus | null;
+  onClose: () => void;
+}) {
+  if (!status) return null;
+
+  const isDownloading = status.state === "downloading";
+  const percent = Math.max(0, Math.min(100, status.percent ?? 0));
+  const message = {
+    checking: "Checking for updates…",
+    available: `Update${status.version ? ` v${status.version}` : ""} is available.`,
+    downloading: `Downloading update${status.percent == null ? "…" : ` (${Math.round(status.percent)}%)`}…`,
+    downloaded: "Update downloaded and ready to install.",
+    "not-available": "Labatar is up to date.",
+    error: "Labatar could not check for updates.",
+  }[status.state];
+  const severity =
+    status.state === "error" ? "error" : status.state === "not-available" ? "success" : "info";
+
+  return (
+    <Alert severity={severity} onClose={onClose} sx={{ mb: 2 }}>
+      <Typography variant="body2">{message}</Typography>
+      {isDownloading && (
+        <LinearProgress
+          variant={status.percent == null ? "indeterminate" : "determinate"}
+          value={percent}
+          sx={{ mt: 1, minWidth: 240 }}
+        />
+      )}
+    </Alert>
+  );
+}
+
 function ReplayAnalysis() {
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
@@ -458,6 +504,7 @@ function ReplayAnalysis() {
 }
 
 function App() {
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [tab, setTab] = useState(() => {
     const savedTab = Number(localStorage.getItem("avatar-app-last-tab"));
     return overlayAvailable && savedTab === 1 ? 1 : 0;
@@ -476,8 +523,11 @@ function App() {
     localStorage.setItem("avatar-app-last-tab", String(nextTab));
   };
 
+  useEffect(() => window.electronAPI?.updates.onStatus(setUpdateStatus), []);
+
   return (
     <>
+      <UpdateStatusBanner status={updateStatus} onClose={() => setUpdateStatus(null)} />
       <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)} sx={{ mb: 2 }}>
         <Tab label="Match history" />
         {overlayAvailable && <Tab label="Visual overlay" />}

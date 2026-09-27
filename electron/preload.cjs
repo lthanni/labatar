@@ -39,4 +39,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return () => ipcRenderer.removeListener("replays:scan-progress", handler);
     },
   },
+  updates: {
+    onStatus: (listener) => {
+      const handler = (_, status) => listener(status);
+      ipcRenderer.on("updates:status", handler);
+      return () => ipcRenderer.removeListener("updates:status", handler);
+    },
+  },
 });
