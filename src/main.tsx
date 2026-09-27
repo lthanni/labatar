@@ -523,11 +523,11 @@ function ReplayAnalysis() {
             size="small"
             sx={{ minWidth: 240, backgroundColor: "background.paper", borderRadius: 1 }}
           >
-            <InputLabel id="player-override-label">Player of interest</InputLabel>
+            <InputLabel id="player-override-label">Player</InputLabel>
             <Select
               labelId="player-override-label"
               value={playerOfInterest ?? ""}
-              label="Player of interest"
+              label="Player"
               onChange={(event) => onPlayerOverride(event.target.value)}
             >
               {Object.entries(visiblePlayerCounts)

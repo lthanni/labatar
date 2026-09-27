@@ -15,7 +15,7 @@ Run the `.exe` installer and launch Labatar from the Start menu. Windows may sho
 1. Launch Labatar.
 2. Choose your replay folder. Labatar starts with the usual Steam installation folder when it exists:
    `C:\Program Files (x86)\Steam\steamapps\common\Avatar Legends The Fighting Game`
-3. Select the player of interest.
+3. Select the player.
 4. Use the matchup cards, support checkboxes, opponent filter, and date range to filter the analysis and replay table.
 
 The app scans `.dlr` files recursively, ignores duplicate file contents, and supports right-click actions for opening a replay or set in File Explorer and exporting replays as a ZIP.

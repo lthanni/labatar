@@ -619,27 +619,15 @@ export function AvatarGrid({
         flex: 1,
       },
       {
-        headerName: "Player of interest character",
+        headerName: "Player character/support",
         valueGetter: ({ data }: ValueGetterParams<DisplayRow>) =>
           !data
             ? ""
             : data.kind === "session"
-              ? data.playerCharacters
+              ? `${data.playerCharacters}/${data.playerSupports}`
               : playerOfInterest === data.player1
-                ? data.player1Character
-                : data.player2Character,
-        flex: 1,
-      },
-      {
-        headerName: "Player of interest support",
-        valueGetter: ({ data }: ValueGetterParams<DisplayRow>) =>
-          !data
-            ? ""
-            : data.kind === "session"
-              ? data.playerSupports
-              : playerOfInterest === data.player1
-                ? data.player1Support
-                : data.player2Support,
+                ? `${data.player1Character}/${data.player1Support}`
+                : `${data.player2Character}/${data.player2Support}`,
         flex: 1,
       },
       {
@@ -666,27 +654,15 @@ export function AvatarGrid({
         flex: 1,
       },
       {
-        headerName: "Opponent character",
+        headerName: "Opponent character/support",
         valueGetter: ({ data }: ValueGetterParams<DisplayRow>) =>
           !data
             ? ""
             : data.kind === "session"
-              ? data.opponentCharacters
+              ? `${data.opponentCharacters}/${data.opponentSupports}`
               : playerOfInterest === data.player1
-                ? data.player2Character
-                : data.player1Character,
-        flex: 1,
-      },
-      {
-        headerName: "Opponent support",
-        valueGetter: ({ data }: ValueGetterParams<DisplayRow>) =>
-          !data
-            ? ""
-            : data.kind === "session"
-              ? data.opponentSupports
-              : playerOfInterest === data.player1
-                ? data.player2Support
-                : data.player1Support,
+                ? `${data.player2Character}/${data.player2Support}`
+                : `${data.player1Character}/${data.player1Support}`,
         flex: 1,
       },
     ],

@@ -415,7 +415,7 @@ function MatchupHeatmap({
           }}
         >
           <Typography variant="caption" color="text.secondary">
-            Player of interest character
+            Player character
           </Typography>
         </Box>
         {columns.map((column) => {
