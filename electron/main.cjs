@@ -137,7 +137,7 @@ async function promptInstallUpdate() {
     defaultId: 0,
     cancelId: 1,
   });
-  if (result.response === 0) autoUpdater.quitAndInstall();
+  if (result.response === 0) autoUpdater.quitAndInstall(true, true);
 }
 
 function downloadUpdate() {
@@ -189,6 +189,7 @@ function configureAutoUpdater() {
   if (isDev) return;
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.disableDifferentialDownload = false;
   autoUpdater.on("checking-for-update", () => {
     setUpdateMenuState("checking");
   });
