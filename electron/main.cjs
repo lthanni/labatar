@@ -233,6 +233,8 @@ function cleanReplayName(value) {
     .trim();
 }
 
+ipcMain.handle("app:get-version", () => app.getVersion());
+
 function formatSupport(character, supportId) {
   if (!supportId || supportId === "0") return "None";
   const aliases = {

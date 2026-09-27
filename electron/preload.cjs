@@ -2,6 +2,9 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("electronAPI", {
   platform: process.platform,
+  app: {
+    getVersion: () => ipcRenderer.invoke("app:get-version"),
+  },
   overlay: {
     show: () => ipcRenderer.invoke("overlay:show"),
     hide: () => ipcRenderer.invoke("overlay:hide"),

@@ -36,6 +36,9 @@ import { OverlaySurface, VisualOverlay } from "./Overlay";
 declare global {
   interface Window {
     electronAPI?: {
+      app: {
+        getVersion: () => Promise<string>;
+      };
       updates: {
         onStatus: (listener: (status: UpdateStatus) => void) => () => void;
       };
@@ -504,6 +507,7 @@ function ReplayAnalysis() {
 }
 
 function App() {
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [tab, setTab] = useState(() => {
     const savedTab = Number(localStorage.getItem("avatar-app-last-tab"));
@@ -524,14 +528,24 @@ function App() {
   };
 
   useEffect(() => window.electronAPI?.updates.onStatus(setUpdateStatus), []);
+  useEffect(() => {
+    void window.electronAPI?.app.getVersion().then(setAppVersion);
+  }, []);
 
   return (
     <>
       <UpdateStatusBanner status={updateStatus} onClose={() => setUpdateStatus(null)} />
-      <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)} sx={{ mb: 2 }}>
-        <Tab label="Match history" />
-        {overlayAvailable && <Tab label="Visual overlay" />}
-      </Tabs>
+      <Stack direction="row" sx={{ mb: 2, alignItems: "center", justifyContent: "space-between" }}>
+        <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)}>
+          <Tab label="Match history" />
+          {overlayAvailable && <Tab label="Visual overlay" />}
+        </Tabs>
+        {appVersion && (
+          <Typography variant="caption" color="text.secondary">
+            v{appVersion}
+          </Typography>
+        )}
+      </Stack>
       {mountedTabs.replay && (
         <Box sx={{ display: tab === 0 ? "block" : "none" }}>
           <ReplayAnalysis />
