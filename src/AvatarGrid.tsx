@@ -53,22 +53,100 @@ function formatReplayTimestamp(timestamp: string | null) {
   return `${year === currentYear ? "" : `${year} `}${month}/${day} ${hour}:${minute}`;
 }
 
+type MatchScore = readonly [number, number];
+
+function parseMatchScore(roundScore: string): MatchScore | null {
+  const match = roundScore.match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2])];
+}
+
+function getMatchupKey(game: ReplayRow) {
+  return [game.player1, game.player2]
+    .sort((left, right) => left.localeCompare(right))
+    .join("\u0000");
+}
+
+function getMatchScore(game: ReplayRow): MatchScore | null {
+  const score = parseMatchScore(game.roundScore);
+  if (!score) return null;
+  return game.player1.localeCompare(game.player2) <= 0 ? score : [score[1], score[0]];
+}
+
+function scoresCanContinue(
+  newerGame: ReplayRow,
+  olderGame: ReplayRow,
+  unknownGamesBetween: number,
+) {
+  const newerScore = getMatchScore(newerGame);
+  const olderScore = getMatchScore(olderGame);
+  if (!newerScore || !olderScore) return false;
+
+  // Games are processed newest first. A contiguous set therefore moves back
+  // one game per replay when walking to the next older replay.
+  const firstScoreDelta = newerScore[0] - olderScore[0];
+  const secondScoreDelta = newerScore[1] - olderScore[1];
+  return (
+    firstScoreDelta >= 0 &&
+    secondScoreDelta >= 0 &&
+    firstScoreDelta + secondScoreDelta === unknownGamesBetween + 1
+  );
+}
+
+function appendToSessions(sessions: ReplayRow[][], game: ReplayRow) {
+  const currentSession = sessions.at(-1);
+  if (!currentSession) {
+    sessions.push([game]);
+    return;
+  }
+
+  const previous = currentSession.at(-1);
+  if (!previous || getMatchupKey(previous) !== getMatchupKey(game)) {
+    sessions.push([game]);
+    return;
+  }
+
+  const previousScore = getMatchScore(previous);
+  const gameScore = getMatchScore(game);
+  if (previousScore && gameScore) {
+    if (scoresCanContinue(previous, game, 0)) currentSession.push(game);
+    else sessions.push([game]);
+    return;
+  }
+
+  // A replay without score fields is usually the tail of the preceding set.
+  // Keep it provisionally, then use the next scored replay to decide whether
+  // that unknown tail belongs with this set or with the older one.
+  if (!gameScore) {
+    currentSession.push(game);
+    return;
+  }
+
+  const lastScoredIndex = currentSession.findLastIndex(
+    (candidate) => getMatchScore(candidate) !== null,
+  );
+  if (lastScoredIndex < 0) {
+    currentSession.push(game);
+    return;
+  }
+
+  const unknownGamesBetween = currentSession.length - lastScoredIndex - 1;
+  const lastScoredGame = currentSession[lastScoredIndex];
+  if (scoresCanContinue(lastScoredGame, game, unknownGamesBetween)) {
+    currentSession.push(game);
+    return;
+  }
+
+  const olderUnknownGames = currentSession.splice(lastScoredIndex + 1);
+  sessions.push([...olderUnknownGames, game]);
+}
+
 function makeSessions(games: ReplayRow[], poi: string | null): SessionRow[] {
   const sessions: ReplayRow[][] = [];
   const sortedGames = [...games].sort((a, b) =>
     (b.timestamp ?? "").localeCompare(a.timestamp ?? ""),
   );
-  for (const game of sortedGames) {
-    const previous = sessions.at(-1)?.at(-1);
-    const opponent = poi === game.player1 ? game.player2 : game.player1;
-    const previousOpponent = previous
-      ? poi === previous.player1
-        ? previous.player2
-        : previous.player1
-      : null;
-    if (!previous || opponent !== previousOpponent) sessions.push([game]);
-    else sessions.at(-1)?.push(game);
-  }
+  for (const game of sortedGames) appendToSessions(sessions, game);
   return sessions.map((sessionGames, index) => {
     const wins = sessionGames.filter((game) => game.winner === poi).length;
     const losses = sessionGames.filter(
@@ -130,15 +208,7 @@ function makeSessionsAsync(
         const end = Math.min(index + 250, sortedGames.length);
         for (; index < end; index += 1) {
           const game = sortedGames[index];
-          const previous = sessions.at(-1)?.at(-1);
-          const opponent = poi === game.player1 ? game.player2 : game.player1;
-          const previousOpponent = previous
-            ? poi === previous.player1
-              ? previous.player2
-              : previous.player1
-            : null;
-          if (!previous || opponent !== previousOpponent) sessions.push([game]);
-          else sessions.at(-1)?.push(game);
+          appendToSessions(sessions, game);
         }
         onProgress(index, sortedGames.length);
         if (index < sortedGames.length) {
