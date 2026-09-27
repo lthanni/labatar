@@ -133,6 +133,19 @@ function getWinRate(wins: number, losses: number) {
   return knownGames === 0 ? 0 : Math.round((wins / knownGames) * 100);
 }
 
+function getNormalizedDomain(
+  [dataMin, dataMax]: readonly [number, number],
+  minimumPadding: number,
+  lowerBound?: number,
+) {
+  const range = dataMax - dataMin;
+  const padding = range === 0 ? minimumPadding : Math.max(range * 0.1, minimumPadding);
+  return [
+    lowerBound === undefined ? dataMin - padding : Math.max(lowerBound, dataMin - padding),
+    dataMax + padding,
+  ] as [number, number];
+}
+
 function localDateKey(date: Date) {
   return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
     .map((value, index) => (index === 0 ? String(value) : String(value).padStart(2, "0")))
@@ -831,8 +844,17 @@ export function AnalyticsSection({
               <LineChart data={timelineData} margin={{ left: 0, right: 12 }}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="period" minTickGap={28} />
-                <YAxis yAxisId="games" allowDecimals={false} />
-                <YAxis yAxisId="mmr" orientation="left" allowDecimals={false} />
+                <YAxis
+                  yAxisId="games"
+                  allowDecimals={false}
+                  domain={(domain) => getNormalizedDomain(domain, 0.5, 0)}
+                />
+                <YAxis
+                  yAxisId="mmr"
+                  orientation="left"
+                  allowDecimals={false}
+                  domain={(domain) => getNormalizedDomain(domain, 25)}
+                />
                 <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" />
                 <Tooltip />
                 <Legend />
