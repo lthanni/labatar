@@ -30,7 +30,6 @@ export type ReplayRow = {
 type SessionRow = {
   id: string;
   started: string;
-  finished: string;
   record: string;
   opponent: string;
   playerCharacters: string;
@@ -78,8 +77,7 @@ function makeSessions(games: ReplayRow[], poi: string | null): SessionRow[] {
     const first = sessionGames[0];
     return {
       id: `session-${index}-${first.id}`,
-      started: first.timestamp ?? "Unknown",
-      finished: sessionGames.at(-1)?.timestamp ?? "Unknown",
+      started: sessionGames.at(-1)?.timestamp ?? "Unknown",
       record: `${wins} - ${losses}`,
       opponent: poi === first.player1 ? first.player2 : first.player1,
       playerCharacters: [
@@ -155,8 +153,7 @@ function makeSessionsAsync(
               const first = sessionGames[0];
               return {
                 id: `session-${sessionIndex}-${first.id}`,
-                started: first.timestamp ?? "Unknown",
-                finished: sessionGames.at(-1)?.timestamp ?? "Unknown",
+                started: sessionGames.at(-1)?.timestamp ?? "Unknown",
                 record: `${wins} - ${losses}`,
                 opponent: poi === first.player1 ? first.player2 : first.player1,
                 playerCharacters: [
@@ -202,11 +199,9 @@ function makeSessionsAsync(
 function projectSession(session: SessionRow, games: ReplayRow[], poi: string | null): SessionRow {
   const wins = games.filter((game) => game.winner === poi).length;
   const losses = games.filter((game) => game.winner !== "Unknown" && game.winner !== poi).length;
-  const first = games[0];
   return {
     ...session,
-    started: first.timestamp ?? "Unknown",
-    finished: games.at(-1)?.timestamp ?? "Unknown",
+    started: games.at(-1)?.timestamp ?? "Unknown",
     record: `${wins} - ${losses}`,
     playerCharacters: [
       ...new Set(
@@ -399,18 +394,10 @@ export function AvatarGrid({
         },
       },
       {
-        headerName: "Session started / time",
+        headerName: "Session started / replay time",
         valueGetter: ({ data }) =>
           data?.kind === "session"
             ? formatReplayTimestamp(data.started)
-            : formatReplayTimestamp(data?.timestamp ?? null),
-        flex: 1,
-      },
-      {
-        headerName: "Session finished / time",
-        valueGetter: ({ data }) =>
-          data?.kind === "session"
-            ? formatReplayTimestamp(data.finished)
             : formatReplayTimestamp(data?.timestamp ?? null),
         flex: 1,
       },
