@@ -2,6 +2,8 @@
 
 Labatar is an unofficial Windows companion app for reviewing Avatar Legends: The Fighting Game replay files. It reads replay files for analysis and sharing; it does not modify the game or inject into gameplay.
 
+![Labatar match history interface](image.png)
+
 ## Download
 
 Download the latest Windows installer from the [GitHub Releases page](https://github.com/lthanni/labatar/releases/latest).
