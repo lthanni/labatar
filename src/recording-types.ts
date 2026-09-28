@@ -1,5 +1,13 @@
 import type { RecordingMetadata } from "./obs-types";
 
+export type RecordingClipMetadata = {
+  sourceRecordingId: string;
+  sourceRecordingName: string;
+  startTime: number;
+  endTime: number;
+  createdAt: string | null;
+};
+
 export type RecordedVideo = {
   id: string;
   name: string;
@@ -9,4 +17,5 @@ export type RecordedVideo = {
   metadata: RecordingMetadata | null;
   replayPath: string | null;
   replayFileName: string | null;
+  clip: RecordingClipMetadata | null;
 };

@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     disconnect: () => ipcRenderer.invoke("obs:disconnect"),
     prepareProfile: (request) => ipcRenderer.invoke("obs:prepare-profile", request),
     startRecording: (request) => ipcRenderer.invoke("obs:start-recording", request),
+    startManualRecording: (request) => ipcRenderer.invoke("obs:start-manual-recording", request),
     stopRecording: () => ipcRenderer.invoke("obs:stop-recording"),
     setAutomaticRecording: (enabled) => ipcRenderer.invoke("obs:set-automatic-recording", enabled),
     onState: (listener) => {
@@ -60,6 +61,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   recordings: {
     list: () => ipcRenderer.invoke("recordings:list"),
+    exportClip: (request) => ipcRenderer.invoke("recordings:export-clip", request),
+    renameRecording: (request) => ipcRenderer.invoke("recordings:rename", request),
+    deleteRecording: (request) => ipcRenderer.invoke("recordings:delete", request),
+    startDrag: (request) => ipcRenderer.send("recordings:start-drag", request),
   },
   updates: {
     onStatus: (listener) => {

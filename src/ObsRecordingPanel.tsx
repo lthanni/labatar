@@ -44,6 +44,7 @@ const disconnectedState: ObsState = {
     paused: false,
     outputPath: null,
     sessionId: null,
+    source: null,
     metadata: null,
     startedAt: null,
   },
@@ -183,6 +184,45 @@ export function ObsRecordingPanel() {
     }
   };
 
+  const startManualRecording = async () => {
+    if (!window.electronAPI?.obs) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await window.electronAPI.obs.startManualRecording({
+        setup: {
+          profileName: settings.profileName,
+          recordDirectory: settings.recordDirectory,
+        },
+      });
+      setNotice(`Manual recording started. Videos will be saved to ${settings.recordDirectory}.`);
+    } catch (startError) {
+      setError(displayError(startError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stopManualRecording = async () => {
+    if (!window.electronAPI?.obs) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await window.electronAPI.obs.stopRecording();
+      setNotice(
+        result.outputPath
+          ? `Manual recording saved: ${result.outputPath}`
+          : "Manual recording stopped.",
+      );
+    } catch (stopError) {
+      setError(displayError(stopError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const prepareProfile = async () => {
     if (!window.electronAPI?.obs) return;
     setBusy(true);
@@ -205,6 +245,7 @@ export function ObsRecordingPanel() {
 
   const connected = state.status === "connected";
   const recording = state.recording.active;
+  const manualRecording = recording && state.recording.source === "manual";
   const currentMatch = state.automation.currentMatch;
   const gameDetected = currentMatch !== null;
   const displayedError = error ?? state.error ?? state.automation.error;
@@ -298,6 +339,37 @@ export function ObsRecordingPanel() {
             Stop log monitoring
           </Button>
         </Stack>
+
+        <Paper variant="outlined" sx={{ p: 2 }}>
+          <Typography variant="subtitle2">Manual recording</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 1.5 }}>
+            Record directly through OBS without waiting for a detected game. Each recording is saved
+            to the configured folder with the start timestamp in its filename.
+          </Typography>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+            <Button
+              variant="contained"
+              onClick={() => void startManualRecording()}
+              disabled={!connected || recording || busy}
+            >
+              Start recording
+            </Button>
+            <Button
+              variant="outlined"
+              color="error"
+              onClick={() => void stopManualRecording()}
+              disabled={!manualRecording || busy}
+            >
+              Stop recording
+            </Button>
+          </Stack>
+          {manualRecording && (
+            <Typography variant="caption" color="error.main" sx={{ mt: 1, display: "block" }}>
+              Manual recording active
+            </Typography>
+          )}
+        </Paper>
+
         <Typography variant="caption" color="text.secondary">
           Detection: {state.automation.status}
           {state.automation.currentMatch?.matchId

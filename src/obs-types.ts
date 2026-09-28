@@ -23,6 +23,7 @@ export type ObsRecordingState = {
   paused: boolean;
   outputPath: string | null;
   sessionId: string | null;
+  source: "manual" | "automatic" | null;
   metadata: RecordingMetadata | null;
   startedAt: string | null;
 };

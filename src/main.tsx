@@ -64,6 +64,9 @@ declare global {
           setup: { profileName: string; recordDirectory: string };
           metadata: RecordingMetadata;
         }) => Promise<{ sessionId: string; startedAt: string; metadata: RecordingMetadata }>;
+        startManualRecording: (request: {
+          setup: { profileName: string; recordDirectory: string };
+        }) => Promise<{ sessionId: string; startedAt: string; metadata: null }>;
         stopRecording: () => Promise<{
           outputPath: string | null;
           manifestPath: string | null;
@@ -101,6 +104,14 @@ declare global {
           folder: string;
           recordings: RecordedVideo[];
         }>;
+        exportClip: (request: {
+          recordingId: string;
+          startTime: number;
+          endTime: number;
+        }) => Promise<RecordedVideo>;
+        renameRecording: (request: { recordingId: string; name: string }) => Promise<RecordedVideo>;
+        deleteRecording: (request: { recordingId: string }) => Promise<{ id: string }>;
+        startDrag: (request: { recordingId: string }) => void;
       };
       overlay: {
         show: () => Promise<void>;

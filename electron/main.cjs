@@ -18,6 +18,7 @@ const { createHash } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { autoUpdater } = require("electron-updater");
 const { OBSWebSocket } = require("obs-websocket-js");
+const ffmpegStaticPath = require("ffmpeg-static");
 const { MatchLogWatcher } = require("./match-watcher.cjs");
 const supportMap = require("./support-map.json");
 const characterMap = require("./character-map.json");
@@ -149,6 +150,7 @@ function publicObsState() {
     recording: {
       ...obsState.recording,
       sessionId: activeObsRecording?.sessionId ?? null,
+      source: activeObsRecording?.source ?? null,
       metadata: activeObsRecording?.metadata ?? null,
       startedAt: activeObsRecording?.startedAt ?? null,
     },
@@ -254,16 +256,29 @@ function recordingBaseName(metadata, replay = null) {
   return `${player1} - ${player2} - ${setLabel} - ${recordingScore(replay)}`;
 }
 
-async function recordingPathWithAvailableName(outputPath, metadata, replay = null) {
+function manualRecordingBaseName(startedAt) {
+  const timestamp = new Date(startedAt)
+    .toISOString()
+    .replace(/\.\d{3}Z$/, "")
+    .replace(/[:T]/g, "-");
+  return `recording-${safeRecordingNamePart(timestamp, "unknown-time")}`;
+}
+
+async function recordingPathWithAvailableName(
+  outputPath,
+  metadata,
+  replay = null,
+  baseName = null,
+) {
   const extension = path.extname(outputPath) || ".mp4";
   const directory = path.dirname(outputPath);
-  const baseName = recordingBaseName(metadata, replay);
-  let candidate = path.join(directory, `${baseName}${extension}`);
+  const requestedBaseName = baseName ?? recordingBaseName(metadata, replay);
+  let candidate = path.join(directory, `${requestedBaseName}${extension}`);
   let suffix = 2;
   while (path.resolve(candidate).toLowerCase() !== path.resolve(outputPath).toLowerCase()) {
     try {
       await fs.promises.access(candidate);
-      candidate = path.join(directory, `${baseName} (${suffix})${extension}`);
+      candidate = path.join(directory, `${requestedBaseName} (${suffix})${extension}`);
       suffix += 1;
     } catch {
       break;
@@ -272,9 +287,9 @@ async function recordingPathWithAvailableName(outputPath, metadata, replay = nul
   return candidate;
 }
 
-async function renameRecording(outputPath, metadata, replay = null) {
+async function renameObsRecordingFile(outputPath, metadata, replay = null, baseName = null) {
   if (!outputPath) return outputPath;
-  const targetPath = await recordingPathWithAvailableName(outputPath, metadata, replay);
+  const targetPath = await recordingPathWithAvailableName(outputPath, metadata, replay, baseName);
   if (path.resolve(targetPath).toLowerCase() === path.resolve(outputPath).toLowerCase()) {
     return outputPath;
   }
@@ -293,7 +308,12 @@ async function finalizeObsRecording(outputPath, reason) {
   let manifestPath = null;
   let manifestError = null;
   if (outputPath) {
-    const namedOutputPath = await renameRecording(outputPath, recording.metadata);
+    const namedOutputPath = await renameObsRecordingFile(
+      outputPath,
+      recording.metadata,
+      null,
+      recording.fileNameBase,
+    );
     recording.outputPath = namedOutputPath;
     manifestPath = recordingManifestPath(namedOutputPath);
     try {
@@ -338,7 +358,7 @@ async function attachReplayToRecording(recording, replayPath) {
     const replay = await parseReplayFile(replayPath, path.dirname(replayPath));
     const previousManifestPath = recording.manifestPath;
     const namedOutputPath = recording.outputPath
-      ? await renameRecording(recording.outputPath, manifest.metadata, replay)
+      ? await renameObsRecordingFile(recording.outputPath, manifest.metadata, replay)
       : recording.outputPath;
     const namedManifestPath = namedOutputPath
       ? recordingManifestPath(namedOutputPath)
@@ -415,16 +435,22 @@ function matchToRecordingMetadata(match, gameNumber) {
   });
 }
 
-async function startObsRecording(metadata, setup = {}) {
+async function startObsRecording(metadata, setup = {}, options = {}) {
   const client = getObsClient();
   const current = await refreshObsState(client);
   if (current.recordStatus.outputActive) throw new Error("OBS is already recording.");
   await prepareObsProfile(setup);
-  const normalizedMetadata = normalizeRecordingMetadata(metadata);
-  const sessionId = `match-${Date.now()}`;
+  const normalizedMetadata = metadata ? normalizeRecordingMetadata(metadata) : null;
   const startedAt = new Date().toISOString();
+  const sessionId = `${options.manual ? "manual" : "match"}-${Date.now()}`;
   lastFinalizedObsRecording = null;
-  activeObsRecording = { sessionId, startedAt, metadata: normalizedMetadata };
+  activeObsRecording = {
+    sessionId,
+    startedAt,
+    source: options.manual ? "manual" : "automatic",
+    metadata: normalizedMetadata,
+    fileNameBase: options.manual ? manualRecordingBaseName(startedAt) : null,
+  };
   try {
     await client.call("StartRecord");
   } catch (error) {
@@ -436,6 +462,10 @@ async function startObsRecording(metadata, setup = {}) {
     recording: { active: true, paused: false, outputPath: null },
   });
   return { sessionId, startedAt, metadata: normalizedMetadata };
+}
+
+async function startManualObsRecording(setup = {}) {
+  return startObsRecording(null, setup, { manual: true });
 }
 
 async function waitForObsRecordingState(client, expectedActive, timeoutMs = 5000) {
@@ -615,7 +645,11 @@ async function connectToObs(request = {}) {
   obsClient = client;
   client.on("RecordStateChanged", (recordStatus) => {
     if (obsClient !== client) return;
-    const active = Boolean(recordStatus.outputActive);
+    const transitioning = [
+      "OBS_WEBSOCKET_OUTPUT_STARTING",
+      "OBS_WEBSOCKET_OUTPUT_STOPPING",
+    ].includes(recordStatus.outputState);
+    const active = Boolean(recordStatus.outputActive) || transitioning;
     setObsState({
       recording: {
         active,
@@ -623,7 +657,11 @@ async function connectToObs(request = {}) {
         outputPath: recordStatus.outputPath ?? null,
       },
     });
-    if (!active) {
+    if (
+      !active &&
+      recordStatus.outputState === "OBS_WEBSOCKET_OUTPUT_STOPPED" &&
+      activeObsRecording
+    ) {
       void finalizeObsRecording(recordStatus.outputPath ?? null, "obs");
       sendObsState();
     }
@@ -933,6 +971,9 @@ ipcMain.handle("obs:prepare-profile", async (_, request) => {
 });
 ipcMain.handle("obs:start-recording", async (_, request) => {
   return startObsRecording(request?.metadata, request?.setup ?? {});
+});
+ipcMain.handle("obs:start-manual-recording", async (_, request) => {
+  return startManualObsRecording(request?.setup ?? {});
 });
 ipcMain.handle("obs:stop-recording", async () => {
   return stopObsRecording("labatar");
@@ -1276,6 +1317,96 @@ async function findRecordingFiles(folder) {
   return files;
 }
 
+function recordingIdForPath(filePath, folder) {
+  return path.relative(folder, filePath).split(path.sep).join("/");
+}
+
+async function updateLinkedClipManifests(folder, previousId, nextId, nextName) {
+  const updatedManifests = [];
+  try {
+    for (const filePath of await findRecordingFiles(folder)) {
+      const manifestPath = recordingManifestPathForVideo(filePath);
+      let originalContent;
+      let manifest;
+      try {
+        originalContent = await fs.promises.readFile(manifestPath, "utf8");
+        manifest = JSON.parse(originalContent);
+      } catch {
+        continue;
+      }
+      if (manifest?.clip?.sourceRecordingId !== previousId) continue;
+
+      manifest.clip.sourceRecordingId = nextId;
+      manifest.clip.sourceRecordingName = nextName;
+      await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+      updatedManifests.push({ manifestPath, originalContent });
+    }
+    return updatedManifests;
+  } catch (error) {
+    for (const { manifestPath, originalContent } of updatedManifests.reverse()) {
+      await fs.promises.writeFile(manifestPath, originalContent, "utf8").catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+function legacyRecordingStartTime(recordingId) {
+  const name = path.basename(recordingId, path.extname(recordingId));
+  const match = /^recording-(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})$/.exec(name);
+  if (!match) return null;
+  return Date.UTC(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+    Number(match[4]),
+    Number(match[5]),
+    Number(match[6]),
+  );
+}
+
+async function repairDanglingClipLinks(folder) {
+  const entries = [];
+  for (const filePath of await findRecordingFiles(folder)) {
+    const manifestPath = recordingManifestPathForVideo(filePath);
+    try {
+      const content = await fs.promises.readFile(manifestPath, "utf8");
+      entries.push({
+        filePath,
+        manifestPath,
+        manifest: JSON.parse(content),
+      });
+    } catch {
+      // Recordings without readable metadata cannot be repaired here.
+    }
+  }
+
+  const ids = new Set(entries.map(({ filePath }) => recordingIdForPath(filePath, folder)));
+  for (const entry of entries) {
+    const clip = entry.manifest?.clip;
+    if (!clip || typeof clip.sourceRecordingId !== "string" || ids.has(clip.sourceRecordingId)) {
+      continue;
+    }
+    const legacyStartTime = legacyRecordingStartTime(clip.sourceRecordingId);
+    if (legacyStartTime == null) continue;
+
+    const candidates = entries.filter((candidate) => {
+      if (candidate.manifest?.clip) return false;
+      const startedAt = Date.parse(String(candidate.manifest?.startedAt ?? ""));
+      return Number.isFinite(startedAt) && Math.abs(startedAt - legacyStartTime) <= 2000;
+    });
+    if (candidates.length !== 1) continue;
+
+    const source = candidates[0];
+    clip.sourceRecordingId = recordingIdForPath(source.filePath, folder);
+    clip.sourceRecordingName = path.basename(source.filePath);
+    await fs.promises.writeFile(
+      entry.manifestPath,
+      JSON.stringify(entry.manifest, null, 2),
+      "utf8",
+    );
+  }
+}
+
 function resolveRecordingPath(recordingId) {
   const folder = path.resolve(getObsSettings().recordDirectory);
   const decodedId = decodeURIComponent(String(recordingId ?? ""));
@@ -1368,17 +1499,292 @@ function recordingManifestPathForVideo(videoPath) {
   return path.join(path.dirname(videoPath), `${path.basename(videoPath)}.labatar.json`);
 }
 
+function resolveFfmpegPath() {
+  if (typeof ffmpegStaticPath !== "string" || !ffmpegStaticPath) {
+    throw new Error("The bundled FFmpeg encoder is unavailable.");
+  }
+  const unpackedPath = ffmpegStaticPath.replace(/([\\/])app\.asar([\\/])/, "$1app.asar.unpacked$2");
+  return fs.existsSync(unpackedPath) ? unpackedPath : ffmpegStaticPath;
+}
+
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(resolveFfmpegPath(), args, { windowsHide: true });
+    let errorOutput = "";
+    child.stderr.on("data", (chunk) => {
+      errorOutput += chunk.toString();
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(errorOutput.trim() || `FFmpeg exited with code ${code}`));
+    });
+  });
+}
+
+function clipTimeForFilename(seconds) {
+  const totalMilliseconds = Math.max(0, Math.round(seconds * 1000));
+  const milliseconds = totalMilliseconds % 1000;
+  const totalSeconds = Math.floor(totalMilliseconds / 1000);
+  const second = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const minute = totalMinutes % 60;
+  const hour = Math.floor(totalMinutes / 60);
+  return `${String(hour).padStart(2, "0")}-${String(minute).padStart(2, "0")}-${String(second).padStart(2, "0")}-${String(milliseconds).padStart(3, "0")}`;
+}
+
+async function availableRecordingPath(directory, baseName, extension = ".mp4") {
+  let candidate = path.join(directory, `${baseName}${extension}`);
+  let suffix = 2;
+  while (true) {
+    try {
+      await fs.promises.access(candidate);
+      candidate = path.join(directory, `${baseName} (${suffix})${extension}`);
+      suffix += 1;
+      continue;
+    } catch {
+      // Continue below and also avoid colliding with an orphaned sidecar.
+    }
+    try {
+      await fs.promises.access(recordingManifestPathForVideo(candidate));
+      candidate = path.join(directory, `${baseName} (${suffix})${extension}`);
+      suffix += 1;
+    } catch {
+      return candidate;
+    }
+  }
+}
+
+async function exportRecordingClip(request = {}) {
+  const recordingId = String(request.recordingId ?? "");
+  const sourcePath = resolveRecordingPath(recordingId);
+  const sourceStat = await fs.promises.stat(sourcePath).catch(() => null);
+  if (!sourceStat?.isFile()) throw new Error("The source recording no longer exists.");
+
+  const startTime = Number(request.startTime);
+  const endTime = Number(request.endTime);
+  if (
+    !Number.isFinite(startTime) ||
+    !Number.isFinite(endTime) ||
+    startTime < 0 ||
+    endTime <= startTime
+  ) {
+    throw new Error("The clip range is invalid.");
+  }
+
+  const folder = path.resolve(getObsSettings().recordDirectory);
+  await fs.promises.mkdir(folder, { recursive: true });
+  const sourceRecordingName = path.basename(sourcePath);
+  const sourceStem = safeRecordingNamePart(
+    path.basename(sourcePath, path.extname(sourcePath)),
+    "recording",
+  );
+  const rangeLabel = `${clipTimeForFilename(startTime)} to ${clipTimeForFilename(endTime)}`;
+  const baseName = `${sourceStem} - clip ${rangeLabel}`;
+  const outputPath = await availableRecordingPath(folder, baseName);
+  const duration = endTime - startTime;
+
+  await runFfmpeg([
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-y",
+    "-i",
+    sourcePath,
+    "-ss",
+    startTime.toFixed(3),
+    "-t",
+    duration.toFixed(3),
+    "-map",
+    "0:v:0",
+    "-map",
+    "0:a:0?",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "fast",
+    "-crf",
+    "18",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "192k",
+    "-movflags",
+    "+faststart",
+    "-avoid_negative_ts",
+    "make_zero",
+    outputPath,
+  ]);
+
+  const outputId = path.relative(folder, outputPath).split(path.sep).join("/");
+  const clip = {
+    sourceRecordingId: path.relative(folder, sourcePath).split(path.sep).join("/"),
+    sourceRecordingName,
+    startTime,
+    endTime,
+    createdAt: new Date().toISOString(),
+  };
+  const manifestPath = recordingManifestPathForVideo(outputPath);
+  try {
+    await fs.promises.writeFile(
+      manifestPath,
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          createdAt: clip.createdAt,
+          outputPath,
+          metadata: null,
+          clip,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+  } catch (error) {
+    await fs.promises.rm(outputPath, { force: true }).catch(() => undefined);
+    throw new Error(
+      `Clip was encoded but its metadata could not be saved: ${obsErrorMessage(error)}`,
+    );
+  }
+
+  const stat = await fs.promises.stat(outputPath);
+  return {
+    id: outputId,
+    name: path.basename(outputPath),
+    url: `labatar-media://recording/${encodeURIComponent(outputId)}`,
+    size: stat.size,
+    modifiedAt: stat.mtimeMs,
+    metadata: null,
+    replayPath: null,
+    replayFileName: null,
+    clip,
+  };
+}
+
+async function renameRecording(request = {}) {
+  const recordingId = String(request.recordingId ?? "");
+  const currentPath = resolveRecordingPath(recordingId);
+  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
+  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+
+  const manifestPath = recordingManifestPathForVideo(currentPath);
+  const hasManifest = await fs.promises
+    .access(manifestPath)
+    .then(() => true)
+    .catch(() => false);
+  let manifest = null;
+  if (hasManifest) {
+    try {
+      manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+    } catch {
+      throw new Error("The recording metadata could not be read.");
+    }
+  }
+
+  const requestedName = String(request.name ?? "").trim();
+  if (!requestedName) throw new Error("A recording name is required.");
+  const extension = path.extname(currentPath);
+  const requestedExtension = path.extname(requestedName);
+  const requestedBaseName =
+    extension && requestedExtension.toLowerCase() === extension.toLowerCase()
+      ? requestedName.slice(0, -requestedExtension.length)
+      : requestedName;
+  const baseName = safeRecordingNamePart(requestedBaseName, "");
+  if (!baseName) throw new Error("A valid recording name is required.");
+
+  const folder = path.resolve(getObsSettings().recordDirectory);
+  const previousId = recordingIdForPath(currentPath, folder);
+  const targetPath = path.resolve(folder, `${baseName}${extension}`);
+  if (path.resolve(targetPath).toLowerCase() === path.resolve(currentPath).toLowerCase()) {
+    return getRecordedVideoForPath(targetPath, folder);
+  }
+  const availableTargetPath = await availableRecordingPath(folder, baseName, extension);
+  const nextId = recordingIdForPath(availableTargetPath, folder);
+  const nextName = path.basename(availableTargetPath);
+  const targetManifestPath = recordingManifestPathForVideo(availableTargetPath);
+
+  await fs.promises.rename(currentPath, availableTargetPath);
+  let updatedLinkedManifests = [];
+  try {
+    if (hasManifest) {
+      await fs.promises.rename(manifestPath, targetManifestPath);
+      manifest.outputPath = availableTargetPath;
+      manifest.outputFileName = path.basename(availableTargetPath);
+      await fs.promises.writeFile(targetManifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    }
+    updatedLinkedManifests = await updateLinkedClipManifests(folder, previousId, nextId, nextName);
+  } catch (error) {
+    for (const { manifestPath, originalContent } of updatedLinkedManifests.reverse()) {
+      await fs.promises.writeFile(manifestPath, originalContent, "utf8").catch(() => undefined);
+    }
+    await fs.promises.rename(availableTargetPath, currentPath).catch(() => undefined);
+    if (hasManifest) {
+      await fs.promises.rename(targetManifestPath, manifestPath).catch(() => undefined);
+    }
+    throw new Error(`The recording was not fully renamed: ${obsErrorMessage(error)}`);
+  }
+  return getRecordedVideoForPath(availableTargetPath, folder);
+}
+
+async function deleteRecording(request = {}) {
+  const recordingId = String(request.recordingId ?? "");
+  const currentPath = resolveRecordingPath(recordingId);
+  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
+  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+
+  await fs.promises.rm(currentPath, { force: true });
+  await fs.promises.rm(recordingManifestPathForVideo(currentPath), { force: true });
+  return { id: recordingId };
+}
+
+async function getRecordedVideoForPath(
+  filePath,
+  folder = path.resolve(getObsSettings().recordDirectory),
+) {
+  const stat = await fs.promises.stat(filePath);
+  const id = path.relative(folder, filePath).split(path.sep).join("/");
+  const manifest = await readRecordingManifest(filePath);
+  return {
+    id,
+    name: path.basename(filePath),
+    url: `labatar-media://recording/${encodeURIComponent(id)}`,
+    size: stat.size,
+    modifiedAt: stat.mtimeMs,
+    ...manifest,
+  };
+}
+
 async function readRecordingManifest(videoPath) {
   try {
     const content = await fs.promises.readFile(recordingManifestPathForVideo(videoPath), "utf8");
     const manifest = JSON.parse(content);
+    const clip = manifest?.clip;
+    const startTime = Number(clip?.startTime);
+    const endTime = Number(clip?.endTime);
     return {
       metadata: manifest?.metadata ?? null,
       replayPath: typeof manifest?.replayPath === "string" ? manifest.replayPath : null,
       replayFileName: typeof manifest?.replayFileName === "string" ? manifest.replayFileName : null,
+      clip:
+        typeof clip?.sourceRecordingId === "string" &&
+        clip.sourceRecordingId.trim() &&
+        typeof clip?.sourceRecordingName === "string" &&
+        clip.sourceRecordingName.trim() &&
+        Number.isFinite(startTime) &&
+        Number.isFinite(endTime) &&
+        endTime >= startTime
+          ? {
+              sourceRecordingId: clip.sourceRecordingId.trim(),
+              sourceRecordingName: clip.sourceRecordingName.trim(),
+              startTime: Math.max(0, startTime),
+              endTime: Math.max(0, endTime),
+              createdAt: typeof clip.createdAt === "string" ? clip.createdAt : null,
+            }
+          : null,
     };
   } catch {
-    return { metadata: null, replayPath: null, replayFileName: null };
+    return { metadata: null, replayPath: null, replayFileName: null, clip: null };
   }
 }
 
@@ -1460,6 +1866,7 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
 
 ipcMain.handle("recordings:list", async () => {
   const folder = path.resolve(getObsSettings().recordDirectory);
+  await repairDanglingClipLinks(folder);
   const files = await findRecordingFiles(folder);
   const recordings = [];
   for (const filePath of files) {
@@ -1476,6 +1883,24 @@ ipcMain.handle("recordings:list", async () => {
   }
   recordings.sort((left, right) => right.modifiedAt - left.modifiedAt);
   return { folder, recordings };
+});
+
+ipcMain.handle("recordings:export-clip", async (_, request) => exportRecordingClip(request));
+ipcMain.handle("recordings:rename", async (_, request) => renameRecording(request));
+ipcMain.handle("recordings:delete", async (_, request) => deleteRecording(request));
+ipcMain.on("recordings:start-drag", async (event, request) => {
+  try {
+    const filePath = resolveRecordingPath(String(request?.recordingId ?? ""));
+    if (!fs.existsSync(filePath)) return;
+    const fileIcon = await app.getFileIcon(filePath, { size: "small" });
+    if (event.sender.isDestroyed()) return;
+    event.sender.startDrag({
+      file: filePath,
+      icon: fileIcon.isEmpty() ? app.getPath("exe") : fileIcon,
+    });
+  } catch (error) {
+    console.warn("Could not start recording drag:", obsErrorMessage(error));
+  }
 });
 
 function safeZipName(value) {
