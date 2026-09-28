@@ -71,9 +71,25 @@ type TimelineRow = {
 type MatchupStats = { games: number; wins: number; losses: number };
 type SupportStats = { name: string; games: number };
 
+const OPPONENT_CHARACTER_ROSTER = [
+  "Aang",
+  "Korra",
+  "Nightmare Korra",
+  "Zuko",
+  "Katara",
+  "Toph",
+  "Sokka",
+  "Azula",
+  "Kyoshi",
+  "Ozai",
+  "Zaheer",
+  "Avatar Aang",
+];
+
 type MatchupData = {
   rows: string[];
   columns: string[];
+  opponentCharacterCounts: Map<string, number>;
   supportsByCharacter: Map<string, SupportStats[]>;
   supportsByOpponentCharacter: Map<string, SupportStats[]>;
   cells: Map<string, MatchupStats>;
@@ -264,9 +280,18 @@ function buildMatchupData(games: ReplayRow[], poi: string): MatchupData {
   }
   return {
     rows: [...rowCounts.entries()].sort((left, right) => right[1] - left[1]).map(([name]) => name),
-    columns: [...columnCounts.entries()]
-      .sort((left, right) => right[1] - left[1])
-      .map(([name]) => name),
+    columns: [...new Set([...OPPONENT_CHARACTER_ROSTER, ...columnCounts.keys()])].sort(
+      (left, right) =>
+        (columnCounts.get(right) ?? 0) - (columnCounts.get(left) ?? 0) ||
+        (OPPONENT_CHARACTER_ROSTER.indexOf(left) >= 0
+          ? OPPONENT_CHARACTER_ROSTER.indexOf(left)
+          : OPPONENT_CHARACTER_ROSTER.length) -
+          (OPPONENT_CHARACTER_ROSTER.indexOf(right) >= 0
+            ? OPPONENT_CHARACTER_ROSTER.indexOf(right)
+            : OPPONENT_CHARACTER_ROSTER.length) ||
+        left.localeCompare(right),
+    ),
+    opponentCharacterCounts: columnCounts,
     supportsByCharacter: new Map(
       [...supportCounts.entries()].map(([character, supports]) => [
         character,
@@ -391,8 +416,15 @@ function MatchupHeatmap({
   onToggleRow: (row: string, selectAll: boolean) => void;
   onTogglePoiSupport: (value: string) => void;
 }) {
-  const { rows, columns, supportsByCharacter, supportsByOpponentCharacter, cells } = data;
-  if (rows.length === 0 || columns.length === 0) return <EmptyChart />;
+  const {
+    rows,
+    columns,
+    opponentCharacterCounts,
+    supportsByCharacter,
+    supportsByOpponentCharacter,
+    cells,
+  } = data;
+  if (columns.length === 0) return <EmptyChart />;
   return (
     <Box sx={{ overflowX: "auto", overflowY: rows.length > 1 ? "auto" : "hidden", height: "100%" }}>
       <Box
@@ -420,6 +452,7 @@ function MatchupHeatmap({
         </Box>
         {columns.map((column) => {
           const supports = supportsByOpponentCharacter.get(column) ?? [];
+          const games = opponentCharacterCounts.get(column) ?? 0;
           const columnDisabled = disabledOpponentCharacters.has(column);
           return (
             <Card
@@ -435,8 +468,13 @@ function MatchupHeatmap({
               }}
             >
               <CardContent sx={{ py: 0.5, "&:last-child": { pb: 0.5 } }}>
-                <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap title={column}>
-                  {column}
+                <Typography
+                  variant="body2"
+                  sx={{ fontWeight: 600 }}
+                  noWrap
+                  title={`${column} (${games})`}
+                >
+                  {column} ({games})
                 </Typography>
                 <Stack sx={{ ml: 1 }}>
                   {supports.map((support) => {
@@ -444,7 +482,7 @@ function MatchupHeatmap({
                     return (
                       <FormControlLabel
                         key={supportKey}
-                        label={support.name}
+                        label={`${support.name} (${support.games})`}
                         disabled={columnDisabled}
                         sx={{
                           m: 0,
@@ -506,7 +544,7 @@ function MatchupHeatmap({
                       return (
                         <FormControlLabel
                           key={supportKey}
-                          label={support.name}
+                          label={`${support.name} (${support.games})`}
                           sx={{
                             m: 0,
                             justifyContent: "flex-start",
@@ -636,6 +674,7 @@ export function AnalyticsSection({
         : {
             rows: [],
             columns: [],
+            opponentCharacterCounts: new Map<string, number>(),
             supportsByCharacter: new Map<string, SupportStats[]>(),
             supportsByOpponentCharacter: new Map<string, SupportStats[]>(),
             cells: new Map<string, MatchupStats>(),
