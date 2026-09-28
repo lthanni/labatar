@@ -53,18 +53,29 @@ The production build disables the visual overlay and packages a Windows NSIS ins
 
 ## Publishing a release
 
-The first configured release uses the current `0.1.0` version. For later releases, bump the `version` in `package.json` using a semantic version such as `0.1.1`.
+The version in `package.json` must match the tag being pushed. Stable releases use normal semantic versions, while beta builds use a semantic-version prerelease suffix such as `0.2.2-dev.0`.
 
-1. Leave the version at `0.1.0` for the first release; otherwise bump it in `package.json`.
-2. Commit and push the change.
-3. Create and push the matching tag:
+For a beta release:
 
 ```powershell
-git tag v0.1.0 # use the matching version; for example, v0.1.1 for the next release
+# package.json: "version": "0.2.2-dev.0"
+git add package.json
+git commit -m "release: 0.2.2-dev.0"
+git tag v0.2.2-dev.0
 git push origin master --tags
 ```
 
-The GitHub Actions workflow builds the Windows installer and publishes it to a GitHub Release. The release assets include the installer metadata required by `electron-updater`.
+For the stable release after beta testing:
+
+```powershell
+# package.json: "version": "0.2.2"
+git add package.json
+git commit -m "release: 0.2.2"
+git tag v0.2.2
+git push origin master --tags
+```
+
+Tags containing a prerelease suffix are published as GitHub prereleases. Beta installers use their own update channel, so stable installations do not receive beta updates automatically, while beta installations can receive later builds from the same channel. The workflow uploads all YAML update metadata so both stable and beta channels work with `electron-updater`.
 
 ## Project status
 

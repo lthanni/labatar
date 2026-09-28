@@ -5,6 +5,22 @@ contextBridge.exposeInMainWorld("electronAPI", {
   app: {
     getVersion: () => ipcRenderer.invoke("app:get-version"),
   },
+  obs: {
+    getState: () => ipcRenderer.invoke("obs:get-state"),
+    getSettings: () => ipcRenderer.invoke("obs:get-settings"),
+    connect: (request) => ipcRenderer.invoke("obs:connect", request),
+    clearPassword: () => ipcRenderer.invoke("obs:clear-password"),
+    disconnect: () => ipcRenderer.invoke("obs:disconnect"),
+    prepareProfile: (request) => ipcRenderer.invoke("obs:prepare-profile", request),
+    startRecording: (request) => ipcRenderer.invoke("obs:start-recording", request),
+    stopRecording: () => ipcRenderer.invoke("obs:stop-recording"),
+    setAutomaticRecording: (enabled) => ipcRenderer.invoke("obs:set-automatic-recording", enabled),
+    onState: (listener) => {
+      const handler = (_, state) => listener(state);
+      ipcRenderer.on("obs:state", handler);
+      return () => ipcRenderer.removeListener("obs:state", handler);
+    },
+  },
   overlay: {
     show: () => ipcRenderer.invoke("overlay:show"),
     hide: () => ipcRenderer.invoke("overlay:hide"),
@@ -41,6 +57,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.on("replays:scan-progress", handler);
       return () => ipcRenderer.removeListener("replays:scan-progress", handler);
     },
+  },
+  recordings: {
+    list: () => ipcRenderer.invoke("recordings:list"),
   },
   updates: {
     onStatus: (listener) => {

@@ -1,0 +1,282 @@
+const fs = require("node:fs");
+const path = require("node:path");
+
+function parseLogTime(line) {
+  return line.match(/^\[(\d{2}:\d{2}:\d{2})\]/)?.[1] ?? null;
+}
+
+function parseGlicko(value) {
+  const match = value.match(/\[\s*R:\s*([^:]+):\s*D:\s*([^:]+):\s*Vol:\s*([^\]]+)\]/i);
+  if (!match) return null;
+  return {
+    rating: Number(match[1]),
+    deviation: Number(match[2]),
+    volatility: Number(match[3]),
+  };
+}
+
+function parsePlayerLine(line) {
+  const match = line.match(
+    /SetNewMatch:\s*Player\s+([12]):\s*(.*?)\s*\(SteamID:\s*([^,]+),\s*Glicko:\s*(.*?)\)\s*$/i,
+  );
+  if (!match) return null;
+  return {
+    player: Number(match[1]),
+    character: match[2].trim(),
+    steamId: match[3].trim(),
+    glicko: parseGlicko(match[4]),
+  };
+}
+
+function updateMatchFromLine(currentMatch, line) {
+  const start = line.match(/SetNewMatch:\s*New match started with ID\s*(.*?)\s*$/i);
+  if (start) {
+    return {
+      matchId: start[1].trim(),
+      logTime: parseLogTime(line),
+      startedAt: new Date().toISOString(),
+      player1: null,
+      player2: null,
+      notes: { player1: "", player2: "" },
+      recordingStarted: false,
+    };
+  }
+  if (!currentMatch) return currentMatch;
+  const player = parsePlayerLine(line);
+  if (player) {
+    currentMatch[`player${player.player}`] = player;
+    return currentMatch;
+  }
+  const notes = line.match(/SetNewMatch:\s*P1Notes:\s*(.*?),\s*P2Notes:\s*(.*?)\s*$/i);
+  if (notes) {
+    currentMatch.notes = { player1: notes[1].trim(), player2: notes[2].trim() };
+  }
+  return currentMatch;
+}
+
+function parseReplayPath(line) {
+  const match = line.match(/Successfully wrote replay file:\s*(.*?\.dlr)/i);
+  return match?.[1]?.trim() ?? null;
+}
+
+function parseMatchEndReason(line) {
+  if (/EndMatch:\s*Match ended/i.test(line)) return "end-match";
+  if (/Ending Netplay from script with reason:\s*Quit\b/i.test(line)) return "quit";
+  if (/LogNetplayEvent:\s*Quit\b/i.test(line)) return "quit";
+  if (
+    /LogNetplayEvent:\s*\/\((?:UI_Netplay_TimeoutError|UI_NetworkError_ConnectionInterrupted)\)/i.test(
+      line,
+    )
+  ) {
+    return "connection-lost";
+  }
+  return null;
+}
+
+class MatchLogWatcher {
+  constructor({ getLogsDirectory, onState, onMatchStarted, onMatchEnded, onReplaySaved }) {
+    this.getLogsDirectory = getLogsDirectory;
+    this.onState = onState;
+    this.onMatchStarted = onMatchStarted;
+    this.onMatchEnded = onMatchEnded;
+    this.onReplaySaved = onReplaySaved;
+    this.timer = null;
+    this.polling = false;
+    this.enabled = false;
+    this.logPath = null;
+    this.offset = 0;
+    this.lineBuffer = "";
+    this.currentMatch = null;
+    this.gameNumber = 0;
+    this.lastReplayPath = null;
+    this.status = "disabled";
+    this.error = null;
+  }
+
+  snapshot() {
+    return {
+      enabled: this.enabled,
+      status: this.status,
+      logPath: this.logPath,
+      currentMatch: this.currentMatch,
+      gameNumber: this.gameNumber,
+      lastReplayPath: this.lastReplayPath,
+      error: this.error,
+    };
+  }
+
+  emit() {
+    this.onState?.(this.snapshot());
+  }
+
+  async findNewestLog(logsDirectory) {
+    const entries = await fs.promises.readdir(logsDirectory, { withFileTypes: true });
+    const files = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^abare_log_.*\.txt$/i.test(entry.name)) continue;
+      const filePath = path.join(logsDirectory, entry.name);
+      const stat = await fs.promises.stat(filePath);
+      files.push({ path: filePath, modifiedAt: stat.mtimeMs });
+    }
+    return files.sort((left, right) => right.modifiedAt - left.modifiedAt)[0]?.path ?? null;
+  }
+
+  async primeCurrentFile(filePath, size) {
+    const tailSize = Math.min(size, 256 * 1024);
+    const buffer = Buffer.alloc(tailSize);
+    const handle = await fs.promises.open(filePath, "r");
+    try {
+      await handle.read(buffer, 0, tailSize, size - tailSize);
+    } finally {
+      await handle.close();
+    }
+    let currentMatch = null;
+    for (const line of buffer.toString("latin1").split(/\r?\n/)) {
+      if (/EndMatch:\s*Match ended/i.test(line)) {
+        currentMatch = null;
+        continue;
+      }
+      currentMatch = updateMatchFromLine(currentMatch, line);
+    }
+    this.currentMatch = currentMatch;
+    this.offset = size;
+    this.lineBuffer = "";
+    if (this.currentMatch) await this.beginCurrentMatch(true);
+  }
+
+  async switchToLog(filePath) {
+    const stat = await fs.promises.stat(filePath);
+    this.logPath = filePath;
+    this.currentMatch = null;
+    this.lastReplayPath = null;
+    await this.primeCurrentFile(filePath, stat.size);
+    this.emit();
+  }
+
+  async processLine(line) {
+    const nextMatch = updateMatchFromLine(this.currentMatch, line);
+    if (nextMatch !== this.currentMatch && nextMatch?.matchId) {
+      if (this.currentMatch) {
+        await this.onMatchEnded?.(this.currentMatch, "new-match");
+      }
+      this.currentMatch = nextMatch;
+      this.gameNumber += 1;
+      this.emit();
+      return;
+    }
+
+    if (this.currentMatch) {
+      this.currentMatch = nextMatch;
+      const endReason = parseMatchEndReason(line);
+      if (endReason) {
+        const completedMatch = this.currentMatch;
+        this.currentMatch = null;
+        await this.onMatchEnded?.(completedMatch, endReason);
+        this.emit();
+      } else {
+        if (this.currentMatch.player1 && this.currentMatch.player2) {
+          await this.beginCurrentMatch(false);
+        }
+        this.emit();
+      }
+    }
+
+    const replayPath = parseReplayPath(line);
+    if (replayPath) {
+      this.lastReplayPath = replayPath;
+      await this.onReplaySaved?.(replayPath);
+      this.emit();
+    }
+  }
+
+  async beginCurrentMatch(recovered) {
+    if (!this.currentMatch || this.currentMatch.recordingStarted) return;
+    if (!this.currentMatch.player1 || !this.currentMatch.player2) {
+      if (!recovered) return;
+    }
+    const match = this.currentMatch;
+    const started = await this.onMatchStarted?.(match, { recovered });
+    if (started !== false && this.currentMatch?.matchId === match.matchId) {
+      this.currentMatch.recordingStarted = true;
+    }
+  }
+
+  async poll() {
+    if (!this.enabled || this.polling) return;
+    this.polling = true;
+    try {
+      const logsDirectory = await this.getLogsDirectory?.();
+      if (!logsDirectory) {
+        this.status = "waiting-for-log";
+        this.error = null;
+        this.emit();
+        return;
+      }
+      const newestLog = await this.findNewestLog(logsDirectory);
+      if (!newestLog) {
+        this.status = "waiting-for-log";
+        this.error = null;
+        this.emit();
+        return;
+      }
+      if (newestLog !== this.logPath) await this.switchToLog(newestLog);
+      const stat = await fs.promises.stat(newestLog);
+      if (stat.size < this.offset) {
+        await this.switchToLog(newestLog);
+      } else if (stat.size > this.offset) {
+        const buffer = Buffer.alloc(stat.size - this.offset);
+        const handle = await fs.promises.open(newestLog, "r");
+        try {
+          await handle.read(buffer, 0, buffer.length, this.offset);
+        } finally {
+          await handle.close();
+        }
+        this.offset = stat.size;
+        const lines = `${this.lineBuffer}${buffer.toString("latin1")}`.split(/\r?\n/);
+        this.lineBuffer = lines.pop() ?? "";
+        for (const line of lines) await this.processLine(line);
+      }
+      if (this.currentMatch && !this.currentMatch.recordingStarted) {
+        await this.beginCurrentMatch(false);
+      }
+      this.status = this.currentMatch ? "in-match" : "watching";
+      this.error = null;
+      this.emit();
+    } catch (error) {
+      this.status = "error";
+      this.error = error instanceof Error ? error.message : String(error);
+      this.emit();
+    } finally {
+      this.polling = false;
+    }
+  }
+
+  async start() {
+    if (this.enabled) return this.snapshot();
+    this.enabled = true;
+    this.status = "starting";
+    this.error = null;
+    this.emit();
+    await this.poll();
+    if (this.status === "error") {
+      this.enabled = false;
+      this.emit();
+      throw new Error(this.error);
+    }
+    this.timer = setInterval(() => void this.poll(), 500);
+    return this.snapshot();
+  }
+
+  async stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.enabled = false;
+    this.status = "disabled";
+    this.error = null;
+    this.currentMatch = null;
+    this.emit();
+    return this.snapshot();
+  }
+}
+
+module.exports = { MatchLogWatcher };

@@ -4,10 +4,12 @@ const {
   dialog,
   ipcMain,
   Menu,
+  protocol,
   screen,
   session,
   shell,
   desktopCapturer,
+  safeStorage,
 } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
@@ -15,8 +17,17 @@ const readline = require("node:readline");
 const { createHash } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { autoUpdater } = require("electron-updater");
+const { OBSWebSocket } = require("obs-websocket-js");
+const { MatchLogWatcher } = require("./match-watcher.cjs");
 const supportMap = require("./support-map.json");
 const characterMap = require("./character-map.json");
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "labatar-media",
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+  },
+]);
 let overlayWindow = null;
 let overlayMonitor = null;
 let gameDisplayId = null;
@@ -34,7 +45,7 @@ let mainWindow = null;
 const getActiveWindow = async () => (await import("active-win")).activeWindow();
 
 const isDev = !app.isPackaged;
-const overlayAvailable = isDev;
+const overlayAvailable = true;
 const defaultReplaysFolder = path.join(
   "C:\\",
   "Program Files (x86)",
@@ -44,6 +55,645 @@ const defaultReplaysFolder = path.join(
   "Avatar Legends The Fighting Game",
 );
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
+const obsPasswordFile = () => path.join(app.getPath("userData"), "obs-password.enc");
+const defaultObsProfileName = "Labatar Recording";
+const productionObsRecordDirectory = () =>
+  path.join(app.getPath("videos"), "Labatar", "recordings");
+const defaultObsRecordDirectory = () =>
+  isDev ? path.resolve(__dirname, "..", ".dev", "recordings") : productionObsRecordDirectory();
+let obsClient = null;
+let obsConnectionToken = 0;
+let activeObsRecording = null;
+let lastFinalizedObsRecording = null;
+let matchLogWatcher = null;
+let pendingAutoRecordings = [];
+let obsState = {
+  status: "disconnected",
+  host: "127.0.0.1",
+  port: 4455,
+  error: null,
+  obsVersion: null,
+  obsWebSocketVersion: null,
+  currentProfileName: null,
+  profiles: [],
+  recordDirectory: null,
+  automation: {
+    enabled: false,
+    status: "disabled",
+    logPath: null,
+    currentMatch: null,
+    gameNumber: 0,
+    lastReplayPath: null,
+    pendingRecordings: 0,
+    error: null,
+  },
+  recording: {
+    active: false,
+    paused: false,
+    outputPath: null,
+  },
+};
+
+function getObsSettings() {
+  const saved = readSettings().obs ?? {};
+  const savedRecordDirectory =
+    typeof saved.recordDirectory === "string" && saved.recordDirectory.trim()
+      ? saved.recordDirectory.trim()
+      : null;
+  const recordDirectory =
+    isDev &&
+    (!savedRecordDirectory ||
+      path.resolve(savedRecordDirectory) === path.resolve(productionObsRecordDirectory()))
+      ? defaultObsRecordDirectory()
+      : (savedRecordDirectory ?? defaultObsRecordDirectory());
+  return {
+    host: typeof saved.host === "string" && saved.host.trim() ? saved.host.trim() : "127.0.0.1",
+    port: Number.isInteger(Number(saved.port)) ? Number(saved.port) : 4455,
+    profileName:
+      typeof saved.profileName === "string" && saved.profileName.trim()
+        ? saved.profileName.trim()
+        : defaultObsProfileName,
+    recordDirectory,
+  };
+}
+
+function readStoredObsPassword() {
+  try {
+    if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(obsPasswordFile())) return null;
+    return safeStorage.decryptString(fs.readFileSync(obsPasswordFile()));
+  } catch {
+    return null;
+  }
+}
+
+function hasStoredObsPassword() {
+  return readStoredObsPassword() !== null;
+}
+
+function saveObsPassword(password) {
+  if (!password) return clearStoredObsPassword();
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error("Secure password storage is unavailable on this system.");
+  }
+  fs.mkdirSync(app.getPath("userData"), { recursive: true });
+  fs.writeFileSync(obsPasswordFile(), safeStorage.encryptString(password));
+}
+
+function clearStoredObsPassword() {
+  fs.rmSync(obsPasswordFile(), { force: true });
+}
+
+function publicObsState() {
+  return {
+    ...obsState,
+    recording: {
+      ...obsState.recording,
+      sessionId: activeObsRecording?.sessionId ?? null,
+      metadata: activeObsRecording?.metadata ?? null,
+      startedAt: activeObsRecording?.startedAt ?? null,
+    },
+  };
+}
+
+function sendObsState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("obs:state", publicObsState());
+}
+
+function setObsState(patch) {
+  obsState = { ...obsState, ...patch };
+  sendObsState();
+}
+
+function obsErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function getObsClient() {
+  if (!obsClient) throw new Error("OBS is not connected.");
+  return obsClient;
+}
+
+async function refreshObsState(client = getObsClient()) {
+  const version = await client.call("GetVersion");
+  const profiles = await client.call("GetProfileList");
+  const recordStatus = await client.call("GetRecordStatus");
+  let recordDirectory = null;
+  if (version.availableRequests?.includes("GetRecordDirectory")) {
+    recordDirectory = (await client.call("GetRecordDirectory")).recordDirectory;
+  }
+  setObsState({
+    status: "connected",
+    error: null,
+    obsVersion: version.obsVersion,
+    obsWebSocketVersion: version.obsWebSocketVersion,
+    currentProfileName: profiles.currentProfileName,
+    profiles: profiles.profiles,
+    recordDirectory,
+    recording: {
+      active: Boolean(recordStatus.outputActive),
+      paused: recordStatus.outputState === "OBS_WEBSOCKET_OUTPUT_PAUSED",
+      outputPath: recordStatus.outputPath ?? null,
+    },
+  });
+  return { version, profiles, recordStatus, recordDirectory };
+}
+
+function normalizeRecordingMetadata(value) {
+  const metadata = value && typeof value === "object" ? value : {};
+  const text = (key) => {
+    const next = metadata[key];
+    return typeof next === "string" ? next.trim().slice(0, 200) : "";
+  };
+  return {
+    player: text("player"),
+    opponent: text("opponent"),
+    setLabel: text("setLabel"),
+    gameNumber: text("gameNumber"),
+    mode: text("mode"),
+    notes: text("notes"),
+    matchId: text("matchId"),
+    player1: text("player1"),
+    player2: text("player2"),
+    player1SteamId: text("player1SteamId"),
+    player2SteamId: text("player2SteamId"),
+    player1Character: text("player1Character"),
+    player2Character: text("player2Character"),
+    player1Rating: text("player1Rating"),
+    player2Rating: text("player2Rating"),
+  };
+}
+
+function recordingManifestPath(outputPath) {
+  return path.join(path.dirname(outputPath), `${path.basename(outputPath)}.labatar.json`);
+}
+
+function safeRecordingNamePart(value, fallback) {
+  const cleaned = String(value ?? "")
+    .replace(/[<>:"/\\|?*]/g, "_")
+    .split("")
+    .filter((character) => character.charCodeAt(0) >= 0x20)
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/, "");
+  return cleaned || fallback;
+}
+
+function recordingScore(replay) {
+  const score = replay?.roundScore;
+  if (typeof score !== "string") return "Unknown";
+  const match = score.match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
+  return match ? `${match[1]}-${match[2]}` : safeRecordingNamePart(score, "Unknown");
+}
+
+function recordingBaseName(metadata, replay = null) {
+  const player1 = safeRecordingNamePart(replay?.player1 || metadata?.player1, "Player 1");
+  const player2 = safeRecordingNamePart(replay?.player2 || metadata?.player2, "Player 2");
+  const setLabel = safeRecordingNamePart(metadata?.setLabel, "set 1");
+  return `${player1} - ${player2} - ${setLabel} - ${recordingScore(replay)}`;
+}
+
+async function recordingPathWithAvailableName(outputPath, metadata, replay = null) {
+  const extension = path.extname(outputPath) || ".mp4";
+  const directory = path.dirname(outputPath);
+  const baseName = recordingBaseName(metadata, replay);
+  let candidate = path.join(directory, `${baseName}${extension}`);
+  let suffix = 2;
+  while (path.resolve(candidate).toLowerCase() !== path.resolve(outputPath).toLowerCase()) {
+    try {
+      await fs.promises.access(candidate);
+      candidate = path.join(directory, `${baseName} (${suffix})${extension}`);
+      suffix += 1;
+    } catch {
+      break;
+    }
+  }
+  return candidate;
+}
+
+async function renameRecording(outputPath, metadata, replay = null) {
+  if (!outputPath) return outputPath;
+  const targetPath = await recordingPathWithAvailableName(outputPath, metadata, replay);
+  if (path.resolve(targetPath).toLowerCase() === path.resolve(outputPath).toLowerCase()) {
+    return outputPath;
+  }
+  try {
+    await fs.promises.rename(outputPath, targetPath);
+    return targetPath;
+  } catch {
+    return outputPath;
+  }
+}
+
+async function finalizeObsRecording(outputPath, reason) {
+  if (!activeObsRecording) return lastFinalizedObsRecording;
+  const recording = activeObsRecording;
+  activeObsRecording = null;
+  let manifestPath = null;
+  let manifestError = null;
+  if (outputPath) {
+    const namedOutputPath = await renameRecording(outputPath, recording.metadata);
+    recording.outputPath = namedOutputPath;
+    manifestPath = recordingManifestPath(namedOutputPath);
+    try {
+      await fs.promises.writeFile(
+        manifestPath,
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            sessionId: recording.sessionId,
+            startedAt: recording.startedAt,
+            stoppedAt: new Date().toISOString(),
+            stopReason: reason,
+            outputPath: namedOutputPath,
+            metadata: recording.metadata,
+            obs: {
+              version: obsState.obsVersion,
+              webSocketVersion: obsState.obsWebSocketVersion,
+              profileName: obsState.currentProfileName,
+            },
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+    } catch (error) {
+      manifestError = obsErrorMessage(error);
+    }
+  }
+  lastFinalizedObsRecording = {
+    outputPath: recording.outputPath ?? outputPath ?? null,
+    manifestPath,
+    manifestError,
+  };
+  return lastFinalizedObsRecording;
+}
+
+async function attachReplayToRecording(recording, replayPath) {
+  if (!recording?.manifestPath) return;
+  try {
+    const manifest = JSON.parse(await fs.promises.readFile(recording.manifestPath, "utf8"));
+    const replay = await parseReplayFile(replayPath, path.dirname(replayPath));
+    const previousManifestPath = recording.manifestPath;
+    const namedOutputPath = recording.outputPath
+      ? await renameRecording(recording.outputPath, manifest.metadata, replay)
+      : recording.outputPath;
+    const namedManifestPath = namedOutputPath
+      ? recordingManifestPath(namedOutputPath)
+      : previousManifestPath;
+    if (namedManifestPath !== previousManifestPath) {
+      await fs.promises.rename(previousManifestPath, namedManifestPath).catch(() => undefined);
+    }
+    manifest.replayPath = replayPath;
+    manifest.replayFileName = path.basename(replayPath);
+    manifest.outputPath = namedOutputPath;
+    manifest.replay = replay;
+    await fs.promises.writeFile(namedManifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    recording.outputPath = namedOutputPath;
+    recording.manifestPath = namedManifestPath;
+  } catch {
+    // The recording remains useful even if the sidecar cannot be updated.
+  }
+}
+
+function findMatchLogDirectory() {
+  const savedFolder = readSettings().replaysFolder;
+  const candidates = new Set();
+  if (savedFolder) {
+    const folderName = path.basename(savedFolder).toLowerCase();
+    candidates.add(folderName === "logs" ? savedFolder : path.join(savedFolder, "logs"));
+    candidates.add(path.join(path.dirname(savedFolder), "logs"));
+    candidates.add(path.join(savedFolder, "..", "logs"));
+  }
+  candidates.add(path.join(defaultReplaysFolder, "logs"));
+  return [...candidates]
+    .map((candidate) => path.resolve(candidate))
+    .find((candidate) => {
+      try {
+        return fs.statSync(candidate).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+}
+
+function setMatchAutomationState(nextState) {
+  setObsState({
+    automation: {
+      ...obsState.automation,
+      ...nextState,
+      pendingRecordings: pendingAutoRecordings.length,
+    },
+  });
+}
+
+function matchToRecordingMetadata(match, gameNumber) {
+  const player1Rating = match.player1?.glicko?.rating;
+  const player2Rating = match.player2?.glicko?.rating;
+  const ranked = match.player1?.glicko || match.player2?.glicko;
+  const numericGameNumber = Number.parseInt(String(gameNumber), 10);
+  const setNumber =
+    Number.isFinite(numericGameNumber) && numericGameNumber > 0 ? numericGameNumber : 1;
+  return normalizeRecordingMetadata({
+    player: "Player 1",
+    opponent: "Player 2",
+    setLabel: `set ${setNumber}`,
+    gameNumber: String(setNumber),
+    mode: ranked ? "ranked" : "casual",
+    notes: [match.notes?.player1, match.notes?.player2].filter(Boolean).join(" / "),
+    matchId: match.matchId,
+    player1: match.player1?.character ?? "",
+    player2: match.player2?.character ?? "",
+    player1SteamId: match.player1?.steamId ?? "",
+    player2SteamId: match.player2?.steamId ?? "",
+    player1Character: match.player1?.character ?? "",
+    player2Character: match.player2?.character ?? "",
+    player1Rating: player1Rating == null ? "" : String(player1Rating),
+    player2Rating: player2Rating == null ? "" : String(player2Rating),
+  });
+}
+
+async function startObsRecording(metadata, setup = {}) {
+  const client = getObsClient();
+  const current = await refreshObsState(client);
+  if (current.recordStatus.outputActive) throw new Error("OBS is already recording.");
+  await prepareObsProfile(setup);
+  const normalizedMetadata = normalizeRecordingMetadata(metadata);
+  const sessionId = `match-${Date.now()}`;
+  const startedAt = new Date().toISOString();
+  lastFinalizedObsRecording = null;
+  activeObsRecording = { sessionId, startedAt, metadata: normalizedMetadata };
+  try {
+    await client.call("StartRecord");
+  } catch (error) {
+    activeObsRecording = null;
+    throw error;
+  }
+  setObsState({
+    status: "connected",
+    recording: { active: true, paused: false, outputPath: null },
+  });
+  return { sessionId, startedAt, metadata: normalizedMetadata };
+}
+
+async function waitForObsRecordingState(client, expectedActive, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const recordStatus = await client.call("GetRecordStatus");
+    if (Boolean(recordStatus.outputActive) === expectedActive) return recordStatus;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    expectedActive
+      ? "OBS did not start recording within the expected time."
+      : "OBS did not finish stopping the recording within the expected time.",
+  );
+}
+
+async function stopObsRecording(reason = "labatar") {
+  const client = getObsClient();
+  const current = await refreshObsState(client);
+  if (!current.recordStatus.outputActive) throw new Error("OBS is not recording.");
+  lastFinalizedObsRecording = null;
+  const result = await client.call("StopRecord");
+  const stopped = await waitForObsRecordingState(client, false);
+  const finalized = await finalizeObsRecording(
+    result.outputPath ?? stopped.outputPath ?? null,
+    reason,
+  );
+  setObsState({
+    status: "connected",
+    recording: { active: false, paused: false, outputPath: result.outputPath ?? null },
+  });
+  return finalized;
+}
+
+async function handleAutomaticMatchStarted(match, { recovered = false } = {}) {
+  if (!obsState.automation.enabled) return;
+  if (obsState.status !== "connected") {
+    setMatchAutomationState({
+      status: "waiting-for-obs",
+      currentMatch: match,
+      error: "Connect OBS before the next game starts.",
+    });
+    return false;
+  }
+  if (activeObsRecording?.metadata?.matchId === match.matchId) return true;
+  if (activeObsRecording) {
+    try {
+      await stopObsRecording("new-match");
+    } catch (error) {
+      setMatchAutomationState({
+        status: "error",
+        currentMatch: match,
+        error: obsErrorMessage(error),
+      });
+      return false;
+    }
+  }
+  try {
+    const gameNumber = matchLogWatcher?.gameNumber ?? 0;
+    const metadata = matchToRecordingMetadata(match, gameNumber);
+    await startObsRecording(metadata);
+    setMatchAutomationState({
+      status: recovered ? "in-match-recovered" : "in-match",
+      currentMatch: match,
+      error: null,
+    });
+    return true;
+  } catch (error) {
+    setMatchAutomationState({
+      status: "error",
+      currentMatch: match,
+      error: obsErrorMessage(error),
+    });
+    return false;
+  }
+}
+
+async function handleAutomaticMatchEnded(match, reason) {
+  if (!obsState.automation.enabled) return;
+  if (!activeObsRecording || activeObsRecording.metadata?.matchId !== match.matchId) {
+    setMatchAutomationState({ status: "watching", currentMatch: null, error: null });
+    return;
+  }
+  try {
+    const recording = await stopObsRecording(`match-${reason}`);
+    pendingAutoRecordings.push({ match, recording });
+    setMatchAutomationState({ status: "waiting-for-replay", currentMatch: null, error: null });
+  } catch (error) {
+    setMatchAutomationState({ status: "error", currentMatch: null, error: obsErrorMessage(error) });
+  }
+}
+
+async function handleAutomaticReplaySaved(replayPath) {
+  const pending = pendingAutoRecordings.shift();
+  if (pending) await attachReplayToRecording(pending.recording, replayPath);
+  setMatchAutomationState({
+    status: pending ? "watching" : obsState.automation.status,
+    lastReplayPath: replayPath,
+    error: null,
+  });
+}
+
+function ensureMatchLogWatcher() {
+  if (matchLogWatcher) return matchLogWatcher;
+  matchLogWatcher = new MatchLogWatcher({
+    getLogsDirectory: async () => findMatchLogDirectory(),
+    onState: (state) => {
+      const callbackError =
+        obsState.automation.status === "error" &&
+        obsState.automation.currentMatch?.matchId === state.currentMatch?.matchId
+          ? obsState.automation.error
+          : null;
+      setMatchAutomationState({
+        status: callbackError ? "error" : state.status,
+        logPath: state.logPath,
+        currentMatch: state.currentMatch,
+        gameNumber: state.gameNumber,
+        lastReplayPath: state.lastReplayPath,
+        error: state.error ?? callbackError,
+      });
+    },
+    onMatchStarted: handleAutomaticMatchStarted,
+    onMatchEnded: handleAutomaticMatchEnded,
+    onReplaySaved: handleAutomaticReplaySaved,
+  });
+  return matchLogWatcher;
+}
+
+async function setAutomaticRecordingEnabled(enabled) {
+  const watcher = ensureMatchLogWatcher();
+  if (enabled) {
+    if (obsState.status !== "connected")
+      throw new Error("Connect OBS before enabling automatic recording.");
+    setMatchAutomationState({ enabled: true, error: null });
+    try {
+      await watcher.start();
+    } catch (error) {
+      setMatchAutomationState({ enabled: false, status: "error", error: obsErrorMessage(error) });
+      throw error;
+    }
+  } else {
+    await watcher.stop();
+    if (activeObsRecording?.metadata?.matchId) {
+      await stopObsRecording("automation-disabled").catch(() => undefined);
+    }
+    pendingAutoRecordings = [];
+    setMatchAutomationState({
+      enabled: false,
+      status: "disabled",
+      currentMatch: null,
+      error: null,
+    });
+  }
+  return publicObsState();
+}
+
+async function connectToObs(request = {}) {
+  const settings = getObsSettings();
+  const host = String(request.host ?? settings.host).trim() || settings.host;
+  const port = Number(request.port ?? settings.port);
+  const providedPassword =
+    typeof request.password === "string" && request.password.length > 0 ? request.password : null;
+  const password = providedPassword ?? readStoredObsPassword() ?? "";
+  const rememberPassword = request.rememberPassword !== false;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("OBS WebSocket port must be between 1 and 65535.");
+  }
+
+  if (obsClient) {
+    const previous = obsClient;
+    obsClient = null;
+    await previous.disconnect().catch(() => undefined);
+  }
+  const token = ++obsConnectionToken;
+  setObsState({ status: "connecting", host, port, error: null });
+  const client = new OBSWebSocket();
+  obsClient = client;
+  client.on("RecordStateChanged", (recordStatus) => {
+    if (obsClient !== client) return;
+    const active = Boolean(recordStatus.outputActive);
+    setObsState({
+      recording: {
+        active,
+        paused: recordStatus.outputState === "OBS_WEBSOCKET_OUTPUT_PAUSED",
+        outputPath: recordStatus.outputPath ?? null,
+      },
+    });
+    if (!active) {
+      void finalizeObsRecording(recordStatus.outputPath ?? null, "obs");
+      sendObsState();
+    }
+  });
+  client.on("ConnectionClosed", (error) => {
+    if (obsClient !== client || token !== obsConnectionToken) return;
+    obsClient = null;
+    setObsState({ status: "disconnected", error: error?.message ?? "OBS connection closed." });
+  });
+  client.on("ConnectionError", (error) => {
+    if (obsClient !== client || token !== obsConnectionToken) return;
+    setObsState({ error: error?.message ?? "OBS connection error." });
+  });
+
+  try {
+    await client.connect(`ws://${host}:${port}`, password);
+    if (obsClient !== client || token !== obsConnectionToken)
+      throw new Error("OBS connection superseded.");
+    const currentSettings = readSettings();
+    writeSettings({
+      ...currentSettings,
+      obs: { ...getObsSettings(), host, port },
+    });
+    if (rememberPassword && providedPassword) saveObsPassword(providedPassword);
+    if (!rememberPassword) clearStoredObsPassword();
+    await refreshObsState(client);
+    if (obsState.automation.enabled && matchLogWatcher?.currentMatch) {
+      void handleAutomaticMatchStarted(matchLogWatcher.currentMatch, { recovered: true });
+    }
+    return publicObsState();
+  } catch (error) {
+    if (obsClient === client) obsClient = null;
+    setObsState({ status: "error", error: obsErrorMessage(error) });
+    await client.disconnect().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function prepareObsProfile(request = {}) {
+  const client = getObsClient();
+  const settings = getObsSettings();
+  const profileName =
+    String(request.profileName ?? settings.profileName).trim() || settings.profileName;
+  const recordDirectory =
+    String(request.recordDirectory ?? settings.recordDirectory).trim() || settings.recordDirectory;
+  const current = await refreshObsState(client);
+  if (current.recordStatus.outputActive) {
+    throw new Error("Stop the active OBS recording before preparing the profile.");
+  }
+  let profiles = current.profiles;
+  let created = false;
+  if (!profiles.profiles.includes(profileName)) {
+    await client.call("CreateProfile", { profileName });
+    created = true;
+  } else if (profiles.currentProfileName !== profileName) {
+    await client.call("SetCurrentProfile", { profileName });
+  }
+  await fs.promises.mkdir(recordDirectory, { recursive: true });
+  const version = current.version;
+  if (version.availableRequests?.includes("SetRecordDirectory")) {
+    await client.call("SetRecordDirectory", { recordDirectory });
+  }
+  const currentSettings = readSettings();
+  writeSettings({
+    ...currentSettings,
+    obs: { ...getObsSettings(), profileName, recordDirectory },
+  });
+  const refreshed = await refreshObsState(client);
+  return { ...refreshed, created };
+}
 
 function watchElectronFiles() {
   if (!isDev) return;
@@ -51,6 +701,7 @@ function watchElectronFiles() {
   const watchedFiles = [
     __filename,
     path.join(__dirname, "preload.cjs"),
+    path.join(__dirname, "match-watcher.cjs"),
     path.join(__dirname, "support-map.json"),
     path.join(__dirname, "character-map.json"),
   ];
@@ -76,6 +727,12 @@ function readSettings() {
 function writeSettings(settings) {
   fs.mkdirSync(app.getPath("userData"), { recursive: true });
   fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
+}
+
+function getReplayFolder() {
+  const savedFolder = readSettings().replaysFolder;
+  if (typeof savedFolder === "string" && savedFolder.trim()) return savedFolder;
+  return fs.existsSync(defaultReplaysFolder) ? defaultReplaysFolder : null;
 }
 
 function updateInfo(info) {
@@ -235,6 +892,54 @@ function cleanReplayName(value) {
 }
 
 ipcMain.handle("app:get-version", () => app.getVersion());
+
+ipcMain.handle("obs:get-state", () => publicObsState());
+ipcMain.handle("obs:get-settings", () => {
+  const settings = getObsSettings();
+  return {
+    host: settings.host,
+    port: settings.port,
+    profileName: settings.profileName,
+    recordDirectory: settings.recordDirectory,
+    passwordSaved: hasStoredObsPassword(),
+  };
+});
+ipcMain.handle("obs:connect", async (_, request) => connectToObs(request));
+ipcMain.handle("obs:clear-password", () => {
+  clearStoredObsPassword();
+  return true;
+});
+ipcMain.handle("obs:disconnect", async () => {
+  if (obsState.automation.enabled) await setAutomaticRecordingEnabled(false);
+  if (activeObsRecording) await stopObsRecording("disconnect").catch(() => undefined);
+  ++obsConnectionToken;
+  const client = obsClient;
+  obsClient = null;
+  if (client) await client.disconnect().catch(() => undefined);
+  setObsState({
+    status: "disconnected",
+    error: null,
+    recording: { active: false, paused: false, outputPath: null },
+  });
+  return publicObsState();
+});
+ipcMain.handle("obs:prepare-profile", async (_, request) => {
+  const result = await prepareObsProfile(request);
+  return {
+    profileName: result.profiles.currentProfileName,
+    recordDirectory: result.recordDirectory,
+    created: result.created,
+  };
+});
+ipcMain.handle("obs:start-recording", async (_, request) => {
+  return startObsRecording(request?.metadata, request?.setup ?? {});
+});
+ipcMain.handle("obs:stop-recording", async () => {
+  return stopObsRecording("labatar");
+});
+ipcMain.handle("obs:set-automatic-recording", async (_, enabled) =>
+  setAutomaticRecordingEnabled(Boolean(enabled)),
+);
 
 function formatSupport(character, supportId) {
   if (!supportId || supportId === "0") return "None";
@@ -536,11 +1241,145 @@ async function parseReplayFile(
         fields.SupportCharIDP2,
     ),
     roundScore:
-      fields.TM_WinsT1 && fields.TM_WinsT2
+      fields.TM_WinsT1 != null && fields.TM_WinsT2 != null
         ? `${fields.TM_WinsT1} - ${fields.TM_WinsT2}`
         : "Unknown",
     ratings: ratingsByReplayName.get(fileName) ?? null,
   };
+}
+
+const recordingExtensions = new Set([".avi", ".flv", ".mkv", ".mov", ".mp4", ".ts", ".webm"]);
+
+async function findRecordingFiles(folder) {
+  const files = [];
+  const directories = [folder];
+  while (directories.length > 0) {
+    const currentDirectory = directories.pop();
+    let entries;
+    try {
+      entries = await fs.promises.readdir(currentDirectory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(currentDirectory, entry.name);
+      if (entry.isDirectory()) {
+        directories.push(entryPath);
+      } else if (
+        entry.isFile() &&
+        recordingExtensions.has(path.extname(entry.name).toLowerCase())
+      ) {
+        files.push(entryPath);
+      }
+    }
+  }
+  return files;
+}
+
+function resolveRecordingPath(recordingId) {
+  const folder = path.resolve(getObsSettings().recordDirectory);
+  const decodedId = decodeURIComponent(String(recordingId ?? ""));
+  const candidate = path.resolve(folder, decodedId);
+  const relativeCandidate = path.relative(folder, candidate);
+  if (
+    !decodedId ||
+    relativeCandidate.startsWith(".." + path.sep) ||
+    relativeCandidate === ".." ||
+    path.isAbsolute(relativeCandidate) ||
+    !recordingExtensions.has(path.extname(candidate).toLowerCase())
+  ) {
+    throw new Error("Invalid recording path.");
+  }
+  return candidate;
+}
+
+function recordingContentType(filePath) {
+  switch (path.extname(filePath).toLowerCase()) {
+    case ".mkv":
+      return "video/x-matroska";
+    case ".webm":
+      return "video/webm";
+    case ".mov":
+      return "video/quicktime";
+    case ".avi":
+      return "video/x-msvideo";
+    default:
+      return "video/mp4";
+  }
+}
+
+function createRecordingResponse(filePath, stat, request) {
+  const fileSize = stat.size;
+  const rangeHeader = request.headers.get("range");
+  let start = 0;
+  let end = Math.max(0, fileSize - 1);
+  let status = 200;
+
+  if (rangeHeader) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+    if (!match || fileSize === 0) {
+      return new Response(null, {
+        status: 416,
+        headers: { "Content-Range": `bytes */${fileSize}` },
+      });
+    }
+    if (match[1] === "") {
+      const suffixLength = Number(match[2]);
+      start = Math.max(0, fileSize - suffixLength);
+    } else {
+      start = Number(match[1]);
+      end = match[2] === "" ? end : Number(match[2]);
+    }
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start > end || start >= fileSize) {
+      return new Response(null, {
+        status: 416,
+        headers: { "Content-Range": `bytes */${fileSize}` },
+      });
+    }
+    end = Math.min(end, fileSize - 1);
+    status = 206;
+  }
+
+  const contentLength = Math.max(0, end - start + 1);
+  const headers = {
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "no-cache",
+    "Content-Length": String(contentLength),
+    "Content-Type": recordingContentType(filePath),
+  };
+  if (status === 206) headers["Content-Range"] = `bytes ${start}-${end}/${fileSize}`;
+  if (request.method === "HEAD") return new Response(null, { status, headers });
+
+  const fileStream = fs.createReadStream(filePath, { start, end });
+  const body = new ReadableStream({
+    start(controller) {
+      fileStream.on("data", (chunk) => controller.enqueue(new Uint8Array(chunk)));
+      fileStream.on("end", () => controller.close());
+      fileStream.on("error", (error) => controller.error(error));
+    },
+    cancel() {
+      fileStream.destroy();
+    },
+  });
+  return new Response(body, { status, headers });
+}
+
+function recordingManifestPathForVideo(videoPath) {
+  return path.join(path.dirname(videoPath), `${path.basename(videoPath)}.labatar.json`);
+}
+
+async function readRecordingManifest(videoPath) {
+  try {
+    const content = await fs.promises.readFile(recordingManifestPathForVideo(videoPath), "utf8");
+    const manifest = JSON.parse(content);
+    return {
+      metadata: manifest?.metadata ?? null,
+      replayPath: typeof manifest?.replayPath === "string" ? manifest.replayPath : null,
+      replayFileName: typeof manifest?.replayFileName === "string" ? manifest.replayFileName : null,
+    };
+  } catch {
+    return { metadata: null, replayPath: null, replayFileName: null };
+  }
 }
 
 async function findReplayFiles(folder) {
@@ -570,13 +1409,18 @@ async function findReplayFiles(folder) {
 
 ipcMain.handle("replays:scan-folder", async (event, folder) => {
   if (!folder || !fs.existsSync(folder)) return { games: [], playerCounts: {}, duplicateCount: 0 };
-  const replayFiles = await findReplayFiles(folder);
+  const resolvedFolder = path.resolve(folder);
+  if (!fs.statSync(resolvedFolder).isDirectory()) {
+    return { games: [], playerCounts: {}, duplicateCount: 0 };
+  }
+  writeSettings({ ...readSettings(), replaysFolder: resolvedFolder });
+  const replayFiles = await findReplayFiles(resolvedFolder);
   const total = replayFiles.length;
   const games = [];
   const seenReplayHashes = new Set();
   let duplicateCount = 0;
   event.sender.send("replays:scan-progress", { completed: 0, total: 0, phase: "logs" });
-  const ratingsByReplayName = await readReplayRatings(folder, (completed, logTotal) => {
+  const ratingsByReplayName = await readReplayRatings(resolvedFolder, (completed, logTotal) => {
     event.sender.send("replays:scan-progress", {
       completed,
       total: logTotal,
@@ -585,7 +1429,11 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
   });
   event.sender.send("replays:scan-progress", { completed: 0, total, phase: "scanning" });
   for (const [index, filePath] of replayFiles.entries()) {
-    const { contentHash, ...game } = await parseReplayFile(filePath, folder, ratingsByReplayName);
+    const { contentHash, ...game } = await parseReplayFile(
+      filePath,
+      resolvedFolder,
+      ratingsByReplayName,
+    );
     if (seenReplayHashes.has(contentHash)) duplicateCount += 1;
     else {
       seenReplayHashes.add(contentHash);
@@ -608,6 +1456,26 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
     playerCounts[game.player2] = (playerCounts[game.player2] ?? 0) + 1;
   }
   return { games, playerCounts, duplicateCount };
+});
+
+ipcMain.handle("recordings:list", async () => {
+  const folder = path.resolve(getObsSettings().recordDirectory);
+  const files = await findRecordingFiles(folder);
+  const recordings = [];
+  for (const filePath of files) {
+    const stat = await fs.promises.stat(filePath);
+    const manifest = await readRecordingManifest(filePath);
+    recordings.push({
+      id: path.relative(folder, filePath).split(path.sep).join("/"),
+      name: path.basename(filePath),
+      url: `labatar-media://recording/${encodeURIComponent(path.relative(folder, filePath).split(path.sep).join("/"))}`,
+      size: stat.size,
+      modifiedAt: stat.mtimeMs,
+      ...manifest,
+    });
+  }
+  recordings.sort((left, right) => right.modifiedAt - left.modifiedAt);
+  return { folder, recordings };
 });
 
 function safeZipName(value) {
@@ -677,7 +1545,7 @@ async function resolveReplayPath(rootFolder, replayId) {
 }
 
 ipcMain.handle("replays:show-in-folder", async (_, request) => {
-  const folder = readSettings().replaysFolder;
+  const folder = getReplayFolder();
   const requestedIds = [
     ...new Set(
       Array.isArray(request?.ids)
@@ -695,7 +1563,7 @@ ipcMain.handle("replays:show-in-folder", async (_, request) => {
 });
 
 ipcMain.handle("replays:zip", async (_, request) => {
-  const folder = readSettings().replaysFolder;
+  const folder = getReplayFolder();
   const requestedIds = [
     ...new Set(
       Array.isArray(request?.ids)
@@ -995,13 +1863,11 @@ ipcMain.handle("overlay:save-capture-session", async (_, request) => {
 });
 
 ipcMain.handle("replays:get-folder", () => {
-  const savedFolder = readSettings().replaysFolder;
-  if (savedFolder) return savedFolder;
-  return fs.existsSync(defaultReplaysFolder) ? defaultReplaysFolder : null;
+  return getReplayFolder();
 });
 
 ipcMain.handle("replays:select-folder", async () => {
-  const savedFolder = readSettings().replaysFolder;
+  const savedFolder = getReplayFolder();
   const defaultPath =
     (savedFolder && fs.existsSync(savedFolder) && savedFolder) ||
     (fs.existsSync(defaultReplaysFolder) && defaultReplaysFolder) ||
@@ -1156,6 +2022,18 @@ async function getGameCaptureSource() {
 }
 
 void app.whenReady().then(() => {
+  protocol.handle("labatar-media", async (request) => {
+    try {
+      const url = new URL(request.url);
+      if (url.hostname !== "recording") return new Response("Not found", { status: 404 });
+      const filePath = resolveRecordingPath(url.pathname.replace(/^\/+/, ""));
+      const stat = await fs.promises.stat(filePath);
+      if (!stat.isFile()) return new Response("Not found", { status: 404 });
+      return createRecordingResponse(filePath, stat, request);
+    } catch {
+      return new Response("Not found", { status: 404 });
+    }
+  });
   watchElectronFiles();
   session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
     const source = await getGameCaptureSource();
@@ -1184,4 +2062,10 @@ void app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", () => {
+  if (matchLogWatcher) void matchLogWatcher.stop();
+  if (activeObsRecording && obsClient) void stopObsRecording("app-quit").catch(() => undefined);
+  if (obsClient) void obsClient.disconnect().catch(() => undefined);
 });

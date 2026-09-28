@@ -34,12 +34,43 @@ import { AvatarGrid, type ReplayRow } from "./AvatarGrid";
 import type { AnalysisSummary } from "./AnalyticsSection";
 import { useCallback } from "react";
 import { OverlaySurface, VisualOverlay } from "./Overlay";
+import { ObsRecordingPanel } from "./ObsRecordingPanel";
+import { RecordingViewer } from "./RecordingViewer";
+import type { ObsSettings, ObsState, RecordingMetadata } from "./obs-types";
+import type { RecordedVideo } from "./recording-types";
 
 declare global {
   interface Window {
     electronAPI?: {
       app: {
         getVersion: () => Promise<string>;
+      };
+      obs: {
+        getState: () => Promise<ObsState>;
+        getSettings: () => Promise<ObsSettings>;
+        connect: (request: {
+          host: string;
+          port: number;
+          password?: string;
+          rememberPassword?: boolean;
+        }) => Promise<ObsState>;
+        clearPassword: () => Promise<boolean>;
+        disconnect: () => Promise<ObsState>;
+        prepareProfile: (request: {
+          profileName: string;
+          recordDirectory: string;
+        }) => Promise<{ profileName: string; recordDirectory: string; created: boolean }>;
+        startRecording: (request: {
+          setup: { profileName: string; recordDirectory: string };
+          metadata: RecordingMetadata;
+        }) => Promise<{ sessionId: string; startedAt: string; metadata: RecordingMetadata }>;
+        stopRecording: () => Promise<{
+          outputPath: string | null;
+          manifestPath: string | null;
+          manifestError: string | null;
+        }>;
+        setAutomaticRecording: (enabled: boolean) => Promise<ObsState>;
+        onState: (listener: (state: ObsState) => void) => () => void;
       };
       updates: {
         onStatus: (listener: (status: UpdateStatus) => void) => () => void;
@@ -64,6 +95,12 @@ declare global {
             phase: "logs" | "scanning";
           }) => void,
         ) => () => void;
+      };
+      recordings: {
+        list: () => Promise<{
+          folder: string;
+          recordings: RecordedVideo[];
+        }>;
       };
       overlay: {
         show: () => Promise<void>;
@@ -590,18 +627,24 @@ function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [tab, setTab] = useState(() => {
     const savedTab = Number(localStorage.getItem("avatar-app-last-tab"));
-    return overlayAvailable && savedTab === 1 ? 1 : 0;
+    return developerTabsAvailable && (savedTab === 1 || savedTab === 2 || savedTab === 3)
+      ? savedTab
+      : 0;
   });
   const [mountedTabs, setMountedTabs] = useState(() => ({
     replay: tab === 0,
-    overlay: overlayAvailable && tab === 1,
+    recording: developerTabsAvailable && tab === 1,
+    overlay: developerTabsAvailable && tab === 2,
+    recordings: developerTabsAvailable && tab === 3,
   }));
   const changeTab = (nextTab: number) => {
-    if (nextTab === 1 && !overlayAvailable) return;
+    if (nextTab > 0 && !developerTabsAvailable) return;
     setTab(nextTab);
     setMountedTabs((current) => ({
       replay: current.replay || nextTab === 0,
-      overlay: overlayAvailable && (current.overlay || nextTab === 1),
+      recording: developerTabsAvailable && (current.recording || nextTab === 1),
+      overlay: developerTabsAvailable && (current.overlay || nextTab === 2),
+      recordings: developerTabsAvailable && (current.recordings || nextTab === 3),
     }));
     localStorage.setItem("avatar-app-last-tab", String(nextTab));
   };
@@ -617,7 +660,9 @@ function App() {
       <Stack direction="row" sx={{ mb: 2, alignItems: "center", justifyContent: "space-between" }}>
         <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)}>
           <Tab label="Match history" />
-          {overlayAvailable && <Tab label="Visual overlay" />}
+          {developerTabsAvailable && <Tab label="Game recording" />}
+          {developerTabsAvailable && <Tab label="Visual overlay" />}
+          {developerTabsAvailable && <Tab label="Recordings" />}
         </Tabs>
         {appVersion && (
           <Typography variant="caption" color="text.secondary">
@@ -630,9 +675,19 @@ function App() {
           <ReplayAnalysis />
         </Box>
       )}
-      {overlayAvailable && mountedTabs.overlay && (
+      {developerTabsAvailable && mountedTabs.recording && (
         <Box sx={{ display: tab === 1 ? "block" : "none" }}>
+          <ObsRecordingPanel />
+        </Box>
+      )}
+      {developerTabsAvailable && mountedTabs.overlay && (
+        <Box sx={{ display: tab === 2 ? "block" : "none" }}>
           <VisualOverlay />
+        </Box>
+      )}
+      {developerTabsAvailable && mountedTabs.recordings && (
+        <Box sx={{ display: tab === 3 ? "block" : "none" }}>
+          <RecordingViewer active={tab === 3} />
         </Box>
       )}
     </>
@@ -643,7 +698,8 @@ if (!root) {
   throw new Error("Root element not found");
 }
 
-const overlayAvailable = import.meta.env.DEV;
+const overlayAvailable = Boolean(window.electronAPI?.overlay);
+const developerTabsAvailable = overlayAvailable && import.meta.env.DEV;
 const isOverlay = overlayAvailable && new URLSearchParams(window.location.search).has("overlay");
 if (isOverlay) document.documentElement.classList.add("overlay-mode");
 createRoot(root).render(
