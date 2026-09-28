@@ -191,8 +191,8 @@ function scoresCanContinue(
   const olderScore = getMatchScore(olderGame);
   if (!newerScore || !olderScore) return false;
 
-  // Games are processed newest first. A contiguous set therefore moves back
-  // one game per replay when walking to the next older replay.
+  // Games are processed oldest first. A contiguous set therefore advances
+  // one game per replay when walking to the next newer replay.
   const firstScoreDelta = newerScore[0] - olderScore[0];
   const secondScoreDelta = newerScore[1] - olderScore[1];
   return (
@@ -223,21 +223,23 @@ function appendToSessions(sessions: ReplayRow[][], game: ReplayRow) {
       return candidateMode !== null && candidateMode !== gameMode;
     })
   ) {
-    sessions.push([game]);
+    // A mode change is another boundary signal. If the current session ends
+    // with scoreless replays, keep that tail with the newer session: those
+    // are commonly the opening replays whose score header has not been
+    // populated yet.
+    const lastScoredIndex = currentSession.findLastIndex(
+      (candidate) => getMatchScore(candidate) !== null,
+    );
+    if (lastScoredIndex >= 0 && lastScoredIndex < currentSession.length - 1) {
+      const scorelessTail = currentSession.splice(lastScoredIndex + 1);
+      sessions.push([...scorelessTail, game]);
+    } else {
+      sessions.push([game]);
+    }
     return;
   }
 
-  const previousScore = getMatchScore(previous);
   const gameScore = getMatchScore(game);
-  if (previousScore && gameScore) {
-    if (scoresCanContinue(previous, game, 0)) currentSession.push(game);
-    else sessions.push([game]);
-    return;
-  }
-
-  // A replay without score fields is usually the tail of the preceding set.
-  // Keep it provisionally, then use the next scored replay to decide whether
-  // that unknown tail belongs with this set or with the older one.
   if (!gameScore) {
     currentSession.push(game);
     return;
@@ -253,22 +255,32 @@ function appendToSessions(sessions: ReplayRow[][], game: ReplayRow) {
 
   const unknownGamesBetween = currentSession.length - lastScoredIndex - 1;
   const lastScoredGame = currentSession[lastScoredIndex];
-  if (scoresCanContinue(lastScoredGame, game, unknownGamesBetween)) {
+  if (scoresCanContinue(game, lastScoredGame, unknownGamesBetween)) {
     currentSession.push(game);
     return;
   }
 
-  const olderUnknownGames = currentSession.splice(lastScoredIndex + 1);
-  sessions.push([...olderUnknownGames, game]);
+  const scorelessTail = currentSession.splice(lastScoredIndex + 1);
+  sessions.push([...scorelessTail, game]);
+}
+
+function sortGamesChronologically(games: ReplayRow[]) {
+  return [...games].sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
+}
+
+function finalizeSessions(sessions: ReplayRow[][]) {
+  // Grouping is easiest to reason about oldest-to-newest. The grid and MMR
+  // calculations expect each session's games newest-to-oldest, so restore
+  // that order at the boundary. Preserve the grid's newest-session-first
+  // ordering as well.
+  return [...sessions].reverse().map((sessionGames) => [...sessionGames].reverse());
 }
 
 function makeSessions(games: ReplayRow[], poi: string | null): SessionRow[] {
   const sessions: ReplayRow[][] = [];
-  const sortedGames = [...games].sort((a, b) =>
-    (b.timestamp ?? "").localeCompare(a.timestamp ?? ""),
-  );
+  const sortedGames = sortGamesChronologically(games);
   for (const game of sortedGames) appendToSessions(sessions, game);
-  return sessions.map((sessionGames, index) => {
+  return finalizeSessions(sessions).map((sessionGames, index) => {
     const wins = sessionGames.filter((game) => game.winner === poi).length;
     const losses = sessionGames.filter(
       (game) => game.winner !== "Unknown" && game.winner !== poi,
@@ -322,9 +334,7 @@ function makeSessionsAsync(
 ): Promise<SessionRow[]> {
   return new Promise((resolve) => {
     window.setTimeout(() => {
-      const sortedGames = [...games].sort((a, b) =>
-        (b.timestamp ?? "").localeCompare(a.timestamp ?? ""),
-      );
+      const sortedGames = sortGamesChronologically(games);
       const sessions: ReplayRow[][] = [];
       let index = 0;
 
@@ -339,7 +349,7 @@ function makeSessionsAsync(
           window.setTimeout(processBatch, 0);
         } else {
           resolve(
-            sessions.map((sessionGames, sessionIndex) => {
+            finalizeSessions(sessions).map((sessionGames, sessionIndex) => {
               const wins = sessionGames.filter((game) => game.winner === poi).length;
               const losses = sessionGames.filter(
                 (game) => game.winner !== "Unknown" && game.winner !== poi,
