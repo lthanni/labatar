@@ -581,12 +581,25 @@ export function RecordingViewer({
   }, [active, beginRename, selectedRecording, stepFrame, togglePlayback]);
 
   return (
-    <Stack spacing={2}>
+    <Stack spacing={2} sx={{ height: "100%", minHeight: 0, overflow: "hidden" }}>
       {error && <Alert severity="error">{error}</Alert>}
       {renameError && <Alert severity="error">{renameError}</Alert>}
 
-      <Stack direction={{ xs: "column", md: "row" }} spacing={2} sx={{ alignItems: "stretch" }}>
-        <Paper variant="outlined" sx={{ width: { xs: "100%", md: 330 }, flexShrink: 0 }}>
+      <Stack
+        direction={{ xs: "column", md: "row" }}
+        spacing={2}
+        sx={{ flex: 1, minHeight: 0, minWidth: 0, alignItems: "stretch", overflow: "hidden" }}
+      >
+        <Paper
+          variant="outlined"
+          sx={{
+            width: { xs: "100%", md: 330 },
+            flexShrink: 0,
+            display: { xs: "block", md: "flex" },
+            flexDirection: "column",
+            minHeight: 0,
+          }}
+        >
           <Stack
             direction="row"
             spacing={1}
@@ -648,7 +661,7 @@ export function RecordingViewer({
               No recordings match the selected filters.
             </Typography>
           ) : (
-            <List dense disablePadding sx={{ maxHeight: 560, overflowY: "auto" }}>
+            <List dense disablePadding sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
               {displayedRecordings.map(({ recording, nested }) => (
                 <ListItemButton
                   key={recording.id}
@@ -843,7 +856,10 @@ export function RecordingViewer({
           </DialogActions>
         </Dialog>
 
-        <Paper variant="outlined" sx={{ p: 2, flex: 1, minWidth: 0, textAlign: "left" }}>
+        <Paper
+          variant="outlined"
+          sx={{ p: 2, flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", textAlign: "left" }}
+        >
           {selectedRecording ? (
             <Stack spacing={1.5}>
               <Typography variant="subtitle1" sx={{ overflowWrap: "anywhere" }}>

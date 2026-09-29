@@ -697,10 +697,21 @@ function App() {
         </Box>
       )}
       {developerTabsAvailable && mountedTabs.recording && (
-        <Box sx={{ display: tab === 1 ? "block" : "none" }}>
-          <Stack spacing={2}>
-            <ObsRecordingPanel onRecordingStopped={refreshRecordings} />
-            <RecordingViewer active={tab === 1} refreshToken={recordingsRefreshToken} />
+        <Box
+          sx={{
+            display: tab === 1 ? "block" : "none",
+            height: "calc(100vh - 96px)",
+            minHeight: 0,
+            overflow: "hidden",
+          }}
+        >
+          <Stack spacing={2} sx={{ height: "100%", minHeight: 0 }}>
+            <Box sx={{ flexShrink: 0 }}>
+              <ObsRecordingPanel onRecordingStopped={refreshRecordings} />
+            </Box>
+            <Box sx={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
+              <RecordingViewer active={tab === 1} refreshToken={recordingsRefreshToken} />
+            </Box>
           </Stack>
         </Box>
       )}
