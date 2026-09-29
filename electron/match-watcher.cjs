@@ -73,6 +73,14 @@ function parseMatchEndReason(line) {
   return null;
 }
 
+function matchSetKey(match) {
+  const players = [match?.player1, match?.player2]
+    .map((player) => player?.steamId || player?.character || "")
+    .filter(Boolean)
+    .sort();
+  return players.length === 2 ? players.join("|") : null;
+}
+
 class MatchLogWatcher {
   constructor({ getLogsDirectory, onState, onMatchStarted, onMatchEnded, onReplaySaved }) {
     this.getLogsDirectory = getLogsDirectory;
@@ -87,7 +95,11 @@ class MatchLogWatcher {
     this.offset = 0;
     this.lineBuffer = "";
     this.currentMatch = null;
+    this.setNumber = 0;
     this.gameNumber = 0;
+    this.currentSetKey = null;
+    this.setEnded = true;
+    this.numberedMatchId = null;
     this.lastReplayPath = null;
     this.status = "disabled";
     this.error = null;
@@ -99,6 +111,7 @@ class MatchLogWatcher {
       status: this.status,
       logPath: this.logPath,
       currentMatch: this.currentMatch,
+      setNumber: this.setNumber,
       gameNumber: this.gameNumber,
       lastReplayPath: this.lastReplayPath,
       error: this.error,
@@ -132,6 +145,8 @@ class MatchLogWatcher {
     }
     let currentMatch = null;
     for (const line of buffer.toString("latin1").split(/\r?\n/)) {
+      const endReason = parseMatchEndReason(line);
+      if (endReason === "quit" || endReason === "connection-lost") this.setEnded = true;
       if (/EndMatch:\s*Match ended/i.test(line)) {
         currentMatch = null;
         continue;
@@ -149,25 +164,30 @@ class MatchLogWatcher {
     this.logPath = filePath;
     this.currentMatch = null;
     this.lastReplayPath = null;
+    this.setNumber = 0;
+    this.gameNumber = 0;
+    this.currentSetKey = null;
+    this.setEnded = true;
+    this.numberedMatchId = null;
     await this.primeCurrentFile(filePath, stat.size);
     this.emit();
   }
 
   async processLine(line) {
     const nextMatch = updateMatchFromLine(this.currentMatch, line);
+    const endReason = parseMatchEndReason(line);
+    if (endReason === "quit" || endReason === "connection-lost") this.setEnded = true;
     if (nextMatch !== this.currentMatch && nextMatch?.matchId) {
       if (this.currentMatch) {
         await this.onMatchEnded?.(this.currentMatch, "new-match");
       }
       this.currentMatch = nextMatch;
-      this.gameNumber += 1;
       this.emit();
       return;
     }
 
     if (this.currentMatch) {
       this.currentMatch = nextMatch;
-      const endReason = parseMatchEndReason(line);
       if (endReason) {
         const completedMatch = this.currentMatch;
         this.currentMatch = null;
@@ -195,10 +215,31 @@ class MatchLogWatcher {
       if (!recovered) return;
     }
     const match = this.currentMatch;
+    this.assignMatchNumber(match);
     const started = await this.onMatchStarted?.(match, { recovered });
     if (started !== false && this.currentMatch?.matchId === match.matchId) {
       this.currentMatch.recordingStarted = true;
     }
+  }
+
+  assignMatchNumber(match) {
+    if (match.matchId === this.numberedMatchId) return;
+    const nextSetKey = matchSetKey(match);
+    if (
+      this.setNumber === 0 ||
+      this.setEnded ||
+      (nextSetKey && this.currentSetKey && nextSetKey !== this.currentSetKey)
+    ) {
+      this.setNumber += 1;
+      this.gameNumber = 1;
+      this.currentSetKey = nextSetKey;
+      this.setEnded = false;
+    } else {
+      this.gameNumber += 1;
+      if (!this.currentSetKey && nextSetKey) this.currentSetKey = nextSetKey;
+    }
+    this.numberedMatchId = match.matchId;
+    this.emit();
   }
 
   async poll() {

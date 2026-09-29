@@ -79,6 +79,14 @@ function CloseIcon() {
   );
 }
 
+function RefreshIcon() {
+  return (
+    <SvgIcon viewBox="0 0 24 24">
+      <path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.1A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z" />
+    </SvgIcon>
+  );
+}
+
 const currentPositionMarkerSx = {
   "& .MuiSlider-mark": {
     width: 3,
@@ -93,7 +101,13 @@ const currentPositionMarkerSx = {
   },
 };
 
-export function RecordingViewer({ active = true }: { active?: boolean }) {
+export function RecordingViewer({
+  active = true,
+  refreshToken = 0,
+}: {
+  active?: boolean;
+  refreshToken?: number;
+}) {
   const [folder, setFolder] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -193,7 +207,7 @@ export function RecordingViewer({ active = true }: { active?: boolean }) {
 
   useEffect(() => {
     void loadRecordings();
-  }, [loadRecordings]);
+  }, [loadRecordings, refreshToken]);
 
   const selectedRecording = useMemo(
     () => recordings.find((recording) => recording.id === selectedId) ?? null,
@@ -568,31 +582,38 @@ export function RecordingViewer({ active = true }: { active?: boolean }) {
 
   return (
     <Stack spacing={2}>
-      <Paper variant="outlined" sx={{ p: 2, textAlign: "left" }}>
-        <Stack
-          direction={{ xs: "column", md: "row" }}
-          spacing={1}
-          sx={{ alignItems: { md: "center" }, justifyContent: "space-between" }}
-        >
-          <Box sx={{ minWidth: 0 }}>
-            <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-              Recorded videos
-            </Typography>
-            <Typography variant="body2" color="text.secondary" noWrap title={folder ?? undefined}>
-              {folder ?? "No recording folder configured"}
-            </Typography>
-          </Box>
-          <Button variant="outlined" onClick={() => void loadRecordings()} disabled={loading}>
-            {loading ? "Refreshing..." : "Refresh videos"}
-          </Button>
-        </Stack>
-      </Paper>
-
       {error && <Alert severity="error">{error}</Alert>}
       {renameError && <Alert severity="error">{renameError}</Alert>}
 
       <Stack direction={{ xs: "column", md: "row" }} spacing={2} sx={{ alignItems: "stretch" }}>
         <Paper variant="outlined" sx={{ width: { xs: "100%", md: 330 }, flexShrink: 0 }}>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{
+              p: 1.5,
+              alignItems: "center",
+              justifyContent: "space-between",
+              borderBottom: 1,
+              borderColor: "divider",
+            }}
+          >
+            <Typography variant="body2" color="text.secondary" noWrap title={folder ?? undefined}>
+              {folder ?? "No recording folder configured"}
+            </Typography>
+            <Tooltip title={loading ? "Refreshing recordings" : "Refresh recordings"}>
+              <span>
+                <IconButton
+                  aria-label="Refresh recordings"
+                  onClick={() => void loadRecordings()}
+                  disabled={loading}
+                  size="small"
+                >
+                  <RefreshIcon />
+                </IconButton>
+              </span>
+            </Tooltip>
+          </Stack>
           <Stack sx={{ p: 1.5, borderBottom: 1, borderColor: "divider" }}>
             <Typography variant="subtitle2">Show recordings</Typography>
             <Stack direction={{ xs: "column", sm: "row", md: "column" }}>
@@ -620,7 +641,7 @@ export function RecordingViewer({ active = true }: { active?: boolean }) {
           </Stack>
           {recordings.length === 0 ? (
             <Typography color="text.secondary" sx={{ p: 2, textAlign: "left" }}>
-              No recorded videos found.
+              No recordings found.
             </Typography>
           ) : visibleRecordings.length === 0 ? (
             <Typography color="text.secondary" sx={{ p: 2, textAlign: "left" }}>

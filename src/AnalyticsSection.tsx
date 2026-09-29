@@ -86,6 +86,10 @@ const OPPONENT_CHARACTER_ROSTER = [
   "Avatar Aang",
 ];
 
+function displayCharacterName(name: string) {
+  return name === "Nightmare Korra" ? "N. Korra" : name;
+}
+
 type MatchupData = {
   rows: string[];
   columns: string[];
@@ -453,6 +457,7 @@ function MatchupHeatmap({
         {columns.map((column) => {
           const supports = supportsByOpponentCharacter.get(column) ?? [];
           const games = opponentCharacterCounts.get(column) ?? 0;
+          const displayColumn = displayCharacterName(column);
           const columnDisabled = disabledOpponentCharacters.has(column);
           return (
             <Card
@@ -472,9 +477,9 @@ function MatchupHeatmap({
                   variant="body2"
                   sx={{ fontWeight: 600 }}
                   noWrap
-                  title={`${column} (${games})`}
+                  title={`${displayColumn} (${games})`}
                 >
-                  {column} ({games})
+                  {displayColumn} ({games})
                 </Typography>
                 <Stack sx={{ ml: 1 }}>
                   {supports.map((support) => {
@@ -536,7 +541,7 @@ function MatchupHeatmap({
               >
                 <CardContent sx={{ py: 0.5, "&:last-child": { pb: 0.5 } }}>
                   <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                    {row}
+                    {displayCharacterName(row)}
                   </Typography>
                   <Stack sx={{ ml: 1 }}>
                     {supports.map((support) => {

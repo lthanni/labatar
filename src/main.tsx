@@ -60,6 +60,16 @@ declare global {
           profileName: string;
           recordDirectory: string;
         }) => Promise<{ profileName: string; recordDirectory: string; created: boolean }>;
+        setupScenes: (request: { profileName: string; recordDirectory: string }) => Promise<{
+          profileName: string;
+          recordDirectory: string;
+          sceneCollectionName: string;
+          scenes: string[];
+          gameAudioMode: "separate" | "window-capture";
+          outputResolution: { width: number; height: number } | null;
+          profileCreated: boolean;
+        }>;
+        setScene: (sceneName: string) => Promise<ObsState>;
         startRecording: (request: {
           setup: { profileName: string; recordDirectory: string };
           metadata: RecordingMetadata;
@@ -636,17 +646,16 @@ function ReplayAnalysis() {
 function App() {
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [recordingsRefreshToken, setRecordingsRefreshToken] = useState(0);
   const [tab, setTab] = useState(() => {
     const savedTab = Number(localStorage.getItem("avatar-app-last-tab"));
-    return developerTabsAvailable && (savedTab === 1 || savedTab === 2 || savedTab === 3)
-      ? savedTab
-      : 0;
+    const migratedTab = savedTab === 3 ? 1 : savedTab;
+    return developerTabsAvailable && (migratedTab === 1 || migratedTab === 2) ? migratedTab : 0;
   });
   const [mountedTabs, setMountedTabs] = useState(() => ({
     replay: tab === 0,
     recording: developerTabsAvailable && tab === 1,
     overlay: developerTabsAvailable && tab === 2,
-    recordings: developerTabsAvailable && tab === 3,
   }));
   const changeTab = (nextTab: number) => {
     if (nextTab > 0 && !developerTabsAvailable) return;
@@ -655,10 +664,12 @@ function App() {
       replay: current.replay || nextTab === 0,
       recording: developerTabsAvailable && (current.recording || nextTab === 1),
       overlay: developerTabsAvailable && (current.overlay || nextTab === 2),
-      recordings: developerTabsAvailable && (current.recordings || nextTab === 3),
     }));
     localStorage.setItem("avatar-app-last-tab", String(nextTab));
   };
+  const refreshRecordings = useCallback(() => {
+    setRecordingsRefreshToken((current) => current + 1);
+  }, []);
 
   useEffect(() => window.electronAPI?.updates.onStatus(setUpdateStatus), []);
   useEffect(() => {
@@ -671,9 +682,8 @@ function App() {
       <Stack direction="row" sx={{ mb: 2, alignItems: "center", justifyContent: "space-between" }}>
         <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)}>
           <Tab label="Match history" />
-          {developerTabsAvailable && <Tab label="Game recording" />}
-          {developerTabsAvailable && <Tab label="Visual overlay" />}
           {developerTabsAvailable && <Tab label="Recordings" />}
+          {developerTabsAvailable && <Tab label="Visual overlay" />}
         </Tabs>
         {appVersion && (
           <Typography variant="caption" color="text.secondary">
@@ -688,17 +698,15 @@ function App() {
       )}
       {developerTabsAvailable && mountedTabs.recording && (
         <Box sx={{ display: tab === 1 ? "block" : "none" }}>
-          <ObsRecordingPanel />
+          <Stack spacing={2}>
+            <ObsRecordingPanel onRecordingStopped={refreshRecordings} />
+            <RecordingViewer active={tab === 1} refreshToken={recordingsRefreshToken} />
+          </Stack>
         </Box>
       )}
       {developerTabsAvailable && mountedTabs.overlay && (
         <Box sx={{ display: tab === 2 ? "block" : "none" }}>
           <VisualOverlay />
-        </Box>
-      )}
-      {developerTabsAvailable && mountedTabs.recordings && (
-        <Box sx={{ display: tab === 3 ? "block" : "none" }}>
-          <RecordingViewer active={tab === 3} />
         </Box>
       )}
     </>

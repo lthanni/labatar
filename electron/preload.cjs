@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     clearPassword: () => ipcRenderer.invoke("obs:clear-password"),
     disconnect: () => ipcRenderer.invoke("obs:disconnect"),
     prepareProfile: (request) => ipcRenderer.invoke("obs:prepare-profile", request),
+    setupScenes: (request) => ipcRenderer.invoke("obs:setup-scenes", request),
+    setScene: (sceneName) => ipcRenderer.invoke("obs:set-scene", sceneName),
     startRecording: (request) => ipcRenderer.invoke("obs:start-recording", request),
     startManualRecording: (request) => ipcRenderer.invoke("obs:start-manual-recording", request),
     stopRecording: () => ipcRenderer.invoke("obs:stop-recording"),

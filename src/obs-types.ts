@@ -37,6 +37,8 @@ export type ObsState = {
   obsWebSocketVersion: string | null;
   currentProfileName: string | null;
   profiles: string[];
+  currentSceneCollectionName: string | null;
+  currentSceneName: string | null;
   recordDirectory: string | null;
   automation: ObsAutomationState;
   recording: ObsRecordingState;
@@ -58,6 +60,7 @@ export type ObsAutomationState = {
     };
     recordingStarted: boolean;
   } | null;
+  setNumber: number;
   gameNumber: number;
   lastReplayPath: string | null;
   pendingRecordings: number;
