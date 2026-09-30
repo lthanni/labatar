@@ -9,22 +9,48 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  FormControl,
   FormControlLabel,
   IconButton,
+  InputLabel,
   List,
   ListItemButton,
   ListItemText,
   Menu,
   MenuItem,
+  OutlinedInput,
   Paper,
+  Select,
   Slider,
   Stack,
   SvgIcon,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
-import type { RecordedVideo } from "./recording-types";
+import type { RecordedVideo, RecordingTagCategory, RecordingTags } from "./recording-types";
+import {
+  techCatalogStorageKey,
+  techCatalogUpdatedEvent,
+  techSelectComboEvent,
+  techSelectRecordingEvent,
+  techSelectedComboStorageKey,
+  techSelectedRecordingStorageKey,
+} from "./tech-types";
+import type { TechCatalog, TechCombo } from "./tech-types";
+
+function readTechCatalog(): TechCatalog {
+  try {
+    const stored = JSON.parse(localStorage.getItem(techCatalogStorageKey) ?? "{}");
+    return stored && typeof stored === "object" && !Array.isArray(stored)
+      ? (stored as TechCatalog)
+      : {};
+  } catch {
+    return {};
+  }
+}
 
 function formatFileSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
@@ -46,6 +72,22 @@ function formatVideoTime(seconds: number) {
 const FRAME_STEP_SECONDS = 1 / 60;
 const PLAYBACK_POSITIONS_STORAGE_KEY = "labatar-recording-playback-positions";
 const MINIMUM_SAVED_POSITION_SECONDS = 5;
+const emptyRecordingTags: RecordingTags = { match: [], lab: [], combo: false, pressure: false };
+const recordingTagCategories: Array<{
+  key: RecordingTagCategory;
+  label: string;
+  subtags?: string[];
+  exclusive?: boolean;
+}> = [
+  { key: "match", label: "Match", subtags: ["ranked", "casual"], exclusive: true },
+  { key: "lab", label: "Lab", subtags: ["practice", "new combos", "new pressure"] },
+  { key: "combo", label: "Combo" },
+  { key: "pressure", label: "Pressure" },
+];
+
+function recordingSubtagValue(subtag: string) {
+  return subtag.replaceAll(" ", "-");
+}
 
 function SceneMarkerIcon() {
   return (
@@ -110,6 +152,7 @@ export function RecordingViewer({
 }) {
   const [folder, setFolder] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
+  const [techCatalog, setTechCatalog] = useState<TechCatalog>(readTechCatalog);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -124,6 +167,7 @@ export function RecordingViewer({
   const [clipExportError, setClipExportError] = useState<string | null>(null);
   const [showFullRecordings, setShowFullRecordings] = useState(true);
   const [showClips, setShowClips] = useState(true);
+  const [selectedTagFilters, setSelectedTagFilters] = useState<RecordingTags>(emptyRecordingTags);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [editingRecordingId, setEditingRecordingId] = useState<string | null>(null);
   const [editingRecordingName, setEditingRecordingName] = useState("");
@@ -136,6 +180,8 @@ export function RecordingViewer({
   const [deleteTarget, setDeleteTarget] = useState<RecordedVideo | null>(null);
   const [deletingRecordingId, setDeletingRecordingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [tagError, setTagError] = useState<string | null>(null);
+  const [updatingTagsId, setUpdatingTagsId] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const focusPlayerAfterSelection = useRef(false);
   const steppingFrame = useRef(false);
@@ -223,12 +269,32 @@ export function RecordingViewer({
     [recordings, showClips, showFullRecordings],
   );
 
+  const tagFilteredRecordings = useMemo(
+    () =>
+      visibleRecordings.filter((recording) => {
+        const activeCategories = recordingTagCategories.filter((category) => {
+          const selected = selectedTagFilters[category.key];
+          return Array.isArray(selected) ? selected.length > 0 : selected;
+        });
+        if (activeCategories.length === 0) return true;
+        return activeCategories.some((category) => {
+          const selected = selectedTagFilters[category.key];
+          if (!Array.isArray(selected)) return recording.tags?.[category.key] === true;
+          const tags = recording.tags?.[category.key];
+          const selectedSubtags = selected as string[];
+          const recordedSubtags = Array.isArray(tags) ? (tags as string[]) : [];
+          return selectedSubtags.some((subtag) => recordedSubtags.includes(subtag));
+        });
+      }),
+    [selectedTagFilters, visibleRecordings],
+  );
+
   const displayedRecordings = useMemo(() => {
-    const ungrouped = visibleRecordings.map((recording) => ({ recording, nested: false }));
+    const ungrouped = tagFilteredRecordings.map((recording) => ({ recording, nested: false }));
     if (!showFullRecordings || !showClips) return ungrouped;
 
     const clipsBySource = new Map<string, RecordedVideo[]>();
-    for (const recording of visibleRecordings) {
+    for (const recording of tagFilteredRecordings) {
       const sourceId = recording.clip?.sourceRecordingId;
       if (!sourceId) continue;
       const sourceClips = clipsBySource.get(sourceId) ?? [];
@@ -238,7 +304,7 @@ export function RecordingViewer({
 
     const grouped: Array<{ recording: RecordedVideo; nested: boolean }> = [];
     const nestedIds = new Set<string>();
-    for (const recording of visibleRecordings) {
+    for (const recording of tagFilteredRecordings) {
       if (recording.clip) continue;
       grouped.push({ recording, nested: false });
       for (const clip of clipsBySource.get(recording.id) ?? []) {
@@ -248,13 +314,13 @@ export function RecordingViewer({
     }
 
     // Keep clips whose original is unavailable visible at the bottom of the list.
-    for (const recording of visibleRecordings) {
+    for (const recording of tagFilteredRecordings) {
       if (recording.clip && !nestedIds.has(recording.id)) {
         grouped.push({ recording, nested: false });
       }
     }
     return grouped;
-  }, [showClips, showFullRecordings, visibleRecordings]);
+  }, [showClips, showFullRecordings, tagFilteredRecordings]);
 
   const selectRecording = useCallback(
     (recordingId: string) => {
@@ -276,6 +342,40 @@ export function RecordingViewer({
     },
     [savePlaybackPosition, selectedRecording],
   );
+
+  useEffect(() => {
+    const syncTechCatalog = () => setTechCatalog(readTechCatalog());
+    const handleTechRecordingSelection = (event: Event) => {
+      const recordingId = (event as CustomEvent<string>).detail;
+      if (typeof recordingId !== "string") return;
+      if (recordings.some((recording) => recording.id === recordingId)) {
+        selectRecording(recordingId);
+        localStorage.removeItem(techSelectedRecordingStorageKey);
+      } else {
+        localStorage.setItem(techSelectedRecordingStorageKey, recordingId);
+      }
+    };
+    window.addEventListener(techCatalogUpdatedEvent, syncTechCatalog);
+    window.addEventListener("storage", syncTechCatalog);
+    window.addEventListener(techSelectRecordingEvent, handleTechRecordingSelection);
+    return () => {
+      window.removeEventListener(techCatalogUpdatedEvent, syncTechCatalog);
+      window.removeEventListener("storage", syncTechCatalog);
+      window.removeEventListener(techSelectRecordingEvent, handleTechRecordingSelection);
+    };
+  }, [recordings, selectRecording]);
+
+  useEffect(() => {
+    const pendingRecordingId = localStorage.getItem(techSelectedRecordingStorageKey);
+    if (
+      !pendingRecordingId ||
+      !recordings.some((recording) => recording.id === pendingRecordingId)
+    ) {
+      return;
+    }
+    selectRecording(pendingRecordingId);
+    localStorage.removeItem(techSelectedRecordingStorageKey);
+  }, [recordings, selectRecording]);
 
   useEffect(() => {
     if (!focusPlayerAfterSelection.current || !selectedId) return;
@@ -368,6 +468,30 @@ export function RecordingViewer({
     }
   }, [editingRecordingId, editingRecordingName, loadRecordings]);
 
+  const updateRecordingTags = useCallback(
+    async (nextTags: RecordingTags) => {
+      if (!window.electronAPI?.recordings || !selectedRecording) return;
+      setTagError(null);
+      setUpdatingTagsId(selectedRecording.id);
+      try {
+        const updated = await window.electronAPI.recordings.setTags({
+          recordingId: selectedRecording.id,
+          tags: nextTags,
+        });
+        setRecordings((current) =>
+          current.map((recording) => (recording.id === updated.id ? updated : recording)),
+        );
+      } catch (tagActionError) {
+        setTagError(
+          tagActionError instanceof Error ? tagActionError.message : String(tagActionError),
+        );
+      } finally {
+        setUpdatingTagsId(null);
+      }
+    },
+    [selectedRecording],
+  );
+
   const requestDelete = useCallback((recording: RecordedVideo) => {
     setContextMenu(null);
     setDeleteError(null);
@@ -433,6 +557,23 @@ export function RecordingViewer({
         : [],
     [recordings, selectedRecording],
   );
+
+  const linkedTechCombos = useMemo(
+    () =>
+      selectedRecording
+        ? Object.entries(techCatalog).flatMap(([character, data]) =>
+            (data?.combos ?? [])
+              .filter((combo) => combo.recordingId === selectedRecording.id)
+              .map((combo) => ({ character, combo })),
+          )
+        : [],
+    [selectedRecording, techCatalog],
+  );
+
+  const selectLinkedCombo = (combo: TechCombo) => {
+    localStorage.setItem(techSelectedComboStorageKey, combo.id);
+    window.dispatchEvent(new CustomEvent(techSelectComboEvent, { detail: combo.id }));
+  };
 
   const clippedRegions = useMemo(() => {
     if (!selectedRecording || linkedClips.length === 0 || !Number.isFinite(duration)) return [];
@@ -593,7 +734,7 @@ export function RecordingViewer({
         <Paper
           variant="outlined"
           sx={{
-            width: { xs: "100%", md: 330 },
+            width: { xs: "100%", md: 660 },
             flexShrink: 0,
             display: { xs: "block", md: "flex" },
             flexDirection: "column",
@@ -629,34 +770,121 @@ export function RecordingViewer({
           </Stack>
           <Stack sx={{ p: 1.5, borderBottom: 1, borderColor: "divider" }}>
             <Typography variant="subtitle2">Show recordings</Typography>
-            <Stack direction={{ xs: "column", sm: "row", md: "column" }}>
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={showFullRecordings}
-                    onChange={(event) => setShowFullRecordings(event.target.checked)}
-                  />
-                }
-                label="Full recordings"
-              />
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={showClips}
-                    onChange={(event) => setShowClips(event.target.checked)}
-                  />
-                }
-                label="Clips"
-              />
+            <Stack
+              direction={{ xs: "column", sm: "row" }}
+              spacing={1}
+              sx={{ alignItems: "center" }}
+            >
+              <Stack direction={{ xs: "column", sm: "row" }}>
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={showFullRecordings}
+                      onChange={(event) => setShowFullRecordings(event.target.checked)}
+                    />
+                  }
+                  label="Full recordings"
+                />
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={showClips}
+                      onChange={(event) => setShowClips(event.target.checked)}
+                    />
+                  }
+                  label="Clips"
+                />
+              </Stack>
+              <Stack direction="row" spacing={1} sx={{ flex: 1, flexWrap: "wrap", gap: 1 }}>
+                {recordingTagCategories.map((category) => {
+                  const selected = selectedTagFilters[category.key];
+                  if (!category.subtags) {
+                    return (
+                      <FormControlLabel
+                        key={category.key}
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={selected === true}
+                            onChange={(event) =>
+                              setSelectedTagFilters(
+                                (current) =>
+                                  ({
+                                    ...current,
+                                    [category.key]: event.target.checked,
+                                  }) as RecordingTags,
+                              )
+                            }
+                          />
+                        }
+                        label={category.label}
+                      />
+                    );
+                  }
+                  const selectedSubtags = Array.isArray(selected) ? (selected as string[]) : [];
+                  return (
+                    <FormControl
+                      key={category.key}
+                      size="small"
+                      sx={{ minWidth: 145, flex: "1 1 145px" }}
+                    >
+                      <InputLabel id={`recording-${category.key}-filter-label`}>
+                        {category.label}
+                      </InputLabel>
+                      <Select
+                        labelId={`recording-${category.key}-filter-label`}
+                        multiple
+                        value={selectedSubtags}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          const nextSubtags = (
+                            typeof value === "string" ? value.split(",") : value
+                          ) as string[];
+                          setSelectedTagFilters(
+                            (current) =>
+                              ({
+                                ...current,
+                                [category.key]: nextSubtags,
+                              }) as RecordingTags,
+                          );
+                        }}
+                        input={<OutlinedInput label={category.label} />}
+                        renderValue={(selected) => {
+                          const values = selected as string[];
+                          if (values.length === 0) return `All ${category.label.toLowerCase()}`;
+                          return values
+                            .map(
+                              (value) =>
+                                category.subtags?.find(
+                                  (subtag) => recordingSubtagValue(subtag) === value,
+                                ) ?? value,
+                            )
+                            .join(", ");
+                        }}
+                      >
+                        {category.subtags.map((subtag) => {
+                          const value = recordingSubtagValue(subtag);
+                          return (
+                            <MenuItem key={value} value={value}>
+                              <Checkbox checked={selectedSubtags.includes(value)} size="small" />
+                              <ListItemText primary={subtag} />
+                            </MenuItem>
+                          );
+                        })}
+                      </Select>
+                    </FormControl>
+                  );
+                })}
+              </Stack>
             </Stack>
           </Stack>
           {recordings.length === 0 ? (
             <Typography color="text.secondary" sx={{ p: 2, textAlign: "left" }}>
               No recordings found.
             </Typography>
-          ) : visibleRecordings.length === 0 ? (
+          ) : tagFilteredRecordings.length === 0 ? (
             <Typography color="text.secondary" sx={{ p: 2, textAlign: "left" }}>
               No recordings match the selected filters.
             </Typography>
@@ -1149,6 +1377,102 @@ export function RecordingViewer({
                         ))}
                       </Stack>
                     )}
+                  </Stack>
+                </>
+              )}
+              {linkedTechCombos.length > 0 && (
+                <>
+                  <Divider />
+                  <Stack spacing={0.75}>
+                    <Typography variant="subtitle2">Linked tech</Typography>
+                    {linkedTechCombos.map(({ character, combo }) => (
+                      <Button
+                        key={`${character}-${combo.id}`}
+                        variant="text"
+                        size="small"
+                        onClick={() => selectLinkedCombo(combo)}
+                        sx={{ justifyContent: "flex-start", overflowWrap: "anywhere" }}
+                      >
+                        {character} · {combo.support} · {combo.route || "Unnamed combo"}
+                      </Button>
+                    ))}
+                  </Stack>
+                </>
+              )}
+              {selectedRecording && (
+                <>
+                  <Divider />
+                  <Stack spacing={0.75}>
+                    <Typography variant="subtitle2">Tags</Typography>
+                    {recordingTagCategories.map((category) => {
+                      const selectedTags = selectedRecording.tags ?? emptyRecordingTags;
+                      const selected = selectedTags[category.key];
+                      if (!category.subtags) {
+                        return (
+                          <FormControlLabel
+                            key={category.key}
+                            control={
+                              <Checkbox
+                                size="small"
+                                checked={selected === true}
+                                onChange={(event) =>
+                                  void updateRecordingTags({
+                                    ...selectedTags,
+                                    [category.key]: event.target.checked,
+                                  } as RecordingTags)
+                                }
+                                disabled={updatingTagsId === selectedRecording.id}
+                              />
+                            }
+                            label={category.label}
+                          />
+                        );
+                      }
+                      const selectedSubtags = Array.isArray(selected) ? (selected as string[]) : [];
+                      return (
+                        <Stack
+                          key={category.key}
+                          direction={{ xs: "column", sm: "row" }}
+                          spacing={1}
+                          sx={{ alignItems: { sm: "center" } }}
+                        >
+                          <Typography variant="body2" sx={{ minWidth: 64 }}>
+                            {category.label}
+                          </Typography>
+                          <ToggleButtonGroup
+                            size="small"
+                            exclusive={category.exclusive}
+                            value={
+                              category.exclusive ? (selectedSubtags[0] ?? null) : selectedSubtags
+                            }
+                            onChange={(_, nextValue) => {
+                              const nextSubtags = category.exclusive
+                                ? nextValue
+                                  ? [nextValue]
+                                  : []
+                                : (nextValue as string[]);
+                              void updateRecordingTags({
+                                ...selectedTags,
+                                [category.key]: nextSubtags,
+                              } as RecordingTags);
+                            }}
+                            aria-label={`${category.label} tags`}
+                            disabled={updatingTagsId === selectedRecording.id}
+                          >
+                            {category.subtags.map((subtag) => (
+                              <ToggleButton
+                                key={subtag}
+                                value={subtag.replaceAll(" ", "-")}
+                                aria-label={subtag}
+                              >
+                                {subtag}
+                              </ToggleButton>
+                            ))}
+                          </ToggleButtonGroup>
+                        </Stack>
+                      );
+                    })}
+                    {tagError && <Alert severity="error">{tagError}</Alert>}
                   </Stack>
                 </>
               )}

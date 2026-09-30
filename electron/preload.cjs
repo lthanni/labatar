@@ -65,6 +65,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     list: () => ipcRenderer.invoke("recordings:list"),
     exportClip: (request) => ipcRenderer.invoke("recordings:export-clip", request),
     renameRecording: (request) => ipcRenderer.invoke("recordings:rename", request),
+    setTags: (request) => ipcRenderer.invoke("recordings:set-tags", request),
     deleteRecording: (request) => ipcRenderer.invoke("recordings:delete", request),
     startDrag: (request) => ipcRenderer.send("recordings:start-drag", request),
   },

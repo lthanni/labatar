@@ -46,6 +46,7 @@ const disconnectedState: ObsState = {
     enabled: false,
     status: "disabled",
     logPath: null,
+    lobbyId: null,
     currentMatch: null,
     setNumber: 0,
     gameNumber: 0,

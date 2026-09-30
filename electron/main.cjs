@@ -57,6 +57,7 @@ const defaultReplaysFolder = path.join(
 );
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
 const obsPasswordFile = () => path.join(app.getPath("userData"), "obs-password.enc");
+const recordingDiagnosticLogFile = () => path.join(app.getPath("userData"), "recording-debug.log");
 const defaultObsProfileName = "Labatar Recording";
 const labatarSceneCollectionName = "Labatar";
 const labatarSceneNames = {
@@ -66,16 +67,22 @@ const labatarSceneNames = {
 };
 const labatarGameCaptureWindow = "Avatar Legends#3A The Fighting Game:ABAREENGINE:Atla.exe";
 const labatarGameAudioWindow = labatarGameCaptureWindow;
+const recordingTagOptions = {
+  match: new Set(["ranked", "casual"]),
+  lab: new Set(["practice", "new-combos", "new-pressure"]),
+};
 const productionObsRecordDirectory = () =>
   path.join(app.getPath("videos"), "Labatar", "recordings");
 const defaultObsRecordDirectory = () =>
   isDev ? path.resolve(__dirname, "..", ".dev", "recordings") : productionObsRecordDirectory();
 let obsClient = null;
 let obsConnectionToken = 0;
+let preparedObsProfile = null;
 let activeObsRecording = null;
 let lastFinalizedObsRecording = null;
 let matchLogWatcher = null;
 let pendingAutoRecordings = [];
+let recordingDiagnosticQueue = Promise.resolve();
 let obsState = {
   status: "disconnected",
   host: "127.0.0.1",
@@ -92,6 +99,7 @@ let obsState = {
     enabled: false,
     status: "disabled",
     logPath: null,
+    lobbyId: null,
     currentMatch: null,
     setNumber: 0,
     gameNumber: 0,
@@ -105,6 +113,20 @@ let obsState = {
     outputPath: null,
   },
 };
+
+function logRecordingDiagnostic(event, details = {}) {
+  const entry = JSON.stringify({ at: new Date().toISOString(), event, ...details });
+  recordingDiagnosticQueue = recordingDiagnosticQueue
+    .catch(() => undefined)
+    .then(async () => {
+      try {
+        await fs.promises.mkdir(path.dirname(recordingDiagnosticLogFile()), { recursive: true });
+        await fs.promises.appendFile(recordingDiagnosticLogFile(), `${entry}\n`, "utf8");
+      } catch (error) {
+        console.warn("Could not write recording diagnostic log:", obsErrorMessage(error));
+      }
+    });
+}
 
 function getObsSettings() {
   const saved = readSettings().obs ?? {};
@@ -187,37 +209,85 @@ function getObsClient() {
   return obsClient;
 }
 
+function invalidatePreparedObsProfile() {
+  preparedObsProfile = null;
+}
+
+function getObsProfileTarget(request = {}) {
+  const settings = getObsSettings();
+  return {
+    profileName: String(request.profileName ?? settings.profileName).trim() || settings.profileName,
+    recordDirectory:
+      String(request.recordDirectory ?? settings.recordDirectory).trim() ||
+      settings.recordDirectory,
+  };
+}
+
+function hasPreparedObsProfile(request = {}) {
+  const target = getObsProfileTarget(request);
+  return (
+    preparedObsProfile?.client === obsClient &&
+    preparedObsProfile?.connectionToken === obsConnectionToken &&
+    preparedObsProfile.profileName === target.profileName &&
+    preparedObsProfile.recordDirectory === target.recordDirectory
+  );
+}
+
+function rememberPreparedObsProfile(target, result) {
+  preparedObsProfile = {
+    client: obsClient,
+    connectionToken: obsConnectionToken,
+    ...target,
+    result,
+  };
+}
+
 async function refreshObsState(client = getObsClient()) {
-  const version = await client.call("GetVersion");
-  const profiles = await client.call("GetProfileList");
-  const sceneCollections = version.availableRequests?.includes("GetSceneCollectionList")
-    ? await client.call("GetSceneCollectionList")
-    : null;
-  const currentScene = version.availableRequests?.includes("GetCurrentProgramScene")
-    ? await client.call("GetCurrentProgramScene")
-    : null;
-  const recordStatus = await client.call("GetRecordStatus");
-  let recordDirectory = null;
-  if (version.availableRequests?.includes("GetRecordDirectory")) {
-    recordDirectory = (await client.call("GetRecordDirectory")).recordDirectory;
+  const startedAt = Date.now();
+  logRecordingDiagnostic("obs-refresh-start");
+  try {
+    const version = await client.call("GetVersion");
+    const profiles = await client.call("GetProfileList");
+    const sceneCollections = version.availableRequests?.includes("GetSceneCollectionList")
+      ? await client.call("GetSceneCollectionList")
+      : null;
+    const currentScene = version.availableRequests?.includes("GetCurrentProgramScene")
+      ? await client.call("GetCurrentProgramScene")
+      : null;
+    const recordStatus = await client.call("GetRecordStatus");
+    let recordDirectory = null;
+    if (version.availableRequests?.includes("GetRecordDirectory")) {
+      recordDirectory = (await client.call("GetRecordDirectory")).recordDirectory;
+    }
+    setObsState({
+      status: "connected",
+      error: null,
+      obsVersion: version.obsVersion,
+      obsWebSocketVersion: version.obsWebSocketVersion,
+      currentProfileName: profiles.currentProfileName,
+      profiles: profiles.profiles,
+      currentSceneCollectionName: sceneCollections?.currentSceneCollectionName ?? null,
+      currentSceneName: currentScene?.sceneName ?? currentScene?.currentProgramSceneName ?? null,
+      recordDirectory,
+      recording: {
+        active: Boolean(recordStatus.outputActive),
+        paused: recordStatus.outputState === "OBS_WEBSOCKET_OUTPUT_PAUSED",
+        outputPath: recordStatus.outputPath ?? null,
+      },
+    });
+    logRecordingDiagnostic("obs-refresh-complete", {
+      durationMs: Date.now() - startedAt,
+      recordingActive: Boolean(recordStatus.outputActive),
+      profileName: profiles.currentProfileName,
+    });
+    return { version, profiles, sceneCollections, currentScene, recordStatus, recordDirectory };
+  } catch (error) {
+    logRecordingDiagnostic("obs-refresh-failed", {
+      durationMs: Date.now() - startedAt,
+      error: obsErrorMessage(error),
+    });
+    throw error;
   }
-  setObsState({
-    status: "connected",
-    error: null,
-    obsVersion: version.obsVersion,
-    obsWebSocketVersion: version.obsWebSocketVersion,
-    currentProfileName: profiles.currentProfileName,
-    profiles: profiles.profiles,
-    currentSceneCollectionName: sceneCollections?.currentSceneCollectionName ?? null,
-    currentSceneName: currentScene?.sceneName ?? currentScene?.currentProgramSceneName ?? null,
-    recordDirectory,
-    recording: {
-      active: Boolean(recordStatus.outputActive),
-      paused: recordStatus.outputState === "OBS_WEBSOCKET_OUTPUT_PAUSED",
-      outputPath: recordStatus.outputPath ?? null,
-    },
-  });
-  return { version, profiles, sceneCollections, currentScene, recordStatus, recordDirectory };
 }
 
 function normalizeRecordingMetadata(value) {
@@ -234,6 +304,7 @@ function normalizeRecordingMetadata(value) {
     mode: text("mode"),
     notes: text("notes"),
     matchId: text("matchId"),
+    lobbyId: text("lobbyId"),
     player1: text("player1"),
     player2: text("player2"),
     player1SteamId: text("player1SteamId"),
@@ -243,6 +314,42 @@ function normalizeRecordingMetadata(value) {
     player1Rating: text("player1Rating"),
     player2Rating: text("player2Rating"),
   };
+}
+
+function normalizeRecordingTags(value, metadata = null) {
+  const tags = { match: [], lab: [], combo: false, pressure: false };
+  if (Array.isArray(value)) {
+    for (const legacyTag of value) {
+      const tag = String(legacyTag).trim().toLowerCase();
+      if (tag === "match") {
+        const mode = metadata?.mode;
+        if (mode === "ranked" || mode === "casual") tags.match = [mode];
+      } else if (tag === "combo" || tag === "pressure") {
+        tags[tag] = true;
+      }
+    }
+    return tags;
+  }
+  if (!value || typeof value !== "object") return tags;
+  const legacyTech = Array.isArray(value.tech) ? value.tech : [];
+  for (const category of ["match", "lab"]) {
+    const allowed = recordingTagOptions[category];
+    const subtags = Array.isArray(value[category]) ? value[category] : [];
+    tags[category] = [
+      ...new Set(
+        subtags
+          .map((subtag) => String(subtag).trim().toLowerCase())
+          .filter((subtag) => allowed.has(subtag)),
+      ),
+    ];
+  }
+  tags.combo = value.combo === true || (Array.isArray(value.combo) && value.combo.length > 0);
+  tags.pressure =
+    value.pressure === true || (Array.isArray(value.pressure) && value.pressure.length > 0);
+  if (legacyTech.includes("combo")) tags.combo = true;
+  if (legacyTech.includes("pressure")) tags.pressure = true;
+  tags.match = tags.match.slice(0, 1);
+  return tags;
 }
 
 function recordingManifestPath(outputPath) {
@@ -273,6 +380,13 @@ function recordingBaseName(metadata, replay = null) {
   const player2 = safeRecordingNamePart(replay?.player2 || metadata?.player2, "Player 2");
   const setLabel = safeRecordingNamePart(metadata?.setLabel, "set 1");
   return `${player1} - ${player2} - ${setLabel} - ${recordingScore(replay)}`;
+}
+
+function recordingSetBaseName(metadata) {
+  const player1 = safeRecordingNamePart(metadata?.player1, "Player 1");
+  const player2 = safeRecordingNamePart(metadata?.player2, "Player 2");
+  const setLabel = safeRecordingNamePart(metadata?.setLabel, "set 1");
+  return `${player1} - ${player2} - ${setLabel}`;
 }
 
 function manualRecordingBaseName(startedAt) {
@@ -331,7 +445,9 @@ async function finalizeObsRecording(outputPath, reason) {
       outputPath,
       recording.metadata,
       null,
-      recording.fileNameBase,
+      recording.source === "automatic"
+        ? recordingSetBaseName(recording.metadata)
+        : recording.fileNameBase,
     );
     recording.outputPath = namedOutputPath;
     manifestPath = recordingManifestPath(namedOutputPath);
@@ -346,7 +462,11 @@ async function finalizeObsRecording(outputPath, reason) {
             stoppedAt: new Date().toISOString(),
             stopReason: reason,
             outputPath: namedOutputPath,
+            source: recording.source,
+            tags: recording.tags ?? { match: [], lab: [], combo: false, pressure: false },
             metadata: recording.metadata,
+            games: recording.games ?? [],
+            replays: recording.replays ?? [],
             obs: {
               version: obsState.obsVersion,
               webSocketVersion: obsState.obsWebSocketVersion,
@@ -370,14 +490,19 @@ async function finalizeObsRecording(outputPath, reason) {
   return lastFinalizedObsRecording;
 }
 
-async function attachReplayToRecording(recording, replayPath) {
+async function attachReplayToRecording(recording, replayPath, matchId = null) {
   if (!recording?.manifestPath) return;
   try {
     const manifest = JSON.parse(await fs.promises.readFile(recording.manifestPath, "utf8"));
     const replay = await parseReplayFile(replayPath, path.dirname(replayPath));
     const previousManifestPath = recording.manifestPath;
     const namedOutputPath = recording.outputPath
-      ? await renameObsRecordingFile(recording.outputPath, manifest.metadata, replay)
+      ? await renameObsRecordingFile(
+          recording.outputPath,
+          manifest.metadata,
+          replay,
+          recording.source === "automatic" ? recordingSetBaseName(manifest.metadata) : null,
+        )
       : recording.outputPath;
     const namedManifestPath = namedOutputPath
       ? recordingManifestPath(namedOutputPath)
@@ -385,6 +510,25 @@ async function attachReplayToRecording(recording, replayPath) {
     if (namedManifestPath !== previousManifestPath) {
       await fs.promises.rename(previousManifestPath, namedManifestPath).catch(() => undefined);
     }
+    const replayEntry = {
+      matchId: matchId ?? null,
+      replayPath,
+      replayFileName: path.basename(replayPath),
+      replay,
+    };
+    const games = Array.isArray(manifest.games) ? manifest.games : [];
+    const game = matchId ? games.find((candidate) => candidate.matchId === matchId) : null;
+    if (game) {
+      game.replayPath = replayPath;
+      game.replayFileName = path.basename(replayPath);
+      game.replay = replay;
+    }
+    const replays = Array.isArray(manifest.replays) ? manifest.replays : [];
+    manifest.games = games;
+    manifest.replays = [
+      ...replays.filter((candidate) => candidate.matchId !== replayEntry.matchId),
+      replayEntry,
+    ];
     manifest.replayPath = replayPath;
     manifest.replayFileName = path.basename(replayPath);
     manifest.outputPath = namedOutputPath;
@@ -431,7 +575,6 @@ function setMatchAutomationState(nextState) {
 function matchToRecordingMetadata(match, setNumber, gameNumber) {
   const player1Rating = match.player1?.glicko?.rating;
   const player2Rating = match.player2?.glicko?.rating;
-  const ranked = match.player1?.glicko || match.player2?.glicko;
   const numericSetNumber = Number.parseInt(String(setNumber), 10);
   const numericGameNumber = Number.parseInt(String(gameNumber), 10);
   const normalizedSetNumber =
@@ -443,9 +586,10 @@ function matchToRecordingMetadata(match, setNumber, gameNumber) {
     opponent: "Player 2",
     setLabel: `set ${normalizedSetNumber}`,
     gameNumber: String(normalizedGameNumber),
-    mode: ranked ? "ranked" : "casual",
+    mode: match.mode ?? "",
     notes: [match.notes?.player1, match.notes?.player2].filter(Boolean).join(" / "),
     matchId: match.matchId,
+    lobbyId: match.lobbyId ?? "",
     player1: match.player1?.character ?? "",
     player2: match.player2?.character ?? "",
     player1SteamId: match.player1?.steamId ?? "",
@@ -457,26 +601,148 @@ function matchToRecordingMetadata(match, setNumber, gameNumber) {
   });
 }
 
+function lobbyToRecordingMetadata(lobbyId, setNumber) {
+  return normalizeRecordingMetadata({
+    player: "Player 1",
+    opponent: "Player 2",
+    setLabel: `set ${setNumber > 0 ? setNumber : 1}`,
+    gameNumber: "",
+    mode: "",
+    notes: "",
+    matchId: "",
+    lobbyId: lobbyId ?? "",
+    player1: "",
+    player2: "",
+    player1SteamId: "",
+    player2SteamId: "",
+    player1Character: "",
+    player2Character: "",
+    player1Rating: "",
+    player2Rating: "",
+  });
+}
+
+function automaticGameRecord(match) {
+  const setNumber = matchLogWatcher?.setNumber ?? 0;
+  const gameNumber = matchLogWatcher?.gameNumber ?? 0;
+  return {
+    matchId: match.matchId,
+    lobbyId: match.lobbyId ?? "",
+    setNumber,
+    gameNumber,
+    logTime: match.logTime,
+    detectedAt: match.startedAt,
+    endedAt: null,
+    endReason: null,
+    metadata: matchToRecordingMetadata(match, setNumber, gameNumber),
+    replayPath: null,
+    replayFileName: null,
+  };
+}
+
+function recordAutomaticMatchStart(match) {
+  const recording = activeObsRecording;
+  if (
+    !recording ||
+    recording.source !== "automatic" ||
+    (recording.lobbyId && recording.lobbyId !== match.lobbyId)
+  ) {
+    return null;
+  }
+  const existing = recording.games.find((game) => game.matchId === match.matchId);
+  if (existing) return existing;
+  const game = automaticGameRecord(match);
+  recording.games.push(game);
+  if (!recording.metadata?.matchId) {
+    recording.metadata = game.metadata;
+  }
+  recording.tags = {
+    ...recording.tags,
+    match:
+      game.metadata.mode === "ranked" || game.metadata.mode === "casual"
+        ? [game.metadata.mode]
+        : [],
+  };
+  setObsState({ recording: { ...obsState.recording, active: true } });
+  return game;
+}
+
+function recordAutomaticMatchEnd(match, reason) {
+  const recording = activeObsRecording;
+  const game = recording?.games.find((candidate) => candidate.matchId === match.matchId);
+  if (!game) return;
+  game.endedAt = new Date().toISOString();
+  game.endReason = reason;
+}
+
 async function startObsRecording(metadata, setup = {}, options = {}) {
   const client = getObsClient();
-  const current = await refreshObsState(client);
-  if (current.recordStatus.outputActive) throw new Error("OBS is already recording.");
-  await prepareObsProfile(setup);
+  const reusePreparedProfile = options.reusePreparedProfile === true;
+  const source = options.manual ? "manual" : "automatic";
+  const startedAtMs = Date.now();
+  logRecordingDiagnostic("recording-start-request", {
+    source,
+    matchId: metadata?.matchId ?? null,
+    reusePreparedProfile,
+  });
+  if (reusePreparedProfile) {
+    if (!hasPreparedObsProfile(setup)) {
+      const preparationStartedAt = Date.now();
+      logRecordingDiagnostic("obs-profile-preparation-needed", { source });
+      await prepareObsProfile(setup);
+      logRecordingDiagnostic("obs-profile-preparation-complete", {
+        source,
+        durationMs: Date.now() - preparationStartedAt,
+      });
+    }
+    if (obsState.recording.active) throw new Error("OBS is already recording.");
+  } else {
+    const current = await refreshObsState(client);
+    if (current.recordStatus.outputActive) throw new Error("OBS is already recording.");
+    const preparationStartedAt = Date.now();
+    await prepareObsProfile(setup);
+    logRecordingDiagnostic("obs-profile-preparation-complete", {
+      source,
+      durationMs: Date.now() - preparationStartedAt,
+    });
+  }
   const normalizedMetadata = metadata ? normalizeRecordingMetadata(metadata) : null;
+  const tags = normalizeRecordingTags(options.tags);
   const startedAt = new Date().toISOString();
-  const sessionId = `${options.manual ? "manual" : "match"}-${Date.now()}`;
+  const sessionId = `${options.manual ? "manual" : "set"}-${Date.now()}`;
   lastFinalizedObsRecording = null;
   activeObsRecording = {
     sessionId,
     startedAt,
     source: options.manual ? "manual" : "automatic",
     metadata: normalizedMetadata,
+    tags,
     fileNameBase: options.manual ? manualRecordingBaseName(startedAt) : null,
+    games: [],
+    replays: [],
+    lobbyId: normalizedMetadata?.lobbyId || null,
   };
   try {
+    logRecordingDiagnostic("obs-start-record-request", {
+      source,
+      matchId: metadata?.matchId ?? null,
+      preparationDurationMs: Date.now() - startedAtMs,
+    });
     await client.call("StartRecord");
+    logRecordingDiagnostic("obs-start-record-complete", {
+      source,
+      matchId: metadata?.matchId ?? null,
+      durationMs: Date.now() - startedAtMs,
+    });
   } catch (error) {
     activeObsRecording = null;
+    if (reusePreparedProfile) invalidatePreparedObsProfile();
+    logRecordingDiagnostic("obs-start-record-failed", {
+      source,
+      matchId: metadata?.matchId ?? null,
+      durationMs: Date.now() - startedAtMs,
+      error: obsErrorMessage(error),
+    });
     throw error;
   }
   setObsState({
@@ -506,9 +772,26 @@ async function waitForObsRecordingState(client, expectedActive, timeoutMs = 5000
 
 async function stopObsRecording(reason = "labatar") {
   const client = getObsClient();
+  const startedAt = Date.now();
+  logRecordingDiagnostic("recording-stop-request", {
+    reason,
+    matchId: activeObsRecording?.metadata?.matchId ?? null,
+    sessionId: activeObsRecording?.sessionId ?? null,
+  });
   const current = await refreshObsState(client);
-  if (!current.recordStatus.outputActive) throw new Error("OBS is not recording.");
+  if (!current.recordStatus.outputActive) {
+    logRecordingDiagnostic("recording-stop-skipped", {
+      reason,
+      durationMs: Date.now() - startedAt,
+      error: "OBS is not recording.",
+    });
+    throw new Error("OBS is not recording.");
+  }
   lastFinalizedObsRecording = null;
+  logRecordingDiagnostic("obs-stop-record-request", {
+    reason,
+    durationMs: Date.now() - startedAt,
+  });
   const result = await client.call("StopRecord");
   const stopped = await waitForObsRecordingState(client, false);
   const finalized = await finalizeObsRecording(
@@ -519,73 +802,152 @@ async function stopObsRecording(reason = "labatar") {
     status: "connected",
     recording: { active: false, paused: false, outputPath: result.outputPath ?? null },
   });
+  logRecordingDiagnostic("obs-stop-record-complete", {
+    reason,
+    durationMs: Date.now() - startedAt,
+    outputPath: finalized?.outputPath ?? result.outputPath ?? stopped.outputPath ?? null,
+  });
   return finalized;
 }
 
-async function handleAutomaticMatchStarted(match, { recovered = false } = {}) {
-  if (!obsState.automation.enabled) return;
+async function handleAutomaticLobbyStarted({ lobbyId, recovered = false } = {}) {
+  if (!obsState.automation.enabled || !lobbyId) return false;
+  logRecordingDiagnostic("automatic-lobby-start-handler", { lobbyId, recovered });
   if (obsState.status !== "connected") {
     setMatchAutomationState({
       status: "waiting-for-obs",
-      currentMatch: match,
-      error: "Connect OBS before the next game starts.",
+      error: "Connect OBS before the next lobby starts.",
     });
     return false;
   }
-  if (activeObsRecording?.metadata?.matchId === match.matchId) return true;
+  if (activeObsRecording?.source === "automatic" && activeObsRecording.lobbyId === lobbyId) {
+    return true;
+  }
   if (activeObsRecording) {
     try {
-      await stopObsRecording("new-match");
+      await stopObsRecording("lobby-changed");
     } catch (error) {
-      setMatchAutomationState({
-        status: "error",
-        currentMatch: match,
-        error: obsErrorMessage(error),
-      });
+      setMatchAutomationState({ status: "error", error: obsErrorMessage(error) });
       return false;
     }
   }
   try {
     const setNumber = matchLogWatcher?.setNumber ?? 0;
-    const gameNumber = matchLogWatcher?.gameNumber ?? 0;
-    const metadata = matchToRecordingMetadata(match, setNumber, gameNumber);
-    await startObsRecording(metadata);
+    await startObsRecording(
+      lobbyToRecordingMetadata(lobbyId, setNumber),
+      {},
+      {
+        reusePreparedProfile: true,
+        tags: { match: [], lab: [], combo: false, pressure: false },
+      },
+    );
     setMatchAutomationState({
-      status: recovered ? "in-match-recovered" : "in-match",
-      currentMatch: match,
+      status: recovered ? "in-set-recovered" : "in-set",
       error: null,
     });
     return true;
   } catch (error) {
-    setMatchAutomationState({
-      status: "error",
-      currentMatch: match,
-      error: obsErrorMessage(error),
-    });
+    invalidatePreparedObsProfile();
+    setMatchAutomationState({ status: "error", error: obsErrorMessage(error) });
     return false;
   }
 }
 
+async function handleAutomaticMatchStarted(match, { recovered = false } = {}) {
+  if (!obsState.automation.enabled) return false;
+  logRecordingDiagnostic("automatic-match-start-handler", {
+    matchId: match.matchId,
+    logTime: match.logTime,
+    lobbyId: match.lobbyId,
+    recovered,
+  });
+  if (!activeObsRecording && match.lobbyId) {
+    const started = await handleAutomaticLobbyStarted({ lobbyId: match.lobbyId, recovered });
+    if (!started) return false;
+  }
+  if (!recordAutomaticMatchStart(match)) {
+    setMatchAutomationState({
+      status: "error",
+      currentMatch: match,
+      error: "The detected match does not belong to the active recording lobby.",
+    });
+    return false;
+  }
+  setMatchAutomationState({
+    status: recovered ? "in-set-recovered" : "in-set",
+    currentMatch: match,
+    error: null,
+  });
+  return true;
+}
+
 async function handleAutomaticMatchEnded(match, reason) {
   if (!obsState.automation.enabled) return;
-  if (!activeObsRecording || activeObsRecording.metadata?.matchId !== match.matchId) {
+  logRecordingDiagnostic("automatic-match-end-handler", {
+    matchId: match.matchId,
+    logTime: match.logTime,
+    lobbyId: match.lobbyId,
+    reason,
+  });
+  recordAutomaticMatchEnd(match, reason);
+  if (activeObsRecording?.source === "automatic") {
+    pendingAutoRecordings.push({ match, recording: activeObsRecording });
+    setMatchAutomationState({ status: "in-set", currentMatch: null, error: null });
+  } else {
     setMatchAutomationState({ status: "watching", currentMatch: null, error: null });
+  }
+}
+
+async function handleAutomaticLobbyEnded({ lobbyId, reason, currentMatch } = {}) {
+  if (!obsState.automation.enabled || !lobbyId) return;
+  logRecordingDiagnostic("automatic-lobby-end-handler", { lobbyId, reason });
+  if (activeObsRecording?.source !== "automatic" || activeObsRecording.lobbyId !== lobbyId) {
     return;
   }
+  if (currentMatch) recordAutomaticMatchEnd(currentMatch, `lobby-${reason ?? "ended"}`);
   try {
-    const recording = await stopObsRecording(`match-${reason}`);
-    pendingAutoRecordings.push({ match, recording });
-    setMatchAutomationState({ status: "waiting-for-replay", currentMatch: null, error: null });
+    await stopObsRecording(`lobby-${reason ?? "ended"}`);
+    setMatchAutomationState({
+      status: pendingAutoRecordings.length ? "waiting-for-replay" : "watching",
+      currentMatch: null,
+      error: null,
+    });
   } catch (error) {
     setMatchAutomationState({ status: "error", currentMatch: null, error: obsErrorMessage(error) });
   }
 }
 
 async function handleAutomaticReplaySaved(replayPath) {
+  logRecordingDiagnostic("automatic-replay-saved", {
+    replayPath,
+    pendingCount: pendingAutoRecordings.length,
+  });
   const pending = pendingAutoRecordings.shift();
-  if (pending) await attachReplayToRecording(pending.recording, replayPath);
+  if (pending) {
+    const recording = pending.recording;
+    const game = recording.games?.find((candidate) => candidate.matchId === pending.match.matchId);
+    if (game) {
+      game.replayPath = replayPath;
+      game.replayFileName = path.basename(replayPath);
+    }
+    recording.replays ??= [];
+    recording.replays.push({
+      matchId: pending.match.matchId,
+      replayPath,
+      replayFileName: path.basename(replayPath),
+    });
+    if (recording.manifestPath) {
+      await attachReplayToRecording(recording, replayPath, pending.match.matchId);
+    }
+  }
   setMatchAutomationState({
-    status: pending ? "watching" : obsState.automation.status,
+    status: pending
+      ? pendingAutoRecordings.length
+        ? "waiting-for-replay"
+        : activeObsRecording?.source === "automatic"
+          ? "in-set"
+          : "watching"
+      : obsState.automation.status,
     lastReplayPath: replayPath,
     error: null,
   });
@@ -595,6 +957,9 @@ function ensureMatchLogWatcher() {
   if (matchLogWatcher) return matchLogWatcher;
   matchLogWatcher = new MatchLogWatcher({
     getLogsDirectory: async () => findMatchLogDirectory(),
+    onDiagnostic: (event, details) => logRecordingDiagnostic(`watcher-${event}`, details),
+    onLobbyStarted: handleAutomaticLobbyStarted,
+    onLobbyEnded: handleAutomaticLobbyEnded,
     onState: (state) => {
       const callbackError =
         obsState.automation.status === "error" &&
@@ -604,6 +969,7 @@ function ensureMatchLogWatcher() {
       setMatchAutomationState({
         status: callbackError ? "error" : state.status,
         logPath: state.logPath,
+        lobbyId: state.lobbyId,
         currentMatch: state.currentMatch,
         setNumber: state.setNumber,
         gameNumber: state.gameNumber,
@@ -623,8 +989,9 @@ async function setAutomaticRecordingEnabled(enabled) {
   if (enabled) {
     if (obsState.status !== "connected")
       throw new Error("Connect OBS before enabling automatic recording.");
-    setMatchAutomationState({ enabled: true, error: null });
     try {
+      await prepareObsProfile();
+      setMatchAutomationState({ enabled: true, error: null });
       await watcher.start();
     } catch (error) {
       setMatchAutomationState({ enabled: false, status: "error", error: obsErrorMessage(error) });
@@ -632,7 +999,7 @@ async function setAutomaticRecordingEnabled(enabled) {
     }
   } else {
     await watcher.stop();
-    if (activeObsRecording?.metadata?.matchId) {
+    if (activeObsRecording?.source === "automatic") {
       await stopObsRecording("automation-disabled").catch(() => undefined);
     }
     pendingAutoRecordings = [];
@@ -660,6 +1027,7 @@ async function connectToObs(request = {}) {
 
   if (obsClient) {
     const previous = obsClient;
+    invalidatePreparedObsProfile();
     obsClient = null;
     await previous.disconnect().catch(() => undefined);
   }
@@ -692,8 +1060,13 @@ async function connectToObs(request = {}) {
   });
   client.on("ConnectionClosed", (error) => {
     if (obsClient !== client || token !== obsConnectionToken) return;
+    invalidatePreparedObsProfile();
     obsClient = null;
     setObsState({ status: "disconnected", error: error?.message ?? "OBS connection closed." });
+  });
+  client.on("CurrentProfileChanged", () => {
+    if (obsClient !== client) return;
+    invalidatePreparedObsProfile();
   });
   client.on("ConnectionError", (error) => {
     if (obsClient !== client || token !== obsConnectionToken) return;
@@ -712,11 +1085,14 @@ async function connectToObs(request = {}) {
     if (rememberPassword && providedPassword) saveObsPassword(providedPassword);
     if (!rememberPassword) clearStoredObsPassword();
     await refreshObsState(client);
-    if (obsState.automation.enabled && matchLogWatcher?.currentMatch) {
+    if (obsState.automation.enabled && matchLogWatcher?.lobbyId) {
+      void handleAutomaticLobbyStarted({ lobbyId: matchLogWatcher.lobbyId, recovered: true });
+    } else if (obsState.automation.enabled && matchLogWatcher?.currentMatch) {
       void handleAutomaticMatchStarted(matchLogWatcher.currentMatch, { recovered: true });
     }
     return publicObsState();
   } catch (error) {
+    invalidatePreparedObsProfile();
     if (obsClient === client) obsClient = null;
     setObsState({ status: "error", error: obsErrorMessage(error) });
     await client.disconnect().catch(() => undefined);
@@ -726,11 +1102,8 @@ async function connectToObs(request = {}) {
 
 async function prepareObsProfile(request = {}) {
   const client = getObsClient();
-  const settings = getObsSettings();
-  const profileName =
-    String(request.profileName ?? settings.profileName).trim() || settings.profileName;
-  const recordDirectory =
-    String(request.recordDirectory ?? settings.recordDirectory).trim() || settings.recordDirectory;
+  invalidatePreparedObsProfile();
+  const { profileName, recordDirectory } = getObsProfileTarget(request);
   const current = await refreshObsState(client);
   if (current.recordStatus.outputActive) {
     throw new Error("Stop the active OBS recording before preparing the profile.");
@@ -754,16 +1127,15 @@ async function prepareObsProfile(request = {}) {
     obs: { ...getObsSettings(), profileName, recordDirectory },
   });
   const refreshed = await refreshObsState(client);
-  return { ...refreshed, created };
+  const result = { ...refreshed, created };
+  rememberPreparedObsProfile({ profileName, recordDirectory }, result);
+  return result;
 }
 
 async function setupLabatarObsScenes(request = {}) {
   const client = getObsClient();
-  const settings = getObsSettings();
-  const profileName =
-    String(request.profileName ?? settings.profileName).trim() || settings.profileName;
-  const recordDirectory =
-    String(request.recordDirectory ?? settings.recordDirectory).trim() || settings.recordDirectory;
+  invalidatePreparedObsProfile();
+  const { profileName, recordDirectory } = getObsProfileTarget(request);
   const current = await refreshObsState(client);
   if (current.recordStatus.outputActive) {
     throw new Error("Stop the active OBS recording before setting up Labatar scenes.");
@@ -1037,6 +1409,7 @@ async function setupLabatarObsScenes(request = {}) {
     obs: { ...getObsSettings(), profileName, recordDirectory },
   });
   const refreshed = await refreshObsState(client);
+  rememberPreparedObsProfile({ profileName, recordDirectory }, refreshed);
   return {
     profileName,
     recordDirectory,
@@ -1267,6 +1640,7 @@ ipcMain.handle("obs:disconnect", async () => {
   if (obsState.automation.enabled) await setAutomaticRecordingEnabled(false);
   if (activeObsRecording) await stopObsRecording("disconnect").catch(() => undefined);
   ++obsConnectionToken;
+  invalidatePreparedObsProfile();
   const client = obsClient;
   obsClient = null;
   if (client) await client.disconnect().catch(() => undefined);
@@ -1963,6 +2337,9 @@ async function exportRecordingClip(request = {}) {
           createdAt: clip.createdAt,
           outputPath,
           metadata: null,
+          games: [],
+          replays: [],
+          tags: { match: [], lab: [], combo: false, pressure: false },
           clip,
         },
         null,
@@ -1985,6 +2362,9 @@ async function exportRecordingClip(request = {}) {
     size: stat.size,
     modifiedAt: stat.mtimeMs,
     metadata: null,
+    games: [],
+    replays: [],
+    tags: { match: [], lab: [], combo: false, pressure: false },
     replayPath: null,
     replayFileName: null,
     clip,
@@ -2067,6 +2447,30 @@ async function deleteRecording(request = {}) {
   return { id: recordingId };
 }
 
+async function setRecordingTags(request = {}) {
+  const recordingId = String(request.recordingId ?? "");
+  const currentPath = resolveRecordingPath(recordingId);
+  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
+  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+
+  const manifestPath = recordingManifestPathForVideo(currentPath);
+  let manifest;
+  try {
+    manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+  } catch {
+    manifest = {
+      schemaVersion: 1,
+      outputPath: currentPath,
+      metadata: null,
+      games: [],
+      replays: [],
+    };
+  }
+  manifest.tags = normalizeRecordingTags(request.tags);
+  await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  return getRecordedVideoForPath(currentPath);
+}
+
 async function getRecordedVideoForPath(
   filePath,
   folder = path.resolve(getObsSettings().recordDirectory),
@@ -2093,6 +2497,9 @@ async function readRecordingManifest(videoPath) {
     const endTime = Number(clip?.endTime);
     return {
       metadata: manifest?.metadata ?? null,
+      games: Array.isArray(manifest?.games) ? manifest.games : [],
+      replays: Array.isArray(manifest?.replays) ? manifest.replays : [],
+      tags: normalizeRecordingTags(manifest?.tags, manifest?.metadata),
       replayPath: typeof manifest?.replayPath === "string" ? manifest.replayPath : null,
       replayFileName: typeof manifest?.replayFileName === "string" ? manifest.replayFileName : null,
       clip:
@@ -2113,7 +2520,15 @@ async function readRecordingManifest(videoPath) {
           : null,
     };
   } catch {
-    return { metadata: null, replayPath: null, replayFileName: null, clip: null };
+    return {
+      metadata: null,
+      games: [],
+      replays: [],
+      tags: { match: [], lab: [], combo: false, pressure: false },
+      replayPath: null,
+      replayFileName: null,
+      clip: null,
+    };
   }
 }
 
@@ -2216,6 +2631,7 @@ ipcMain.handle("recordings:list", async () => {
 
 ipcMain.handle("recordings:export-clip", async (_, request) => exportRecordingClip(request));
 ipcMain.handle("recordings:rename", async (_, request) => renameRecording(request));
+ipcMain.handle("recordings:set-tags", async (_, request) => setRecordingTags(request));
 ipcMain.handle("recordings:delete", async (_, request) => deleteRecording(request));
 ipcMain.on("recordings:start-drag", async (event, request) => {
   try {

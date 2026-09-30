@@ -8,6 +8,7 @@ export type RecordingMetadata = {
   mode: string;
   notes: string;
   matchId: string;
+  lobbyId: string;
   player1: string;
   player2: string;
   player1SteamId: string;
@@ -48,8 +49,10 @@ export type ObsAutomationState = {
   enabled: boolean;
   status: string;
   logPath: string | null;
+  lobbyId: string | null;
   currentMatch: {
     matchId: string;
+    lobbyId: string | null;
     logTime: string | null;
     startedAt: string;
     player1: DetectedPlayer | null;

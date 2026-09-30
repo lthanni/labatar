@@ -36,8 +36,10 @@ import { useCallback } from "react";
 import { OverlaySurface, VisualOverlay } from "./Overlay";
 import { ObsRecordingPanel } from "./ObsRecordingPanel";
 import { RecordingViewer } from "./RecordingViewer";
+import { TechSection } from "./TechSection";
 import type { ObsSettings, ObsState, RecordingMetadata } from "./obs-types";
-import type { RecordedVideo } from "./recording-types";
+import type { RecordedVideo, RecordingTags } from "./recording-types";
+import { techSelectComboEvent, techSelectRecordingEvent } from "./tech-types";
 
 declare global {
   interface Window {
@@ -120,6 +122,7 @@ declare global {
           endTime: number;
         }) => Promise<RecordedVideo>;
         renameRecording: (request: { recordingId: string; name: string }) => Promise<RecordedVideo>;
+        setTags: (request: { recordingId: string; tags: RecordingTags }) => Promise<RecordedVideo>;
         deleteRecording: (request: { recordingId: string }) => Promise<{ id: string }>;
         startDrag: (request: { recordingId: string }) => void;
       };
@@ -647,29 +650,45 @@ function App() {
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [recordingsRefreshToken, setRecordingsRefreshToken] = useState(0);
+  const techTabIndex = developerTabsAvailable ? 3 : 1;
   const [tab, setTab] = useState(() => {
     const savedTab = Number(localStorage.getItem("avatar-app-last-tab"));
-    const migratedTab = savedTab === 3 ? 1 : savedTab;
-    return developerTabsAvailable && (migratedTab === 1 || migratedTab === 2) ? migratedTab : 0;
+    const availableTabs = developerTabsAvailable ? [0, 1, 2, techTabIndex] : [0, techTabIndex];
+    return availableTabs.includes(savedTab) ? savedTab : 0;
   });
   const [mountedTabs, setMountedTabs] = useState(() => ({
     replay: tab === 0,
     recording: developerTabsAvailable && tab === 1,
     overlay: developerTabsAvailable && tab === 2,
+    tech: tab === techTabIndex,
   }));
   const changeTab = (nextTab: number) => {
-    if (nextTab > 0 && !developerTabsAvailable) return;
+    if (nextTab !== techTabIndex && nextTab > 0 && !developerTabsAvailable) return;
     setTab(nextTab);
     setMountedTabs((current) => ({
       replay: current.replay || nextTab === 0,
       recording: developerTabsAvailable && (current.recording || nextTab === 1),
       overlay: developerTabsAvailable && (current.overlay || nextTab === 2),
+      tech: current.tech || nextTab === techTabIndex,
     }));
     localStorage.setItem("avatar-app-last-tab", String(nextTab));
   };
   const refreshRecordings = useCallback(() => {
     setRecordingsRefreshToken((current) => current + 1);
   }, []);
+
+  useEffect(() => {
+    const showRecordings = () => {
+      if (developerTabsAvailable) changeTab(1);
+    };
+    const showTech = () => changeTab(techTabIndex);
+    window.addEventListener(techSelectRecordingEvent, showRecordings);
+    window.addEventListener(techSelectComboEvent, showTech);
+    return () => {
+      window.removeEventListener(techSelectRecordingEvent, showRecordings);
+      window.removeEventListener(techSelectComboEvent, showTech);
+    };
+  }, [developerTabsAvailable, techTabIndex]);
 
   useEffect(() => window.electronAPI?.updates.onStatus(setUpdateStatus), []);
   useEffect(() => {
@@ -684,6 +703,7 @@ function App() {
           <Tab label="Match history" />
           {developerTabsAvailable && <Tab label="Recordings" />}
           {developerTabsAvailable && <Tab label="Visual overlay" />}
+          <Tab label="Tech" />
         </Tabs>
         {appVersion && (
           <Typography variant="caption" color="text.secondary">
@@ -718,6 +738,11 @@ function App() {
       {developerTabsAvailable && mountedTabs.overlay && (
         <Box sx={{ display: tab === 2 ? "block" : "none" }}>
           <VisualOverlay />
+        </Box>
+      )}
+      {mountedTabs.tech && (
+        <Box sx={{ display: tab === techTabIndex ? "block" : "none" }}>
+          <TechSection />
         </Box>
       )}
     </>

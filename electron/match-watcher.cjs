@@ -28,6 +28,22 @@ function parsePlayerLine(line) {
   };
 }
 
+function parseMatchMode(line) {
+  // SetNewMatch's Casual flag is the most direct signal and is emitted for
+  // both ranked and casual matches before the match is marked as started.
+  const casualFlag = line.match(/SetNewMatch:\s*Casual:\s*([01])\b/i);
+  if (casualFlag) return casualFlag[1] === "1" ? "casual" : "ranked";
+
+  const matchmakingMode = line.match(/\bMatchmakingMode(Ranked|Casual)\b/i);
+  if (matchmakingMode) return matchmakingMode[1].toLowerCase();
+
+  const queue = line.match(/\bqueue\s*=\s*(RANKED|CASUAL)\b/i);
+  if (queue) return queue[1].toLowerCase();
+
+  const replayHeader = line.match(/Gathered ratings for header:\s*(ranked|casual)\b/i);
+  return replayHeader?.[1]?.toLowerCase() ?? null;
+}
+
 function updateMatchFromLine(currentMatch, line) {
   const start = line.match(/SetNewMatch:\s*New match started with ID\s*(.*?)\s*$/i);
   if (start) {
@@ -38,10 +54,14 @@ function updateMatchFromLine(currentMatch, line) {
       player1: null,
       player2: null,
       notes: { player1: "", player2: "" },
+      mode: null,
       recordingStarted: false,
+      lobbyId: null,
     };
   }
   if (!currentMatch) return currentMatch;
+  const mode = parseMatchMode(line);
+  if (mode) currentMatch.mode = mode;
   const player = parsePlayerLine(line);
   if (player) {
     currentMatch[`player${player.player}`] = player;
@@ -73,18 +93,41 @@ function parseMatchEndReason(line) {
   return null;
 }
 
-function matchSetKey(match) {
-  const players = [match?.player1, match?.player2]
-    .map((player) => player?.steamId || player?.character || "")
-    .filter(Boolean)
-    .sort();
-  return players.length === 2 ? players.join("|") : null;
+function parseLobbyEvent(line) {
+  const matched = line.match(/XMatch:\s*MATCHED\b.*?\blobbyId=(\d+)/i);
+  if (matched) return { type: "matched", lobbyId: matched[1] };
+  const finalized = line.match(/XMatch finalize:\s*MATCH FINALIZED\s*\(lobby\s*(\d+)/i);
+  if (finalized) return { type: "finalized", lobbyId: finalized[1] };
+  const joined = line.match(/Joined meetup lobby,\s*setting currentMeetupLobbyIdHash to\s*(\d+)/i);
+  if (joined) return { type: "joined", lobbyId: joined[1] };
+  const leaving = line.match(/Steam:\s*Leaving lobby\s*(\d+)/i);
+  if (leaving) return { type: "left", lobbyId: leaving[1] };
+  if (
+    /Leave Lobby Called from Script|Ending Netplay from script with reason:\s*Quit\b|LogNetplayEvent:\s*Quit\b/i.test(
+      line,
+    )
+  ) {
+    return { type: "left", lobbyId: null };
+  }
+  return null;
 }
 
 class MatchLogWatcher {
-  constructor({ getLogsDirectory, onState, onMatchStarted, onMatchEnded, onReplaySaved }) {
+  constructor({
+    getLogsDirectory,
+    onState,
+    onDiagnostic,
+    onLobbyStarted,
+    onLobbyEnded,
+    onMatchStarted,
+    onMatchEnded,
+    onReplaySaved,
+  }) {
     this.getLogsDirectory = getLogsDirectory;
     this.onState = onState;
+    this.onDiagnostic = onDiagnostic;
+    this.onLobbyStarted = onLobbyStarted;
+    this.onLobbyEnded = onLobbyEnded;
     this.onMatchStarted = onMatchStarted;
     this.onMatchEnded = onMatchEnded;
     this.onReplaySaved = onReplaySaved;
@@ -97,12 +140,16 @@ class MatchLogWatcher {
     this.currentMatch = null;
     this.setNumber = 0;
     this.gameNumber = 0;
-    this.currentSetKey = null;
-    this.setEnded = true;
+    this.lobbyId = null;
+    this.numberedSetKey = null;
     this.numberedMatchId = null;
     this.lastReplayPath = null;
     this.status = "disabled";
     this.error = null;
+  }
+
+  diagnostic(event, details = {}) {
+    this.onDiagnostic?.(event, { logPath: this.logPath, ...details });
   }
 
   snapshot() {
@@ -111,6 +158,7 @@ class MatchLogWatcher {
       status: this.status,
       logPath: this.logPath,
       currentMatch: this.currentMatch,
+      lobbyId: this.lobbyId,
       setNumber: this.setNumber,
       gameNumber: this.gameNumber,
       lastReplayPath: this.lastReplayPath,
@@ -145,17 +193,20 @@ class MatchLogWatcher {
     }
     let currentMatch = null;
     for (const line of buffer.toString("latin1").split(/\r?\n/)) {
-      const endReason = parseMatchEndReason(line);
-      if (endReason === "quit" || endReason === "connection-lost") this.setEnded = true;
+      this.observeLobbyEvent(parseLobbyEvent(line));
       if (/EndMatch:\s*Match ended/i.test(line)) {
         currentMatch = null;
         continue;
       }
       currentMatch = updateMatchFromLine(currentMatch, line);
+      if (currentMatch?.lobbyId == null) currentMatch.lobbyId = this.lobbyId;
     }
     this.currentMatch = currentMatch;
     this.offset = size;
     this.lineBuffer = "";
+    if (this.lobbyId) {
+      await this.onLobbyStarted?.({ lobbyId: this.lobbyId, recovered: true });
+    }
     if (this.currentMatch) await this.beginCurrentMatch(true);
   }
 
@@ -166,20 +217,52 @@ class MatchLogWatcher {
     this.lastReplayPath = null;
     this.setNumber = 0;
     this.gameNumber = 0;
-    this.currentSetKey = null;
-    this.setEnded = true;
+    this.lobbyId = null;
+    this.numberedSetKey = null;
     this.numberedMatchId = null;
     await this.primeCurrentFile(filePath, stat.size);
+    this.diagnostic("log-switched", { filePath, size: stat.size });
     this.emit();
   }
 
   async processLine(line) {
+    const processingStartedAt = Date.now();
+    const lobbyObservation = this.observeLobbyEvent(parseLobbyEvent(line));
+    if (lobbyObservation?.ended) {
+      await this.onLobbyEnded?.({
+        lobbyId: lobbyObservation.previousLobbyId,
+        reason: lobbyObservation.reason,
+        currentMatch: this.currentMatch,
+      });
+    }
+    if (lobbyObservation?.started) {
+      await this.onLobbyStarted?.({
+        lobbyId: lobbyObservation.lobbyId,
+        type: lobbyObservation.type,
+        recovered: false,
+      });
+    }
     const nextMatch = updateMatchFromLine(this.currentMatch, line);
     const endReason = parseMatchEndReason(line);
-    if (endReason === "quit" || endReason === "connection-lost") this.setEnded = true;
+    if (nextMatch && nextMatch.lobbyId == null) nextMatch.lobbyId = this.lobbyId;
     if (nextMatch !== this.currentMatch && nextMatch?.matchId) {
+      this.diagnostic("match-detected", {
+        matchId: nextMatch.matchId,
+        logTime: nextMatch.logTime,
+        lobbyId: nextMatch.lobbyId,
+        detectedAt: nextMatch.startedAt,
+      });
       if (this.currentMatch) {
+        this.diagnostic("match-end-handler-start", {
+          matchId: this.currentMatch.matchId,
+          reason: "new-match",
+        });
         await this.onMatchEnded?.(this.currentMatch, "new-match");
+        this.diagnostic("match-end-handler-complete", {
+          matchId: this.currentMatch.matchId,
+          reason: "new-match",
+          durationMs: Date.now() - processingStartedAt,
+        });
       }
       this.currentMatch = nextMatch;
       this.emit();
@@ -191,7 +274,18 @@ class MatchLogWatcher {
       if (endReason) {
         const completedMatch = this.currentMatch;
         this.currentMatch = null;
+        this.diagnostic("match-end-handler-start", {
+          matchId: completedMatch.matchId,
+          logTime: completedMatch.logTime,
+          reason: endReason,
+        });
         await this.onMatchEnded?.(completedMatch, endReason);
+        this.diagnostic("match-end-handler-complete", {
+          matchId: completedMatch.matchId,
+          logTime: completedMatch.logTime,
+          reason: endReason,
+          durationMs: Date.now() - processingStartedAt,
+        });
         this.emit();
       } else {
         if (this.currentMatch.player1 && this.currentMatch.player2) {
@@ -204,6 +298,7 @@ class MatchLogWatcher {
     const replayPath = parseReplayPath(line);
     if (replayPath) {
       this.lastReplayPath = replayPath;
+      this.diagnostic("replay-detected", { replayPath, logTime: parseLogTime(line) });
       await this.onReplaySaved?.(replayPath);
       this.emit();
     }
@@ -211,12 +306,35 @@ class MatchLogWatcher {
 
   async beginCurrentMatch(recovered) {
     if (!this.currentMatch || this.currentMatch.recordingStarted) return;
+    if (!this.currentMatch.mode) {
+      this.diagnostic("match-start-waiting-for-mode", {
+        matchId: this.currentMatch.matchId,
+        logTime: this.currentMatch.logTime,
+        recovered,
+      });
+      return;
+    }
     if (!this.currentMatch.player1 || !this.currentMatch.player2) {
       if (!recovered) return;
     }
     const match = this.currentMatch;
     this.assignMatchNumber(match);
+    const startedAt = Date.now();
+    this.diagnostic("match-start-handler-start", {
+      matchId: match.matchId,
+      logTime: match.logTime,
+      lobbyId: match.lobbyId,
+      recovered,
+    });
     const started = await this.onMatchStarted?.(match, { recovered });
+    this.diagnostic("match-start-handler-complete", {
+      matchId: match.matchId,
+      logTime: match.logTime,
+      lobbyId: match.lobbyId,
+      recovered,
+      started: started !== false,
+      durationMs: Date.now() - startedAt,
+    });
     if (started !== false && this.currentMatch?.matchId === match.matchId) {
       this.currentMatch.recordingStarted = true;
     }
@@ -224,22 +342,54 @@ class MatchLogWatcher {
 
   assignMatchNumber(match) {
     if (match.matchId === this.numberedMatchId) return;
-    const nextSetKey = matchSetKey(match);
-    if (
-      this.setNumber === 0 ||
-      this.setEnded ||
-      (nextSetKey && this.currentSetKey && nextSetKey !== this.currentSetKey)
-    ) {
+    const lobbyId = match.lobbyId ?? this.lobbyId;
+    const nextSetKey = lobbyId ? `lobby:${lobbyId}` : `match:${match.matchId}`;
+    if (this.setNumber === 0 || nextSetKey !== this.numberedSetKey) {
       this.setNumber += 1;
       this.gameNumber = 1;
-      this.currentSetKey = nextSetKey;
-      this.setEnded = false;
+      this.numberedSetKey = nextSetKey;
     } else {
       this.gameNumber += 1;
-      if (!this.currentSetKey && nextSetKey) this.currentSetKey = nextSetKey;
     }
     this.numberedMatchId = match.matchId;
     this.emit();
+  }
+
+  observeLobbyEvent(event) {
+    if (!event) return null;
+    const previousLobbyId = this.lobbyId;
+    if (event.type === "left") {
+      const matchesCurrentLobby = !event.lobbyId || !this.lobbyId || event.lobbyId === this.lobbyId;
+      if (matchesCurrentLobby) this.lobbyId = null;
+      this.diagnostic("lobby-left", {
+        eventLobbyId: event.lobbyId,
+        lobbyId: this.lobbyId,
+      });
+      return matchesCurrentLobby && previousLobbyId
+        ? { ended: true, previousLobbyId, reason: "left" }
+        : null;
+    }
+    const changed = Boolean(this.lobbyId && this.lobbyId !== event.lobbyId);
+    if (changed) {
+      this.diagnostic("lobby-changed", {
+        previousLobbyId,
+        lobbyId: event.lobbyId,
+      });
+    }
+    this.lobbyId = event.lobbyId;
+    this.diagnostic("lobby-observed", {
+      type: event.type,
+      lobbyId: event.lobbyId,
+      changed,
+    });
+    return {
+      started: !previousLobbyId || changed,
+      ended: changed,
+      previousLobbyId,
+      lobbyId: event.lobbyId,
+      type: event.type,
+      reason: "changed",
+    };
   }
 
   async poll() {
@@ -275,7 +425,15 @@ class MatchLogWatcher {
         this.offset = stat.size;
         const lines = `${this.lineBuffer}${buffer.toString("latin1")}`.split(/\r?\n/);
         this.lineBuffer = lines.pop() ?? "";
+        const processingStartedAt = Date.now();
         for (const line of lines) await this.processLine(line);
+        const processingDurationMs = Date.now() - processingStartedAt;
+        if (processingDurationMs >= 1000) {
+          this.diagnostic("poll-processing-slow", {
+            lineCount: lines.length,
+            durationMs: processingDurationMs,
+          });
+        }
       }
       if (this.currentMatch && !this.currentMatch.recordingStarted) {
         await this.beginCurrentMatch(false);
@@ -314,7 +472,11 @@ class MatchLogWatcher {
     this.enabled = false;
     this.status = "disabled";
     this.error = null;
+    this.logPath = null;
+    this.offset = 0;
+    this.lineBuffer = "";
     this.currentMatch = null;
+    this.lobbyId = null;
     this.emit();
     return this.snapshot();
   }
