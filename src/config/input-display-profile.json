@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "buttonSlots": [
+    { "slot": "A", "xRatio": 0.43, "yRatio": 0.3, "markerColor": "blue" },
+    { "slot": "B", "xRatio": 0.5, "yRatio": 0.3, "markerColor": "yellow" },
+    { "slot": "C", "xRatio": 0.57, "yRatio": 0.3, "markerColor": "red" },
+    { "slot": "F", "xRatio": 0.43, "yRatio": 0.7, "markerColor": "cyan" }
+  ],
+  "displayColors": {
+    "blue": "#2f72ff",
+    "yellow": "#ffd21f",
+    "red": "#ff3b30",
+    "cyan": "#22e6e6"
+  },
+  "segmentBackground": {
+    "startXRatio": 0.0,
+    "endXRatio": 0.8,
+    "darkPixelThreshold": 75,
+    "minimumCoverage": 0.45
+  },
+  "colorRules": [
+    {
+      "color": "red",
+      "redMin": 150,
+      "redDominance": 1.35
+    },
+    {
+      "color": "cyan",
+      "redMaxExclusive": 125,
+      "greenMin": 135,
+      "blueMin": 135,
+      "blueToGreenMax": 1.2
+    },
+    {
+      "color": "blue",
+      "redMaxExclusive": 125,
+      "blueMin": 145,
+      "blueDominance": 1.2
+    },
+    {
+      "color": "yellow",
+      "redMin": 150,
+      "greenMin": 130,
+      "blueMaxExclusive": 115,
+      "redToBlueMin": 1.35,
+      "greenToBlueMin": 1.35,
+      "redToGreenMax": 1.4
+    }
+  ]
+}

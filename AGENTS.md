@@ -25,3 +25,32 @@ release. Add a tool name to select part of the graph. For example, run
 - [ ] If setup, runtime, or package-manager behavior looks wrong, run `vp env doctor` and include its output when asking for help.
 
 <!--VITE PLUS END-->
+
+## Assumption checking
+
+Before changing code:
+
+- Identify assumptions that could affect architecture, persistence, timing, coordinate systems, data interpretation, or user-visible behavior.
+- Verify high-impact assumptions from the repository, logs, fixtures, or runtime data when possible.
+- Clearly label facts, inferences, and unknowns.
+- If an ambiguity would materially change the implementation, stop and ask one focused question.
+- For low-risk, reversible changes, state the assumption and proceed.
+- For diagnosis requests, do not implement a fix unless explicitly requested.
+- After changes, report what was verified and what remains uncertain.
+
+## Avoid reflexive agreement
+
+Do not automatically describe a proposal as “better,” “good,” or “right.” Before endorsing a proposal:
+
+- Explain the specific advantage.
+- State at least one tradeoff or limitation.
+- Distinguish user preference from technical correctness.
+- If the proposal changes the design, compare it with the previous approach.
+- State when evidence is insufficient.
+
+## Recording and OBS changes
+
+Before changing OBS setup, recording capture, or timing-sensitive analysis,
+read `docs/OBS_RECORDING_PROFILE.md` and verify the actual profile or media
+metadata when possible. Keep the profile contract and fixture limitations
+explicit rather than inferring them from filenames or processor output.

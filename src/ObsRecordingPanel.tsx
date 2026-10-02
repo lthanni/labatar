@@ -42,6 +42,7 @@ const disconnectedState: ObsState = {
   currentSceneCollectionName: null,
   currentSceneName: null,
   recordDirectory: null,
+  videoSettings: null,
   automation: {
     enabled: false,
     status: "disabled",
@@ -224,26 +225,6 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
     }
   };
 
-  const prepareProfile = async () => {
-    if (!window.electronAPI?.obs) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const result = await window.electronAPI.obs.prepareProfile({
-        profileName: settings.profileName,
-        recordDirectory: settings.recordDirectory,
-      });
-      setNotice(
-        `Profile ready: ${result.profileName}. Recordings will go to ${result.recordDirectory}.`,
-      );
-    } catch (prepareError) {
-      setError(displayError(prepareError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const setupScenes = async () => {
     if (!window.electronAPI?.obs) return;
     setBusy(true);
@@ -294,6 +275,11 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
     Boolean(expectedProfileName) &&
     Boolean(state.currentProfileName) &&
     state.currentProfileName !== expectedProfileName;
+  const configuredFps =
+    state.videoSettings?.fpsNumerator && state.videoSettings.fpsDenominator
+      ? state.videoSettings.fpsNumerator / state.videoSettings.fpsDenominator
+      : null;
+  const recordingFpsMismatch = connected && configuredFps !== 60;
 
   return (
     <Accordion
@@ -308,6 +294,19 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
       }}
     >
       <AccordionSummary
+        component="div"
+        role="button"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (
+            event.target !== event.currentTarget ||
+            (event.key !== "Enter" && event.key !== " ")
+          ) {
+            return;
+          }
+          event.preventDefault();
+          event.currentTarget.click();
+        }}
         expandIcon={<span aria-hidden="true">v</span>}
         sx={{ "& .MuiAccordionSummary-content": { alignItems: "center" } }}
       >
@@ -473,13 +472,6 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
                   fullWidth
                 />
                 <Button
-                  variant="outlined"
-                  onClick={() => void prepareProfile()}
-                  disabled={busy || recording}
-                >
-                  Prepare profile
-                </Button>
-                <Button
                   variant="contained"
                   onClick={() => void setupScenes()}
                   disabled={busy || recording}
@@ -490,6 +482,13 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
               <Typography variant="caption" color="text.secondary">
                 Current OBS profile: {state.currentProfileName ?? "unknown"} | Current output:{" "}
                 {state.recordDirectory ?? "unknown"}
+              </Typography>
+              <Typography
+                variant="caption"
+                color={recordingFpsMismatch ? "warning.main" : "text.secondary"}
+              >
+                Capture frame rate: {configuredFps ? `${configuredFps} fps` : "unknown"}
+                {recordingFpsMismatch ? " (Labatar requires 60 fps)" : ""}
               </Typography>
               <Typography variant="caption" color="warning.main">
                 Applying the setup manages the Labatar scene collection and removes extra scenes,
@@ -504,7 +503,13 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
               {!expectedProfileMissing && activeProfileMismatch && (
                 <Alert severity="warning">
                   OBS is using &quot;{state.currentProfileName}&quot; instead of expected profile{" "}
-                  &quot;{expectedProfileName}&quot;. Use Prepare profile to switch.
+                  &quot;{expectedProfileName}&quot;. Apply the Labatar OBS setup to switch.
+                </Alert>
+              )}
+              {recordingFpsMismatch && (
+                <Alert severity="warning">
+                  This profile is not configured for 60 fps. Apply the Labatar OBS setup before
+                  recording analysis clips.
                 </Alert>
               )}
               {state.currentSceneCollectionName === "Labatar" && (

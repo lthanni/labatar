@@ -29,6 +29,15 @@ export type ObsRecordingState = {
   startedAt: string | null;
 };
 
+export type ObsVideoSettings = {
+  fpsNumerator: number | null;
+  fpsDenominator: number | null;
+  baseWidth: number | null;
+  baseHeight: number | null;
+  outputWidth: number | null;
+  outputHeight: number | null;
+};
+
 export type ObsState = {
   status: ObsConnectionStatus;
   host: string;
@@ -41,6 +50,7 @@ export type ObsState = {
   currentSceneCollectionName: string | null;
   currentSceneName: string | null;
   recordDirectory: string | null;
+  videoSettings: ObsVideoSettings | null;
   automation: ObsAutomationState;
   recording: ObsRecordingState;
 };

@@ -33,12 +33,12 @@ import "ag-grid-community/styles/ag-theme-quartz.css";
 import { AvatarGrid, type ReplayRow } from "./AvatarGrid";
 import type { AnalysisSummary } from "./AnalyticsSection";
 import { useCallback } from "react";
-import { OverlaySurface, VisualOverlay } from "./Overlay";
 import { ObsRecordingPanel } from "./ObsRecordingPanel";
 import { RecordingViewer } from "./RecordingViewer";
 import { TechSection } from "./TechSection";
 import type { ObsSettings, ObsState, RecordingMetadata } from "./obs-types";
 import type { RecordedVideo, RecordingTags } from "./recording-types";
+import type { RecordingAnalysis } from "./recording-analysis-types";
 import { techSelectComboEvent, techSelectRecordingEvent } from "./tech-types";
 
 declare global {
@@ -123,38 +123,12 @@ declare global {
         }) => Promise<RecordedVideo>;
         renameRecording: (request: { recordingId: string; name: string }) => Promise<RecordedVideo>;
         setTags: (request: { recordingId: string; tags: RecordingTags }) => Promise<RecordedVideo>;
+        saveAnalysis: (request: {
+          recordingId: string;
+          analysis: RecordingAnalysis;
+        }) => Promise<RecordedVideo>;
         deleteRecording: (request: { recordingId: string }) => Promise<{ id: string }>;
         startDrag: (request: { recordingId: string }) => void;
-      };
-      overlay: {
-        show: () => Promise<void>;
-        hide: () => Promise<void>;
-        isVisible: () => Promise<boolean>;
-        setFocusMode: (enabled: boolean) => Promise<boolean>;
-        getCaptureSource: () => Promise<{
-          id: string;
-          mode?: "game-window" | "unavailable";
-          name?: string;
-        } | null>;
-        getCaptureFolder: () => Promise<string>;
-        openCaptureFolder: () => Promise<string>;
-        finalizeCapture: () => Promise<boolean>;
-        beginCapture: () => Promise<boolean>;
-        onCaptureFinalize: (listener: () => void) => () => void;
-        onCaptureBegin: (listener: () => void) => () => void;
-        saveCaptureScreenshot: (request: {
-          sessionId: string;
-          filename: string;
-          data: Uint8Array;
-        }) => Promise<{ path: string }>;
-        saveCaptureVideo: (request: {
-          sessionId: string;
-          data: Uint8Array;
-        }) => Promise<{ path: string }>;
-        saveCaptureSession: (request: {
-          sessionId: string;
-          manifest: unknown;
-        }) => Promise<{ path: string }>;
       };
     };
   }
@@ -650,25 +624,23 @@ function App() {
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [recordingsRefreshToken, setRecordingsRefreshToken] = useState(0);
-  const techTabIndex = developerTabsAvailable ? 3 : 1;
+  const techTabIndex = 2;
   const [tab, setTab] = useState(() => {
     const savedTab = Number(localStorage.getItem("avatar-app-last-tab"));
-    const availableTabs = developerTabsAvailable ? [0, 1, 2, techTabIndex] : [0, techTabIndex];
+    const availableTabs = developerTabsAvailable ? [0, 1, techTabIndex] : [0];
     return availableTabs.includes(savedTab) ? savedTab : 0;
   });
   const [mountedTabs, setMountedTabs] = useState(() => ({
     replay: tab === 0,
     recording: developerTabsAvailable && tab === 1,
-    overlay: developerTabsAvailable && tab === 2,
     tech: tab === techTabIndex,
   }));
   const changeTab = (nextTab: number) => {
-    if (nextTab !== techTabIndex && nextTab > 0 && !developerTabsAvailable) return;
+    if (!developerTabsAvailable && nextTab !== 0) return;
     setTab(nextTab);
     setMountedTabs((current) => ({
       replay: current.replay || nextTab === 0,
       recording: developerTabsAvailable && (current.recording || nextTab === 1),
-      overlay: developerTabsAvailable && (current.overlay || nextTab === 2),
       tech: current.tech || nextTab === techTabIndex,
     }));
     localStorage.setItem("avatar-app-last-tab", String(nextTab));
@@ -702,8 +674,7 @@ function App() {
         <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)}>
           <Tab label="Match history" />
           {developerTabsAvailable && <Tab label="Recordings" />}
-          {developerTabsAvailable && <Tab label="Visual overlay" />}
-          <Tab label="Tech" />
+          {developerTabsAvailable && <Tab label="Tech" />}
         </Tabs>
         {appVersion && (
           <Typography variant="caption" color="text.secondary">
@@ -735,12 +706,7 @@ function App() {
           </Stack>
         </Box>
       )}
-      {developerTabsAvailable && mountedTabs.overlay && (
-        <Box sx={{ display: tab === 2 ? "block" : "none" }}>
-          <VisualOverlay />
-        </Box>
-      )}
-      {mountedTabs.tech && (
+      {developerTabsAvailable && mountedTabs.tech && (
         <Box sx={{ display: tab === techTabIndex ? "block" : "none" }}>
           <TechSection />
         </Box>
@@ -753,10 +719,7 @@ if (!root) {
   throw new Error("Root element not found");
 }
 
-const overlayAvailable = Boolean(window.electronAPI?.overlay);
-const developerTabsAvailable = overlayAvailable && import.meta.env.DEV;
-const isOverlay = overlayAvailable && new URLSearchParams(window.location.search).has("overlay");
-if (isOverlay) document.documentElement.classList.add("overlay-mode");
+const developerTabsAvailable = import.meta.env.DEV;
 createRoot(root).render(
   <StrictMode>
     <ThemeProvider theme={darkTheme}>
@@ -767,18 +730,14 @@ createRoot(root).render(
           width: "100%",
           boxSizing: "border-box",
           overflowX: "hidden",
-          overflowY: isOverlay ? "hidden" : "auto",
-          p: isOverlay ? 0 : 2,
-          backgroundColor: isOverlay ? "transparent" : "background.default",
+          overflowY: "auto",
+          p: 2,
+          backgroundColor: "background.default",
         }}
       >
-        {isOverlay ? (
-          <OverlaySurface />
-        ) : (
-          <AgGridProvider modules={agGridModules}>
-            <App />
-          </AgGridProvider>
-        )}
+        <AgGridProvider modules={agGridModules}>
+          <App />
+        </AgGridProvider>
       </Box>
     </ThemeProvider>
   </StrictMode>,

@@ -1,4 +1,5 @@
 import type { RecordingMetadata } from "./obs-types";
+import type { RecordingAnalysis } from "./recording-analysis-types";
 
 export type RecordingTagCategory = "match" | "lab" | "combo" | "pressure";
 export type RecordingTagSubtag = "ranked" | "casual" | "practice" | "new-combos" | "new-pressure";
@@ -16,6 +17,17 @@ export type RecordingClipMetadata = {
   startTime: number;
   endTime: number;
   createdAt: string | null;
+};
+
+export type RecordingCaptureMetadata = {
+  fpsNumerator: number | null;
+  fpsDenominator: number | null;
+  sourceWidth: number | null;
+  sourceHeight: number | null;
+  outputWidth: number | null;
+  outputHeight: number | null;
+  outputNormalized: boolean;
+  normalization: "even-output-dimensions" | null;
 };
 
 export type RecordedGame = {
@@ -40,6 +52,7 @@ export type RecordedVideo = {
   modifiedAt: number;
   metadata: RecordingMetadata | null;
   tags: RecordingTags;
+  analysis: RecordingAnalysis | null;
   games: RecordedGame[];
   replays: Array<{
     matchId: string | null;
@@ -50,4 +63,5 @@ export type RecordedVideo = {
   replayPath: string | null;
   replayFileName: string | null;
   clip: RecordingClipMetadata | null;
+  capture?: RecordingCaptureMetadata | null;
 };

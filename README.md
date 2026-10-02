@@ -49,7 +49,7 @@ pnpm run build
 pnpm run electron:build
 ```
 
-The production build disables the visual overlay and packages a Windows NSIS installer in `release/`.
+The production build packages the recording-analysis workflow and a Windows NSIS installer in `release/`.
 
 ## Publishing a release
 

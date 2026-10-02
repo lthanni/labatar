@@ -60,17 +60,6 @@ html,
   overflow: hidden;
 }
 
-.overlay-mode,
-.overlay-mode body,
-.overlay-mode #app {
-  background: transparent !important;
-  border: 0 !important;
-}
-
-.overlay-mode #app {
-  min-height: 100vh;
-}
-
 h1,
 h2 {
   font-family: var(--heading);

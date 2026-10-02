@@ -4,11 +4,14 @@ export type TechResourceCosts = {
   [resource: string]: number;
 };
 
+export type TechRekkaFollowupPattern = "directional-button";
+
 export type TechMove = {
   id: string;
   character: string;
   input: string;
   isRekka: boolean;
+  rekkaFollowupPattern: TechRekkaFollowupPattern | null;
   dependsOnMoveId: string | null;
   rekkaMinimumDuration: number | null;
   startup: number | null;

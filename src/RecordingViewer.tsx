@@ -13,6 +13,7 @@ import {
   FormControlLabel,
   IconButton,
   InputLabel,
+  LinearProgress,
   List,
   ListItemButton,
   ListItemText,
@@ -31,6 +32,14 @@ import {
   Typography,
 } from "@mui/material";
 import type { RecordedVideo, RecordingTagCategory, RecordingTags } from "./recording-types";
+import type {
+  RecordingAnalysisDiagnosticFrame,
+  RecordingAnalysisState,
+  RecordingAnalysisStateOverride,
+} from "./recording-analysis-types";
+import { applyManualInputStateOverrides, stateOverrideForEvent } from "./recording-analysis-state";
+import { processRecording, type RecordingProcessorProgress } from "./recording-processor";
+import { readDetectorConfig, type DetectorConfig } from "./detector-config";
 import {
   techCatalogStorageKey,
   techCatalogUpdatedEvent,
@@ -39,7 +48,14 @@ import {
   techSelectedComboStorageKey,
   techSelectedRecordingStorageKey,
 } from "./tech-types";
-import type { TechCatalog, TechCombo } from "./tech-types";
+import type { TechCatalog, TechCombo, TechMove } from "./tech-types";
+import {
+  isDirectionalButtonFollowup,
+  moveNotationsMatch,
+  normalizeMoveNotation,
+} from "./move-notation";
+import { inputButtonDisplayColors, inputButtonSlotRatios } from "./input-display-config";
+import { buildRecordingDisplayRows, descendantClipRanges } from "./recording-hierarchy";
 
 function readTechCatalog(): TechCatalog {
   try {
@@ -69,10 +85,161 @@ function formatVideoTime(seconds: number) {
   return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
-const FRAME_STEP_SECONDS = 1 / 60;
+function formatParsedInputRoute(
+  inputEvents: NonNullable<RecordedVideo["analysis"]>["inputEvents"],
+  catalog: TechCatalog,
+) {
+  if (!inputEvents || inputEvents.length === 0) return [];
+  const moves: TechMove[] = Object.values(catalog).flatMap((data) => data.moves ?? []);
+  const route: string[] = [];
+  let activeRekkaParent: TechMove | null = null;
+
+  for (const event of inputEvents) {
+    const matchingMoves = moves.filter((move) => moveNotationsMatch(move.input, event.notation));
+    const rekkaParent = matchingMoves.find(
+      (move) => move.rekkaFollowupPattern === "directional-button",
+    );
+    if (rekkaParent) {
+      route.push(normalizeMoveNotation(rekkaParent.input) ?? event.notation);
+      activeRekkaParent = rekkaParent;
+      continue;
+    }
+    const followupMove = matchingMoves.find(
+      (move) => move.dependsOnMoveId === activeRekkaParent?.id,
+    );
+    if (
+      activeRekkaParent &&
+      isDirectionalButtonFollowup(event.notation) &&
+      (activeRekkaParent.rekkaFollowupPattern === "directional-button" || followupMove)
+    ) {
+      const notation =
+        normalizeMoveNotation(followupMove?.input ?? event.notation) ?? event.notation;
+      route[route.length - 1] = `${route.at(-1) ?? ""}~${notation}`;
+      continue;
+    }
+    route.push(event.notation);
+    activeRekkaParent = null;
+  }
+  return route;
+}
+
+const FRAME_RATE = 60;
+const FRAME_SEEK_TIMEOUT_MS = 2000;
+const FRAME_STEP_QUEUE_LIMIT = 60;
 const PLAYBACK_POSITIONS_STORAGE_KEY = "labatar-recording-playback-positions";
 const MINIMUM_SAVED_POSITION_SECONDS = 5;
+const DETECTOR_CONFIG_STORAGE_KEY = "avatar-overlay-config";
 const emptyRecordingTags: RecordingTags = { match: [], lab: [], combo: false, pressure: false };
+
+type FrameStepTrigger = {
+  key: string;
+  repeat: boolean;
+};
+
+function frameIndexForTime(time: number) {
+  return Math.max(0, Math.round(time * FRAME_RATE));
+}
+
+function seekVideoToTime(video: HTMLVideoElement, targetTime: number) {
+  if (!video.seeking && Math.abs(video.currentTime - targetTime) < 0.0001) {
+    return Promise.resolve(video.currentTime);
+  }
+
+  return new Promise<number>((resolve, reject) => {
+    let timeoutId: number | undefined;
+    const cleanup = () => {
+      video.removeEventListener("seeked", handleSeeked);
+      video.removeEventListener("error", handleError);
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    };
+    const handleSeeked = () => {
+      cleanup();
+      resolve(video.currentTime);
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error("The video seek failed."));
+    };
+
+    video.addEventListener("seeked", handleSeeked, { once: true });
+    video.addEventListener("error", handleError, { once: true });
+    timeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("The video seek timed out."));
+    }, FRAME_SEEK_TIMEOUT_MS);
+
+    try {
+      video.currentTime = targetTime;
+      if (!video.seeking && Math.abs(video.currentTime - targetTime) < 0.0001) {
+        handleSeeked();
+      }
+    } catch (error) {
+      cleanup();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
+const calibrationGroups: Array<{
+  title: string;
+  fields: Array<{ key: keyof DetectorConfig; label: string; step?: number }>;
+}> = [
+  {
+    title: "Input capture and segments",
+    fields: [
+      { key: "inputSourceX", label: "Input X" },
+      { key: "inputSourceY", label: "Input Y" },
+      { key: "inputSourceWidth", label: "Input width" },
+      { key: "inputSourceHeight", label: "Input height" },
+      { key: "inputSegmentCount", label: "Segments", step: 1 },
+      { key: "inputSegmentTop", label: "Segment top %" },
+      { key: "inputSegmentHeight", label: "Segment height %" },
+    ],
+  },
+  {
+    title: "Input control positions",
+    fields: [
+      { key: "inputJoystickCenterX", label: "Joystick X %" },
+      { key: "inputJoystickRegionEndX", label: "Joystick end %" },
+      { key: "inputButtonStartX", label: "Button start X %" },
+      { key: "inputButtonStartY", label: "Button start Y %" },
+      { key: "inputButtonSpacingX", label: "Button spacing X %" },
+      { key: "inputButtonSecondaryOffsetX", label: "Secondary offset X %" },
+      { key: "inputButtonSecondaryOffsetY", label: "Secondary offset Y %" },
+      { key: "inputButtonRegionRadius", label: "Button radius %" },
+    ],
+  },
+  {
+    title: "Input number reading",
+    fields: [
+      { key: "inputNumberStartX", label: "Number start X %" },
+      { key: "inputNumberEndX", label: "Number end X %" },
+      { key: "inputNumberTop", label: "Number top %" },
+      { key: "inputNumberHeight", label: "Number height %" },
+      { key: "inputNumberDigit1X", label: "Digit 1 X %" },
+      { key: "inputNumberDigitWidth", label: "Digit width %" },
+      { key: "inputNumberDigitGap", label: "Digit gap %" },
+      { key: "inputNumberDigitTop", label: "Digit top %" },
+      { key: "inputNumberDigitHeight", label: "Digit height %" },
+    ],
+  },
+  {
+    title: "Framebar regions and scanlines",
+    fields: [
+      { key: "player1SourceX", label: "P1 X" },
+      { key: "player1SourceY", label: "P1 Y" },
+      { key: "sourceX", label: "P2 X" },
+      { key: "sourceY", label: "P2 Y" },
+      { key: "framebarSourceWidth", label: "Framebar width" },
+      { key: "framebarSourceHeight", label: "Framebar height" },
+      { key: "sampleStartOffset", label: "Sample X offset", step: 1 },
+      { key: "sampleSpacing", label: "Sample X spacing", step: 1 },
+      { key: "baseSampleOffset", label: "Base scanline Y", step: 1 },
+      { key: "yellowSampleOffset", label: "Yellow scanline Y", step: 1 },
+      { key: "sampleCount", label: "Sample count", step: 1 },
+    ],
+  },
+];
 const recordingTagCategories: Array<{
   key: RecordingTagCategory;
   label: string;
@@ -143,6 +310,51 @@ const currentPositionMarkerSx = {
   },
 };
 
+function debugFramebarColor(state: string | undefined) {
+  if (state === "idle") return "#00ccff";
+  if (state === "hitpause") return "#ff66ff";
+  if (state === "active") return "#ff0066";
+  return "#ffffff";
+}
+
+function debugRegionsFromConfig(config: DetectorConfig, width: number, height: number) {
+  const framebarWidth = Math.max(1, (width * config.framebarSourceWidth) / 100);
+  const framebarHeight = Math.max(1, (height * config.framebarSourceHeight) / 100);
+  return {
+    input: {
+      x: config.inputSourceX,
+      y: config.inputSourceY,
+      width: config.inputSourceWidth,
+      height: config.inputSourceHeight,
+    },
+    inputSegments: {
+      count: config.inputSegmentCount,
+      top: config.inputSegmentTop,
+      height: config.inputSegmentHeight,
+      joystickRegionEnd: config.inputJoystickRegionEndX,
+    },
+    player1Framebar: {
+      x: config.player1SourceX,
+      y: config.player1SourceY,
+      width: config.framebarSourceWidth,
+      height: config.framebarSourceHeight,
+    },
+    player2Framebar: {
+      x: config.sourceX,
+      y: config.sourceY,
+      width: config.framebarSourceWidth,
+      height: config.framebarSourceHeight,
+    },
+    framebarSamples: {
+      count: config.sampleCount,
+      start: (config.sampleStartOffset / framebarWidth) * 100,
+      spacing: (config.sampleSpacing / framebarWidth) * 100,
+      baseY: (config.baseSampleOffset / framebarHeight) * 100,
+      yellowY: (config.yellowSampleOffset / framebarHeight) * 100,
+    },
+  };
+}
+
 export function RecordingViewer({
   active = true,
   refreshToken = 0,
@@ -182,9 +394,23 @@ export function RecordingViewer({
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [tagError, setTagError] = useState<string | null>(null);
   const [updatingTagsId, setUpdatingTagsId] = useState<string | null>(null);
+  const [processingRecordingId, setProcessingRecordingId] = useState<string | null>(null);
+  const [analysisProgress, setAnalysisProgress] = useState<RecordingProcessorProgress | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [showAnalysisDebug, setShowAnalysisDebug] = useState(false);
+  const [debugFrameIndex, setDebugFrameIndex] = useState(0);
+  const [videoContentBox, setVideoContentBox] = useState({
+    left: 0,
+    top: 0,
+    width: 0,
+    height: 0,
+  });
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoContainerRef = useRef<HTMLDivElement | null>(null);
   const focusPlayerAfterSelection = useRef(false);
   const steppingFrame = useRef(false);
+  const currentFrameIndex = useRef<number | null>(null);
+  const queuedFrameSteps = useRef<Array<1 | -1>>([]);
   const scrubbing = useRef(false);
   const restoredRecordingId = useRef<string | null>(null);
   const playbackPositions = useRef<Record<string, number>>({});
@@ -260,6 +486,11 @@ export function RecordingViewer({
     [recordings, selectedId],
   );
 
+  useEffect(() => {
+    setShowAnalysisDebug(false);
+    setDebugFrameIndex(0);
+  }, [selectedRecording?.id]);
+
   const visibleRecordings = useMemo(
     () =>
       recordings.filter(
@@ -289,38 +520,10 @@ export function RecordingViewer({
     [selectedTagFilters, visibleRecordings],
   );
 
-  const displayedRecordings = useMemo(() => {
-    const ungrouped = tagFilteredRecordings.map((recording) => ({ recording, nested: false }));
-    if (!showFullRecordings || !showClips) return ungrouped;
-
-    const clipsBySource = new Map<string, RecordedVideo[]>();
-    for (const recording of tagFilteredRecordings) {
-      const sourceId = recording.clip?.sourceRecordingId;
-      if (!sourceId) continue;
-      const sourceClips = clipsBySource.get(sourceId) ?? [];
-      sourceClips.push(recording);
-      clipsBySource.set(sourceId, sourceClips);
-    }
-
-    const grouped: Array<{ recording: RecordedVideo; nested: boolean }> = [];
-    const nestedIds = new Set<string>();
-    for (const recording of tagFilteredRecordings) {
-      if (recording.clip) continue;
-      grouped.push({ recording, nested: false });
-      for (const clip of clipsBySource.get(recording.id) ?? []) {
-        grouped.push({ recording: clip, nested: true });
-        nestedIds.add(clip.id);
-      }
-    }
-
-    // Keep clips whose original is unavailable visible at the bottom of the list.
-    for (const recording of tagFilteredRecordings) {
-      if (recording.clip && !nestedIds.has(recording.id)) {
-        grouped.push({ recording, nested: false });
-      }
-    }
-    return grouped;
-  }, [showClips, showFullRecordings, tagFilteredRecordings]);
+  const displayedRecordings = useMemo(
+    () => buildRecordingDisplayRows(tagFilteredRecordings, showFullRecordings, showClips),
+    [showClips, showFullRecordings, tagFilteredRecordings],
+  );
 
   const selectRecording = useCallback(
     (recordingId: string) => {
@@ -333,6 +536,7 @@ export function RecordingViewer({
       setRenameError(null);
       setIsPlaying(false);
       setCurrentTime(0);
+      currentFrameIndex.current = 0;
       setDuration(0);
       setClipRange([0, 0]);
       setClipMode(false);
@@ -492,6 +696,79 @@ export function RecordingViewer({
     [selectedRecording],
   );
 
+  const processSelectedRecording = useCallback(async () => {
+    if (!window.electronAPI?.recordings || !selectedRecording) return;
+    setProcessingRecordingId(selectedRecording.id);
+    setAnalysisProgress(null);
+    setAnalysisError(null);
+    try {
+      const analysis = await processRecording(
+        selectedRecording.url,
+        setAnalysisProgress,
+        videoRef.current ?? undefined,
+      );
+      const analysisWithOverrides = applyManualInputStateOverrides(
+        analysis,
+        selectedRecording.analysis?.stateOverrides ?? [],
+      );
+      const updated = await window.electronAPI.recordings.saveAnalysis({
+        recordingId: selectedRecording.id,
+        analysis: analysisWithOverrides,
+      });
+      setRecordings((current) =>
+        current.map((recording) => (recording.id === updated.id ? updated : recording)),
+      );
+    } catch (processingError) {
+      setAnalysisError(
+        processingError instanceof Error ? processingError.message : String(processingError),
+      );
+    } finally {
+      setProcessingRecordingId(null);
+      setAnalysisProgress(null);
+    }
+  }, [selectedRecording]);
+
+  const updateInputStateOverride = useCallback(
+    async (inputEventId: string, state: RecordingAnalysisState | null) => {
+      if (!window.electronAPI?.recordings || !selectedRecording?.analysis) return;
+      const event = selectedRecording.analysis.inputEvents?.find(
+        (candidate) => candidate.id === inputEventId,
+      );
+      if (!event) return;
+
+      const existingOverrides = selectedRecording.analysis.stateOverrides ?? [];
+      const nextOverrides: RecordingAnalysisStateOverride[] = existingOverrides.filter(
+        (override) => override.inputEventId !== inputEventId,
+      );
+      if (state) {
+        nextOverrides.push({
+          inputEventId,
+          state,
+          notation: event.notation,
+          occurrence: event.occurrence,
+          time: event.time,
+        });
+      }
+
+      setAnalysisError(null);
+      try {
+        const analysis = applyManualInputStateOverrides(selectedRecording.analysis, nextOverrides);
+        const updated = await window.electronAPI.recordings.saveAnalysis({
+          recordingId: selectedRecording.id,
+          analysis,
+        });
+        setRecordings((current) =>
+          current.map((recording) => (recording.id === updated.id ? updated : recording)),
+        );
+      } catch (overrideError) {
+        setAnalysisError(
+          overrideError instanceof Error ? overrideError.message : String(overrideError),
+        );
+      }
+    },
+    [selectedRecording],
+  );
+
   const requestDelete = useCallback((recording: RecordedVideo) => {
     setContextMenu(null);
     setDeleteError(null);
@@ -575,26 +852,11 @@ export function RecordingViewer({
     window.dispatchEvent(new CustomEvent(techSelectComboEvent, { detail: combo.id }));
   };
 
-  const clippedRegions = useMemo(() => {
-    if (!selectedRecording || linkedClips.length === 0 || !Number.isFinite(duration)) return [];
-    const ranges = linkedClips
-      .map(
-        (clip) =>
-          [
-            Math.max(0, Math.min(duration, clip.clip?.startTime ?? 0)),
-            Math.max(0, Math.min(duration, clip.clip?.endTime ?? 0)),
-          ] as const,
-      )
-      .filter(([start, end]) => end > start)
-      .sort(([left], [right]) => left - right);
-    const merged: Array<[number, number]> = [];
-    for (const [start, end] of ranges) {
-      const previous = merged[merged.length - 1];
-      if (previous && start <= previous[1]) previous[1] = Math.max(previous[1], end);
-      else merged.push([start, end]);
-    }
-    return merged;
-  }, [duration, linkedClips, selectedRecording]);
+  const clippedRegions = useMemo(
+    () =>
+      selectedRecording ? descendantClipRanges(recordings, selectedRecording.id, duration) : [],
+    [duration, recordings, selectedRecording],
+  );
 
   const clippedTimelineBackground = useMemo(() => {
     if (!duration || clippedRegions.length === 0) return undefined;
@@ -619,10 +881,14 @@ export function RecordingViewer({
     if (video.paused) {
       if (clipMode && video.currentTime >= clipRange[1]) {
         video.currentTime = clipRange[0];
+        currentFrameIndex.current = frameIndexForTime(clipRange[0]);
         setCurrentTime(clipRange[0]);
       }
       void video.play();
-    } else video.pause();
+    } else {
+      currentFrameIndex.current = frameIndexForTime(video.currentTime);
+      video.pause();
+    }
   }, [clipMode, clipRange]);
 
   const seekTo = useCallback(
@@ -630,6 +896,7 @@ export function RecordingViewer({
       const video = videoRef.current;
       if (!video) return;
       video.currentTime = nextTime;
+      currentFrameIndex.current = frameIndexForTime(nextTime);
       setCurrentTime(nextTime);
       if (selectedRecording) {
         savePlaybackPosition(selectedRecording.id, nextTime);
@@ -638,52 +905,213 @@ export function RecordingViewer({
     [savePlaybackPosition, selectedRecording],
   );
 
-  const stepFrame = useCallback(async (direction: 1 | -1) => {
+  const debugFrames = selectedRecording?.analysis?.diagnostics ?? [];
+  const inputEvents = selectedRecording?.analysis?.inputEvents ?? [];
+  const parsedInputRoute = formatParsedInputRoute(inputEvents, techCatalog);
+  const debugFrame: RecordingAnalysisDiagnosticFrame | null = debugFrames[debugFrameIndex] ?? null;
+  const analysisConfig = selectedRecording?.analysis?.detectorConfig ?? null;
+  const [calibrationConfig, setCalibrationConfig] = useState<DetectorConfig | null>(null);
+  useEffect(() => {
+    const currentConfig = readDetectorConfig();
+    setCalibrationConfig(analysisConfig ? { ...currentConfig, ...analysisConfig } : currentConfig);
+  }, [selectedRecording?.id, analysisConfig]);
+  const debugConfig = calibrationConfig ?? analysisConfig;
+  const debugRegions = debugConfig
+    ? debugRegionsFromConfig(
+        debugConfig,
+        selectedRecording?.analysis?.sourceWidth ?? 2560,
+        selectedRecording?.analysis?.sourceHeight ?? 1440,
+      )
+    : (selectedRecording?.analysis?.detectorRegions ?? null);
+  const analysisDebugReady = Boolean(
+    debugFrame &&
+    debugRegions?.inputSegments &&
+    debugRegions.framebarSamples &&
+    Array.isArray(debugFrame.player1States),
+  );
+
+  const updateCalibration = useCallback((key: keyof DetectorConfig, value: string) => {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return;
+    setCalibrationConfig((current) => {
+      const next = { ...(current ?? readDetectorConfig()), [key]: numericValue };
+      localStorage.setItem(DETECTOR_CONFIG_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const updateVideoContentBox = useCallback(() => {
     const video = videoRef.current;
-    if (!video || !Number.isFinite(video.duration) || steppingFrame.current) return;
-    steppingFrame.current = true;
-    const startingTime = video.currentTime;
+    const container = videoContainerRef.current;
+    if (!video || !container) return;
+    const videoWidth = video.videoWidth || 16;
+    const videoHeight = video.videoHeight || 9;
+    const containerRect = container.getBoundingClientRect();
+    const videoRect = video.getBoundingClientRect();
+    const elementWidth = videoRect.width || container.clientWidth;
+    const elementHeight = videoRect.height || container.clientHeight;
+    if (!elementWidth || !elementHeight) return;
+    const scale = Math.min(elementWidth / videoWidth, elementHeight / videoHeight);
+    const width = videoWidth * scale;
+    const height = videoHeight * scale;
+    setVideoContentBox({
+      left: videoRect.left - containerRect.left + (elementWidth - width) / 2,
+      top: videoRect.top - containerRect.top + (elementHeight - height) / 2,
+      width,
+      height,
+    });
+  }, []);
+
+  useEffect(() => {
+    const container = videoContainerRef.current;
+    if (!container) return;
+    const observer = new ResizeObserver(updateVideoContentBox);
+    observer.observe(container);
+    updateVideoContentBox();
+    return () => observer.disconnect();
+  }, [selectedRecording?.id, updateVideoContentBox]);
+
+  useEffect(() => {
+    if (!showAnalysisDebug || !debugFrame) return;
+    const video = videoRef.current;
+    if (!video) return;
     video.pause();
-    const wasMuted = video.muted;
-    video.muted = true;
-    try {
-      if (direction < 0) {
-        video.currentTime = Math.max(0, startingTime - FRAME_STEP_SECONDS);
+    video.currentTime = debugFrame.time;
+    currentFrameIndex.current = frameIndexForTime(debugFrame.time);
+    setCurrentTime(debugFrame.time);
+  }, [debugFrame, showAnalysisDebug]);
+
+  const exportAnalysisDiagnostics = useCallback(() => {
+    if (!selectedRecording?.analysis) return;
+    const blob = new Blob([JSON.stringify(selectedRecording.analysis, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${selectedRecording.name.replace(/\.[^.]+$/, "")}-analysis.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, [selectedRecording]);
+
+  const stepFrame = useCallback(async (direction: 1 | -1, trigger: FrameStepTrigger) => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(video.duration)) return;
+    if (steppingFrame.current) {
+      if (queuedFrameSteps.current.length < FRAME_STEP_QUEUE_LIMIT) {
+        queuedFrameSteps.current.push(direction);
+        console.debug("[RecordingViewer] frame-step queued", {
+          direction,
+          key: trigger.key,
+          queueLength: queuedFrameSteps.current.length,
+        });
       } else {
-        const videoWithFrameCallback = video as HTMLVideoElement & {
-          requestVideoFrameCallback?: (
-            callback: (now: number, metadata: { mediaTime: number }) => void,
-          ) => number;
-        };
-        if (typeof videoWithFrameCallback.requestVideoFrameCallback === "function") {
-          const nextFrame = new Promise<number>((resolve) => {
-            videoWithFrameCallback.requestVideoFrameCallback?.call(
-              videoWithFrameCallback,
-              (_, metadata) => resolve(metadata.mediaTime),
-            );
-          });
-          await video.play();
-          const frameTime = await nextFrame;
-          video.pause();
-          video.currentTime =
-            frameTime > startingTime
-              ? frameTime
-              : Math.min(video.duration, startingTime + FRAME_STEP_SECONDS);
-        } else {
-          video.currentTime = Math.min(video.duration, startingTime + FRAME_STEP_SECONDS);
-        }
+        console.debug("[RecordingViewer] frame-step queue-full", {
+          direction,
+          key: trigger.key,
+          queueLength: queuedFrameSteps.current.length,
+        });
       }
-      setCurrentTime(video.currentTime);
-    } catch {
+      return;
+    }
+    steppingFrame.current = true;
+    const stepStartedAt = performance.now();
+    const startingTime = video.currentTime;
+    const durationFrame = frameIndexForTime(video.duration);
+    const trackedFrame = currentFrameIndex.current;
+    const startingFrame = Math.min(
+      durationFrame,
+      trackedFrame == null ? frameIndexForTime(startingTime) : trackedFrame,
+    );
+    const targetFrame = Math.min(durationFrame, Math.max(0, startingFrame + direction));
+    const targetTime = Math.min(video.duration, targetFrame / FRAME_RATE);
+    const startingQuality = video.getVideoPlaybackQuality?.();
+    console.debug("[RecordingViewer] frame-step start", {
+      direction,
+      duration: video.duration,
+      key: trigger.key,
+      repeat: trigger.repeat,
+      startingTime,
+      startingFrame,
+      targetTime,
+      targetFrame,
+      readyState: video.readyState,
+      seeking: video.seeking,
+      paused: video.paused,
+      totalVideoFrames: startingQuality?.totalVideoFrames,
+      droppedVideoFrames: startingQuality?.droppedVideoFrames,
+    });
+    video.pause();
+    try {
+      console.debug("[RecordingViewer] frame-step seek", {
+        startingTime,
+        startingFrame,
+        targetTime,
+        targetFrame,
+        direction,
+        seeking: video.seeking,
+        readyState: video.readyState,
+      });
+      const settledTime = await seekVideoToTime(video, targetTime);
+      const settledFrame = Math.round(settledTime * FRAME_RATE);
+      console.debug("[RecordingViewer] frame-step seek-settled", {
+        startingTime,
+        startingFrame,
+        targetTime,
+        targetFrame,
+        settledTime,
+        settledFrame,
+        deltaFrames: targetFrame - startingFrame,
+        settledTimestampFrameDelta: settledFrame - startingFrame,
+        errorSeconds: settledTime - targetTime,
+        errorFrames: (settledTime - targetTime) * FRAME_RATE,
+        readyState: video.readyState,
+        seeking: video.seeking,
+        paused: video.paused,
+      });
+      currentFrameIndex.current = targetFrame;
+      setCurrentTime(settledTime);
+    } catch (error) {
+      console.debug("[RecordingViewer] frame-step error-fallback", {
+        direction,
+        error: error instanceof Error ? error.message : String(error),
+        startingTime,
+        startingFrame,
+        targetTime,
+        targetFrame,
+        currentTime: video.currentTime,
+        readyState: video.readyState,
+        seeking: video.seeking,
+        paused: video.paused,
+      });
       video.pause();
-      video.currentTime =
-        direction < 0
-          ? Math.max(0, startingTime - FRAME_STEP_SECONDS)
-          : Math.min(video.duration, startingTime + FRAME_STEP_SECONDS);
       setCurrentTime(video.currentTime);
     } finally {
-      video.muted = wasMuted;
       steppingFrame.current = false;
+      const endingQuality = video.getVideoPlaybackQuality?.();
+      const queuedDirection = queuedFrameSteps.current.shift();
+      console.debug("[RecordingViewer] frame-step end", {
+        direction,
+        startingTime,
+        endingTime: video.currentTime,
+        deltaSeconds: video.currentTime - startingTime,
+        deltaFrames:
+          currentFrameIndex.current != null ? currentFrameIndex.current - startingFrame : undefined,
+        timestampDeltaFrames: (video.currentTime - startingTime) * FRAME_RATE,
+        elapsedMilliseconds: performance.now() - stepStartedAt,
+        readyState: video.readyState,
+        seeking: video.seeking,
+        paused: video.paused,
+        totalVideoFrames: endingQuality?.totalVideoFrames,
+        droppedVideoFrames: endingQuality?.droppedVideoFrames,
+        droppedFramesDuringStep:
+          endingQuality && startingQuality
+            ? endingQuality.droppedVideoFrames - startingQuality.droppedVideoFrames
+            : undefined,
+      });
+      if (queuedDirection !== undefined) {
+        queueMicrotask(() => void stepFrame(queuedDirection, { key: "queued", repeat: false }));
+      }
     }
   }, []);
 
@@ -715,7 +1143,13 @@ export function RecordingViewer({
       }
       if (key !== "e" && key !== "q") return;
       event.preventDefault();
-      void stepFrame(key === "e" ? 1 : -1);
+      console.debug("[RecordingViewer] frame-step keydown", {
+        key,
+        repeat: event.repeat,
+        timeStamp: event.timeStamp,
+      });
+      if (event.repeat) return;
+      void stepFrame(key === "e" ? 1 : -1, { key, repeat: event.repeat });
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -890,13 +1324,27 @@ export function RecordingViewer({
             </Typography>
           ) : (
             <List dense disablePadding sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-              {displayedRecordings.map(({ recording, nested }) => (
+              {displayedRecordings.map(({ recording, depth }) => (
                 <ListItemButton
                   key={recording.id}
+                  component="div"
+                  role={editingRecordingId === recording.id ? undefined : "button"}
+                  tabIndex={editingRecordingId === recording.id ? -1 : 0}
                   selected={recording.id === selectedId}
                   draggable={editingRecordingId !== recording.id}
                   onClick={() => {
                     if (editingRecordingId !== recording.id) selectRecording(recording.id);
+                  }}
+                  onKeyDown={(event) => {
+                    if (
+                      editingRecordingId === recording.id ||
+                      event.target !== event.currentTarget ||
+                      (event.key !== "Enter" && event.key !== " ")
+                    ) {
+                      return;
+                    }
+                    event.preventDefault();
+                    selectRecording(recording.id);
                   }}
                   onDragStart={(event) => {
                     if (editingRecordingId === recording.id || !window.electronAPI?.recordings) {
@@ -916,18 +1364,18 @@ export function RecordingViewer({
                   }}
                   sx={{
                     alignItems: "flex-start",
-                    pl: nested ? 4.5 : 2,
+                    pl: 2 + depth * 2.5,
                     cursor: editingRecordingId === recording.id ? "default" : "grab",
                     "&:active": {
                       cursor: editingRecordingId === recording.id ? "default" : "grabbing",
                     },
-                    ...(nested
+                    ...(depth > 0
                       ? {
                           position: "relative",
                           "&::before": {
                             content: '""',
                             position: "absolute",
-                            left: 20,
+                            left: 20 + (depth - 1) * 20,
                             top: 0,
                             bottom: 0,
                             borderLeft: 1,
@@ -936,7 +1384,7 @@ export function RecordingViewer({
                           "&::after": {
                             content: '""',
                             position: "absolute",
-                            left: 20,
+                            left: 20 + (depth - 1) * 20,
                             top: "50%",
                             width: 12,
                             borderTop: 1,
@@ -1090,10 +1538,288 @@ export function RecordingViewer({
         >
           {selectedRecording ? (
             <Stack spacing={1.5}>
-              <Typography variant="subtitle1" sx={{ overflowWrap: "anywhere" }}>
-                {selectedRecording.name}
-              </Typography>
+              <Stack
+                direction={{ xs: "column", sm: "row" }}
+                spacing={1}
+                sx={{ alignItems: { sm: "center" } }}
+              >
+                <Typography variant="subtitle1" sx={{ flex: 1, overflowWrap: "anywhere" }}>
+                  {selectedRecording.name}
+                </Typography>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => void processSelectedRecording()}
+                  disabled={processingRecordingId === selectedRecording.id}
+                >
+                  {processingRecordingId === selectedRecording.id
+                    ? "Processing recording..."
+                    : "Process recording"}
+                </Button>
+              </Stack>
+              {processingRecordingId === selectedRecording.id && analysisProgress && (
+                <Stack spacing={0.5}>
+                  <LinearProgress
+                    variant="determinate"
+                    value={(analysisProgress.completed / Math.max(1, analysisProgress.total)) * 100}
+                  />
+                  <Typography variant="caption" color="text.secondary">
+                    Analyzing {formatVideoTime(analysisProgress.time)} of{" "}
+                    {formatVideoTime(analysisProgress.duration)}
+                  </Typography>
+                </Stack>
+              )}
+              {analysisError && <Alert severity="error">{analysisError}</Alert>}
+              {selectedRecording.analysis && (
+                <Stack spacing={0.5}>
+                  <Typography variant="subtitle2">
+                    Detected moves ({selectedRecording.analysis.moves.length})
+                  </Typography>
+                  {selectedRecording.analysis.warnings.map((warning) => (
+                    <Typography key={warning} variant="caption" color="warning.main">
+                      {warning}
+                    </Typography>
+                  ))}
+                  {parsedInputRoute.length > 0 && (
+                    <Paper variant="outlined" sx={{ p: 1.25, mt: 0.5 }}>
+                      <Typography variant="subtitle2">Parsed input route</Typography>
+                      <Typography variant="body2" sx={{ overflowWrap: "anywhere" }}>
+                        {parsedInputRoute.join(" → ")}
+                      </Typography>
+                      {parsedInputRoute.some((part) => part.includes("~")) && (
+                        <Typography variant="caption" color="text.secondary">
+                          ~ indicates a followup in a configured rekka sequence.
+                        </Typography>
+                      )}
+                    </Paper>
+                  )}
+                  {selectedRecording.analysis.moves.map((move) => (
+                    <Button
+                      key={move.id}
+                      variant="text"
+                      size="small"
+                      onClick={() => seekTo(move.startTime)}
+                      sx={{ justifyContent: "flex-start", overflowWrap: "anywhere" }}
+                    >
+                      {move.notation ?? "Unresolved input"} · {formatVideoTime(move.startTime)}–
+                      {formatVideoTime(move.endTime)} · startup {move.phases.startup}, active{" "}
+                      {move.phases.active}, recovery {move.phases.recovery} · blockstun{" "}
+                      {move.opponentPhases.blockstun} · on block{" "}
+                      {move.onBlock == null
+                        ? "?"
+                        : `${move.onBlock >= 0 ? "+" : ""}${move.onBlock}`}{" "}
+                      Â· hits {move.hits?.length ?? "?"} Â· hitboxes{" "}
+                      {move.hitboxStatus === "detected" ? "available" : "not analyzed"}
+                    </Button>
+                  ))}
+                  {inputEvents.length > 0 && (
+                    <Paper variant="outlined" sx={{ p: 1.25, mt: 0.5 }}>
+                      <Stack spacing={1}>
+                        <Box>
+                          <Typography variant="subtitle2">State transitions</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Inputs are treated as grounded by default. Mark the input where the
+                            character becomes airborne or grounded again; frame-meter resets do not
+                            change this state.
+                          </Typography>
+                        </Box>
+                        {inputEvents.map((inputEvent, index) => {
+                          const override = stateOverrideForEvent(
+                            selectedRecording.analysis!,
+                            inputEvent.id,
+                          );
+                          return (
+                            <Stack
+                              key={inputEvent.id}
+                              direction={{ xs: "column", sm: "row" }}
+                              spacing={1}
+                              sx={{ alignItems: { sm: "center" } }}
+                            >
+                              <Button
+                                variant="text"
+                                size="small"
+                                onClick={() => seekTo(inputEvent.time)}
+                                sx={{
+                                  justifyContent: "flex-start",
+                                  minWidth: { sm: 190 },
+                                  overflowWrap: "anywhere",
+                                }}
+                              >
+                                Input {index + 1}: {inputEvent.notation} ·{" "}
+                                {formatVideoTime(inputEvent.time)}
+                              </Button>
+                              <ToggleButtonGroup
+                                exclusive
+                                size="small"
+                                value={override?.state ?? null}
+                                onChange={(_, value: RecordingAnalysisState | null) => {
+                                  void updateInputStateOverride(inputEvent.id, value);
+                                }}
+                                aria-label={"State from input " + (index + 1)}
+                              >
+                                <ToggleButton value="airborne">Airborne from here</ToggleButton>
+                                <ToggleButton value="grounded">Grounded from here</ToggleButton>
+                              </ToggleButtonGroup>
+                              {override && (
+                                <Button
+                                  size="small"
+                                  onClick={() => void updateInputStateOverride(inputEvent.id, null)}
+                                >
+                                  Clear
+                                </Button>
+                              )}
+                            </Stack>
+                          );
+                        })}
+                      </Stack>
+                    </Paper>
+                  )}
+                  <Stack
+                    direction={{ xs: "column", sm: "row" }}
+                    spacing={1}
+                    sx={{ alignItems: "center" }}
+                  >
+                    <Button
+                      size="small"
+                      variant={showAnalysisDebug ? "contained" : "outlined"}
+                      onClick={() => setShowAnalysisDebug((current) => !current)}
+                      disabled={!analysisDebugReady}
+                    >
+                      {showAnalysisDebug ? "Hide analysis debugger" : "Show analysis debugger"}
+                    </Button>
+                    {!analysisDebugReady && (
+                      <Typography variant="caption" color="text.secondary">
+                        Reprocess this recording to generate frame diagnostics.
+                      </Typography>
+                    )}
+                  </Stack>
+                  {showAnalysisDebug && debugConfig && (
+                    <Paper component="details" variant="outlined" sx={{ p: 1.5, mt: 0.5 }}>
+                      <Typography component="summary" sx={{ cursor: "pointer", mb: 1 }}>
+                        Calibration controls
+                      </Typography>
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        component="div"
+                        sx={{ mb: 1 }}
+                      >
+                        Values are saved automatically and update the region preview immediately.
+                        Reprocess the recording after tuning to apply them to detection.
+                      </Typography>
+                      <Stack spacing={1.25}>
+                        {calibrationGroups.map((group) => (
+                          <Box key={group.title}>
+                            <Typography variant="caption" color="text.secondary">
+                              {group.title}
+                            </Typography>
+                            <Stack direction="row" spacing={1} sx={{ mt: 0.5, flexWrap: "wrap" }}>
+                              {group.fields.map(({ key, label, step }) => (
+                                <TextField
+                                  key={key}
+                                  label={label}
+                                  type="number"
+                                  size="small"
+                                  value={debugConfig[key]}
+                                  onChange={(event) => updateCalibration(key, event.target.value)}
+                                  slotProps={{ htmlInput: { min: 0, step: step ?? 0.1 } }}
+                                  sx={{ width: 132 }}
+                                />
+                              ))}
+                            </Stack>
+                          </Box>
+                        ))}
+                      </Stack>
+                    </Paper>
+                  )}
+                  {showAnalysisDebug && debugFrame && (
+                    <Paper variant="outlined" sx={{ p: 1.5, mt: 0.5 }}>
+                      <Stack spacing={1}>
+                        <Stack
+                          direction={{ xs: "column", sm: "row" }}
+                          spacing={1}
+                          sx={{ alignItems: "center" }}
+                        >
+                          <Typography variant="caption" sx={{ minWidth: 150 }}>
+                            Frame {debugFrameIndex + 1} / {debugFrames.length} ·{" "}
+                            {formatVideoTime(debugFrame.time)}
+                          </Typography>
+                          <Slider
+                            size="small"
+                            min={0}
+                            max={Math.max(0, debugFrames.length - 1)}
+                            step={1}
+                            value={debugFrameIndex}
+                            onChange={(_, value) =>
+                              setDebugFrameIndex(Array.isArray(value) ? value[0] : value)
+                            }
+                            sx={{ flex: 1, minWidth: 180 }}
+                          />
+                          <Button size="small" onClick={exportAnalysisDiagnostics}>
+                            Export JSON
+                          </Button>
+                        </Stack>
+                        <Typography variant="caption" sx={{ overflowWrap: "anywhere" }}>
+                          Input: {debugFrame.inputNotation ?? "none"}
+                          {debugFrame.inputButtons.length > 0
+                            ? " (" + debugFrame.inputButtons.join(", ") + ")"
+                            : ""}{" "}
+                          · training: {debugFrame.trainingState} (
+                          {debugFrame.trainingScore.toFixed(2)}) · framebar:{" "}
+                          {debugFrame.framebarChanged ? "changed" : "stable"} · move:{" "}
+                          {debugFrame.moveEvent ?? (debugFrame.activeMove ? "active" : "idle")}
+                        </Typography>
+                        <Typography variant="caption" sx={{ overflowWrap: "anywhere" }}>
+                          P1: {debugFrame.player1Groups || "none"}
+                        </Typography>
+                        <Typography variant="caption" sx={{ overflowWrap: "anywhere" }}>
+                          P2: {debugFrame.player2Groups || "none"}
+                        </Typography>
+                        <Typography variant="caption" sx={{ overflowWrap: "anywhere" }}>
+                          Meter P1 {debugFrame.player1Meter.score.toFixed(2)} (color{" "}
+                          {debugFrame.player1Meter.colorScore.toFixed(2)}, edges{" "}
+                          {debugFrame.player1Meter.edgeScore.toFixed(2)}) · P2{" "}
+                          {debugFrame.player2Meter.score.toFixed(2)} (color{" "}
+                          {debugFrame.player2Meter.colorScore.toFixed(2)}, edges{" "}
+                          {debugFrame.player2Meter.edgeScore.toFixed(2)})
+                        </Typography>
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ overflowWrap: "anywhere" }}
+                        >
+                          Input signature: {debugFrame.inputSignature || "none"}
+                        </Typography>
+                        {debugFrame.inputSegmentStates && (
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ overflowWrap: "anywhere" }}
+                          >
+                            Input segments (newest → oldest):{" "}
+                            {debugFrame.inputSegmentStates
+                              .map((state) => (state === "populated" ? "●" : "·"))
+                              .join(" ")}
+                          </Typography>
+                        )}
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ overflowWrap: "anywhere" }}
+                        >
+                          Calibration:{" "}
+                          {selectedRecording.analysis.detectorConfigSource ?? "unknown"}
+                          {debugConfig
+                            ? ` · input ${debugConfig.inputSourceX},${debugConfig.inputSourceY} ${debugConfig.inputSourceWidth}×${debugConfig.inputSourceHeight}% · framebar ${debugConfig.framebarSourceWidth}×${debugConfig.framebarSourceHeight}%`
+                            : " · reprocess to capture the exact calibration snapshot"}
+                        </Typography>
+                      </Stack>
+                    </Paper>
+                  )}
+                </Stack>
+              )}
               <Box
+                ref={videoContainerRef}
                 sx={{
                   position: "relative",
                   width: "100%",
@@ -1115,7 +1841,15 @@ export function RecordingViewer({
                   preload="metadata"
                   onLoadedMetadata={(event) => {
                     const video = event.currentTarget;
+                    updateVideoContentBox();
                     const nextDuration = video.duration;
+                    console.debug("[RecordingViewer] video-loaded-metadata", {
+                      duration: nextDuration,
+                      currentTime: video.currentTime,
+                      readyState: video.readyState,
+                      videoWidth: video.videoWidth,
+                      videoHeight: video.videoHeight,
+                    });
                     setDuration(nextDuration);
                     setClipRange([0, Number.isFinite(nextDuration) ? nextDuration : 0]);
                     if (restoredRecordingId.current !== selectedRecording.id) {
@@ -1130,17 +1864,43 @@ export function RecordingViewer({
                         video.currentTime = Math.min(savedTime, nextDuration);
                       }
                     }
+                    currentFrameIndex.current = frameIndexForTime(video.currentTime);
                     setCurrentTime(video.currentTime);
+                  }}
+                  onSeeking={(event) => {
+                    const video = event.currentTarget;
+                    console.debug("[RecordingViewer] video-seeking", {
+                      currentTime: video.currentTime,
+                      readyState: video.readyState,
+                      seeking: video.seeking,
+                      paused: video.paused,
+                    });
+                  }}
+                  onSeeked={(event) => {
+                    const video = event.currentTarget;
+                    if (!steppingFrame.current) {
+                      currentFrameIndex.current = frameIndexForTime(video.currentTime);
+                    }
+                    console.debug("[RecordingViewer] video-seeked", {
+                      currentTime: video.currentTime,
+                      readyState: video.readyState,
+                      seeking: video.seeking,
+                      paused: video.paused,
+                    });
                   }}
                   onTimeUpdate={(event) => {
                     const video = event.currentTarget;
                     const nextTime = video.currentTime;
                     if (clipMode && !video.paused && nextTime >= clipRange[1]) {
                       video.currentTime = clipRange[0];
+                      currentFrameIndex.current = frameIndexForTime(clipRange[0]);
                       setCurrentTime(clipRange[0]);
                       return;
                     }
                     if (!scrubbing.current) {
+                      if (!steppingFrame.current) {
+                        currentFrameIndex.current = frameIndexForTime(nextTime);
+                      }
                       setCurrentTime(nextTime);
                       savePlaybackPosition(selectedRecording.id, nextTime);
                     }
@@ -1150,6 +1910,7 @@ export function RecordingViewer({
                   onEnded={(event) => {
                     if (clipMode && duration > 0) {
                       event.currentTarget.currentTime = clipRange[0];
+                      currentFrameIndex.current = frameIndexForTime(clipRange[0]);
                       setCurrentTime(clipRange[0]);
                       void event.currentTarget.play();
                     } else {
@@ -1170,6 +1931,358 @@ export function RecordingViewer({
                     backgroundColor: "#000",
                   }}
                 />
+                {showAnalysisDebug &&
+                  analysisDebugReady &&
+                  debugFrame &&
+                  debugRegions &&
+                  videoContentBox.width > 0 && (
+                    <Box
+                      sx={{
+                        position: "absolute",
+                        left: videoContentBox.left,
+                        top: videoContentBox.top,
+                        width: videoContentBox.width,
+                        height: videoContentBox.height,
+                        pointerEvents: "none",
+                      }}
+                    >
+                      <Box
+                        sx={{
+                          position: "absolute",
+                          left: debugRegions.input.x + "%",
+                          top: debugRegions.input.y + "%",
+                          width: debugRegions.input.width + "%",
+                          height: debugRegions.input.height + "%",
+                          border: "2px solid #00e5ff",
+                          pointerEvents: "none",
+                        }}
+                      />
+                      {debugConfig &&
+                        Array.from(
+                          { length: Math.max(1, Math.round(debugConfig.inputSegmentCount)) },
+                          (_, visualRowIndex) => {
+                            const rowTop =
+                              debugConfig.inputSegmentTop +
+                              visualRowIndex * debugConfig.inputSegmentHeight;
+                            const rowIndex =
+                              Math.round(debugConfig.inputSegmentCount) - visualRowIndex - 1;
+                            const buttonSlots = inputButtonSlotRatios(debugConfig).map(
+                              ({ slot, ratio, yRatio }) =>
+                                [
+                                  slot,
+                                  ratio * 100,
+                                  yRatio * 100,
+                                  inputButtonDisplayColors[slot],
+                                ] as const,
+                            );
+                            return (
+                              <Box
+                                key={`input-zones-${visualRowIndex}`}
+                                sx={{ position: "absolute", inset: 0 }}
+                              >
+                                <Box
+                                  sx={{
+                                    position: "absolute",
+                                    left:
+                                      debugRegions.input.x +
+                                      (debugConfig.inputJoystickCenterX *
+                                        debugRegions.input.width) /
+                                        100 +
+                                      "%",
+                                    top:
+                                      debugRegions.input.y +
+                                      ((rowTop + debugConfig.inputSegmentHeight / 2) *
+                                        debugRegions.input.height) /
+                                        100 +
+                                      "%",
+                                    width: (36 * debugRegions.input.width) / 100 + "%",
+                                    aspectRatio: "1",
+                                    transform: "translate(-50%, -50%)",
+                                    border: "1px dotted rgba(41, 121, 255, 0.95)",
+                                    borderRadius: "50%",
+                                    boxSizing: "border-box",
+                                  }}
+                                />
+                                {buttonSlots.map(([slot, x, y, color]) => (
+                                  <Box
+                                    key={`${slot}-${rowIndex}`}
+                                    sx={{
+                                      position: "absolute",
+                                      left: `calc(${debugRegions.input.x + (x * debugRegions.input.width) / 100}% - ${(debugConfig.inputButtonRegionRadius * videoContentBox.width * debugRegions.input.width) / 10000}px)`,
+                                      top: `calc(${debugRegions.input.y + ((rowTop + (y * debugConfig.inputSegmentHeight) / 100) * debugRegions.input.height) / 100}% - ${(debugConfig.inputButtonRegionRadius * videoContentBox.width * debugRegions.input.width) / 10000}px)`,
+                                      width: `${(2 * debugConfig.inputButtonRegionRadius * debugRegions.input.width) / 100}%`,
+                                      aspectRatio: "1",
+                                      border: `1px dashed ${color}`,
+                                      borderRadius: "50%",
+                                      boxSizing: "border-box",
+                                    }}
+                                  />
+                                ))}
+                                <Box
+                                  sx={{
+                                    position: "absolute",
+                                    left:
+                                      debugRegions.input.x +
+                                      (debugConfig.inputNumberStartX * debugRegions.input.width) /
+                                        100 +
+                                      "%",
+                                    top:
+                                      debugRegions.input.y +
+                                      ((rowTop +
+                                        (debugConfig.inputNumberTop *
+                                          debugConfig.inputSegmentHeight) /
+                                          100) *
+                                        debugRegions.input.height) /
+                                        100 +
+                                      "%",
+                                    width:
+                                      ((debugConfig.inputNumberEndX -
+                                        debugConfig.inputNumberStartX) *
+                                        debugRegions.input.width) /
+                                        100 +
+                                      "%",
+                                    height:
+                                      (debugConfig.inputSegmentHeight *
+                                        (debugConfig.inputNumberHeight / 100) *
+                                        debugRegions.input.height) /
+                                        100 +
+                                      "%",
+                                    border: "2px dashed rgba(255, 64, 220, 0.95)",
+                                    backgroundColor: "rgba(255, 64, 220, 0.08)",
+                                    boxSizing: "border-box",
+                                  }}
+                                >
+                                  <Typography
+                                    component="span"
+                                    sx={{
+                                      position: "absolute",
+                                      right: 2,
+                                      bottom: 1,
+                                      px: 0.25,
+                                      color: "#ff9bea",
+                                      backgroundColor: "rgba(0, 0, 0, 0.75)",
+                                      font: "10px monospace",
+                                      lineHeight: 1.2,
+                                    }}
+                                  >
+                                    number
+                                  </Typography>
+                                  {[0, 1, 2].map((digitIndex) => (
+                                    <Box
+                                      key={`digit-zone-${rowIndex}-${digitIndex}`}
+                                      sx={{
+                                        position: "absolute",
+                                        left:
+                                          ((debugConfig.inputNumberDigit1X +
+                                            digitIndex *
+                                              (debugConfig.inputNumberDigitWidth +
+                                                debugConfig.inputNumberDigitGap) -
+                                            debugConfig.inputNumberStartX) /
+                                            (debugConfig.inputNumberEndX -
+                                              debugConfig.inputNumberStartX)) *
+                                            100 +
+                                          "%",
+                                        top:
+                                          ((debugConfig.inputNumberDigitTop -
+                                            debugConfig.inputNumberTop) /
+                                            debugConfig.inputNumberHeight) *
+                                            100 +
+                                          "%",
+                                        width:
+                                          (debugConfig.inputNumberDigitWidth /
+                                            (debugConfig.inputNumberEndX -
+                                              debugConfig.inputNumberStartX)) *
+                                            100 +
+                                          "%",
+                                        height:
+                                          (debugConfig.inputNumberDigitHeight /
+                                            debugConfig.inputNumberHeight) *
+                                            100 +
+                                          "%",
+                                        border: "1px solid rgba(255, 190, 245, 0.95)",
+                                        boxSizing: "border-box",
+                                      }}
+                                    />
+                                  ))}
+                                </Box>
+                              </Box>
+                            );
+                          },
+                        )}
+                      {Array.from(
+                        { length: Math.max(1, Math.round(debugRegions.inputSegments.count)) },
+                        (_, visualRowIndex) => {
+                          const rowTop =
+                            debugRegions.inputSegments.top +
+                            visualRowIndex * debugRegions.inputSegments.height;
+                          const rowIndex =
+                            Math.round(debugRegions.inputSegments.count) - visualRowIndex - 1;
+                          return (
+                            <Box
+                              key={`input-segment-${visualRowIndex}`}
+                              sx={{
+                                position: "absolute",
+                                left: debugRegions.input.x + "%",
+                                top:
+                                  debugRegions.input.y +
+                                  (rowTop * debugRegions.input.height) / 100 +
+                                  "%",
+                                width: debugRegions.input.width + "%",
+                                height:
+                                  (debugRegions.inputSegments.height * debugRegions.input.height) /
+                                    100 +
+                                  "%",
+                                border: "1px solid rgba(255, 255, 255, 0.55)",
+                                boxSizing: "border-box",
+                                pointerEvents: "none",
+                              }}
+                            >
+                              <Typography
+                                component="span"
+                                sx={{
+                                  position: "absolute",
+                                  left: 2,
+                                  top: 1,
+                                  px: 0.25,
+                                  color: "#fff",
+                                  backgroundColor: "rgba(0, 0, 0, 0.65)",
+                                  font: "10px monospace",
+                                  lineHeight: 1.2,
+                                }}
+                              >
+                                r{rowIndex}
+                              </Typography>
+                            </Box>
+                          );
+                        },
+                      )}
+                      <Box
+                        sx={{
+                          position: "absolute",
+                          left: debugRegions.player1Framebar.x + "%",
+                          top: debugRegions.player1Framebar.y + "%",
+                          width: debugRegions.player1Framebar.width + "%",
+                          height: debugRegions.player1Framebar.height + "%",
+                          border: "2px solid #ff4081",
+                          pointerEvents: "none",
+                        }}
+                      />
+                      <Box
+                        sx={{
+                          position: "absolute",
+                          left: debugRegions.player2Framebar.x + "%",
+                          top: debugRegions.player2Framebar.y + "%",
+                          width: debugRegions.player2Framebar.width + "%",
+                          height: debugRegions.player2Framebar.height + "%",
+                          border: "2px solid #ff9800",
+                          pointerEvents: "none",
+                        }}
+                      />
+                      {[
+                        {
+                          key: "p1",
+                          region: debugRegions.player1Framebar,
+                          states: debugFrame.player1States,
+                          yellow: debugFrame.player1Yellow,
+                        },
+                        {
+                          key: "p2",
+                          region: debugRegions.player2Framebar,
+                          states: debugFrame.player2States,
+                          yellow: debugFrame.player2Yellow,
+                        },
+                      ].map((framebar) => (
+                        <Box
+                          key={framebar.key}
+                          sx={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+                        >
+                          {Array.from(
+                            { length: Math.max(1, Math.round(debugRegions.framebarSamples.count)) },
+                            (_, sampleIndex) => {
+                              const sampleX = Math.min(
+                                100,
+                                debugRegions.framebarSamples.start +
+                                  sampleIndex * debugRegions.framebarSamples.spacing,
+                              );
+                              const state = framebar.states[sampleIndex];
+                              return (
+                                <Box key={`${framebar.key}-sample-${sampleIndex}`}>
+                                  <Box
+                                    sx={{
+                                      position: "absolute",
+                                      left:
+                                        framebar.region.x +
+                                        (sampleX * framebar.region.width) / 100 +
+                                        "%",
+                                      top:
+                                        framebar.region.y +
+                                        (debugRegions.framebarSamples.baseY *
+                                          framebar.region.height) /
+                                          100 +
+                                        "%",
+                                      width: 2,
+                                      height: 5,
+                                      backgroundColor: debugFramebarColor(state),
+                                    }}
+                                  />
+                                  <Box
+                                    sx={{
+                                      position: "absolute",
+                                      left:
+                                        framebar.region.x +
+                                        (sampleX * framebar.region.width) / 100 +
+                                        "%",
+                                      top:
+                                        framebar.region.y +
+                                        (debugRegions.framebarSamples.yellowY *
+                                          framebar.region.height) /
+                                          100 +
+                                        "%",
+                                      width: 2,
+                                      height: 3,
+                                      backgroundColor:
+                                        framebar.yellow[sampleIndex] === "Y"
+                                          ? "#ffff00"
+                                          : "#0088ff",
+                                    }}
+                                  />
+                                </Box>
+                              );
+                            },
+                          )}
+                        </Box>
+                      ))}
+                      {debugFrame.inputMarkers.map((marker, index) => (
+                        <Box
+                          key={marker.row + "-" + marker.color + "-" + index}
+                          sx={{
+                            position: "absolute",
+                            left:
+                              "calc(" +
+                              (debugRegions.input.x + marker.x * debugRegions.input.width) +
+                              "% - 4px)",
+                            top:
+                              "calc(" +
+                              (debugRegions.input.y + marker.y * debugRegions.input.height) +
+                              "% - 4px)",
+                            width: 8,
+                            height: 8,
+                            borderRadius: "50%",
+                            backgroundColor:
+                              marker.color === "cyan"
+                                ? "#00e5ff"
+                                : marker.color === "yellow"
+                                  ? "#ffeb3b"
+                                  : marker.color === "blue"
+                                    ? "#2979ff"
+                                    : "#f44336",
+                            border: "1px solid #fff",
+                            pointerEvents: "none",
+                          }}
+                        />
+                      ))}
+                    </Box>
+                  )}
                 <Button
                   variant="contained"
                   size="small"
@@ -1274,7 +2387,12 @@ export function RecordingViewer({
                       }}
                       onChangeCommitted={() => {
                         scrubbing.current = false;
-                        if (videoRef.current) setCurrentTime(videoRef.current.currentTime);
+                        if (videoRef.current) {
+                          currentFrameIndex.current = frameIndexForTime(
+                            videoRef.current.currentTime,
+                          );
+                          setCurrentTime(videoRef.current.currentTime);
+                        }
                       }}
                       sx={{
                         ...currentPositionMarkerSx,

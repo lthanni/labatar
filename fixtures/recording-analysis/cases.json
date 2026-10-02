@@ -1,0 +1,193 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "aang-gyatso-double-overhead-double-cross",
+      "source": ".dev/recordings/double-overhead double-cross.mp4",
+      "kind": "pressure",
+      "trainingMode": true,
+      "neutralLeadIn": false,
+      "performer": {
+        "side": "player1",
+        "character": "Aang",
+        "support": "Gyatso"
+      },
+      "opponent": {
+        "side": "player2",
+        "defense": "blocking"
+      },
+      "expected": {
+        "route": ["236C", "scooter-hop C", "j.2C", "j.5F", "j.B"],
+        "parserAssessment": {
+          "inputRecognition": "mostly-correct",
+          "observedInputRoute": ["236C", "2C", "5S", "5B"],
+          "resolutionProblems": [
+            {
+              "observed": "2C",
+              "expected": "j.2C",
+              "problem": "The input is correct, but the resolver needs aerial-state context to identify the jump-normal variant."
+            },
+            {
+              "observed": "5S",
+              "expected": "j.5F",
+              "problem": "The button slot is detected, but its S label is not the canonical F move label and the aerial prefix is missing."
+            },
+            {
+              "observed": "5B",
+              "expected": "j.5B",
+              "problem": "The input is correct, but the resolver needs aerial-state context to add the jump prefix."
+            }
+          ]
+        },
+        "damage": 0,
+        "hitboxesVisible": true,
+        "frameMeter": {
+          "resetsWithinSequence": true,
+          "resetCount": "at-least-one"
+        }
+      },
+      "notes": [
+        "The opponent is blocking for the entire clip, so zero damage is expected.",
+        "The route remains one pressure sequence even when a move resets the frame meter.",
+        "The current raw input route has four observed labels while the verified move route has five named moves; determine whether scooter-hop C is a distinct input event or a move/state transition before adding an inferred event.",
+        "The route labels are intentionally preserved as written until the move catalog maps them to canonical move IDs."
+      ]
+    },
+    {
+      "id": "aang-gyatso-5a-block",
+      "source": ".dev/recordings/5A block.mp4",
+      "kind": "single-move",
+      "status": "capture-only",
+      "trainingMode": true,
+      "neutralLeadIn": false,
+      "performer": {
+        "side": "player1",
+        "character": "Aang",
+        "support": "Gyatso"
+      },
+      "opponent": {
+        "side": "player2",
+        "character": "Korra",
+        "defense": "blocking"
+      },
+      "capture": {
+        "sourceRecording": "recording-2026-10-02-01-49-08.mp4",
+        "sourceStartTime": 3.94,
+        "sourceEndTime": 5.1,
+        "durationSeconds": 1.19,
+        "video": "H.264 2560x1440 60fps"
+      },
+      "expected": {
+        "route": ["5A"],
+        "damage": 0,
+        "frameData": "not-yet-verified"
+      },
+      "notes": [
+        "The clip begins with a blank framebar and ends while the move history remains visible.",
+        "The user identified the clip as blocked; exact phase boundaries remain unverified despite the 60fps source."
+      ]
+    },
+    {
+      "id": "aang-gyatso-2a-block",
+      "source": ".dev/recordings/2A block.mp4",
+      "kind": "single-move",
+      "status": "capture-only",
+      "trainingMode": true,
+      "neutralLeadIn": false,
+      "performer": {
+        "side": "player1",
+        "character": "Aang",
+        "support": "Gyatso"
+      },
+      "opponent": {
+        "side": "player2",
+        "character": "Korra",
+        "defense": "blocking"
+      },
+      "capture": {
+        "sourceRecording": "recording-2026-10-02-01-49-08.mp4",
+        "sourceStartTime": 5.57,
+        "sourceEndTime": 6.96,
+        "durationSeconds": 1.41,
+        "video": "H.264 2560x1440 60fps"
+      },
+      "expected": {
+        "route": ["2A"],
+        "damage": 0,
+        "frameData": "not-yet-verified"
+      },
+      "notes": [
+        "The clip begins with a blank framebar and ends while the move history remains visible.",
+        "The user identified the clip as blocked; exact phase boundaries remain unverified despite the 60fps source."
+      ]
+    },
+    {
+      "id": "aang-gyatso-2b-block",
+      "source": ".dev/recordings/2B block.mp4",
+      "kind": "single-move",
+      "status": "capture-only",
+      "trainingMode": true,
+      "neutralLeadIn": false,
+      "performer": {
+        "side": "player1",
+        "character": "Aang",
+        "support": "Gyatso"
+      },
+      "opponent": {
+        "side": "player2",
+        "character": "Korra",
+        "defense": "blocking"
+      },
+      "capture": {
+        "sourceRecording": "recording-2026-10-01-23-54-13.mp4",
+        "sourceStartTime": 14.87,
+        "sourceEndTime": 16.5,
+        "durationSeconds": 1.65,
+        "video": "H.264 2560x1440 30fps"
+      },
+      "expected": {
+        "route": ["2B"],
+        "damage": 0,
+        "frameData": "not-yet-verified"
+      },
+      "notes": [
+        "The clip begins with a blank framebar and ends while the move history remains visible.",
+        "The user identified the clip as blocked; exact phase boundaries remain unverified at 30fps."
+      ]
+    },
+    {
+      "id": "aang-gyatso-5b-block",
+      "source": ".dev/recordings/5B block.mp4",
+      "kind": "single-move",
+      "status": "capture-only",
+      "trainingMode": true,
+      "neutralLeadIn": false,
+      "performer": {
+        "side": "player1",
+        "character": "Aang",
+        "support": "Gyatso"
+      },
+      "opponent": {
+        "side": "player2",
+        "character": "Korra",
+        "defense": "blocking"
+      },
+      "capture": {
+        "sourceRecording": "recording-2026-10-01-23-54-13.mp4",
+        "sourceStartTime": 12.72,
+        "sourceEndTime": 14.47,
+        "durationSeconds": 1.79,
+        "video": "H.264 2560x1440 30fps"
+      },
+      "expected": {
+        "route": ["5B"],
+        "damage": 0,
+        "frameData": "not-yet-verified"
+      },
+      "notes": [
+        "The clip begins with a blank framebar and ends while the move history remains visible.",
+        "The user identified the clip as blocked; exact phase boundaries remain unverified at 30fps."
+      ]
+    }
+  ]
+}

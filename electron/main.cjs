@@ -5,10 +5,7 @@ const {
   ipcMain,
   Menu,
   protocol,
-  screen,
-  session,
   shell,
-  desktopCapturer,
   safeStorage,
 } = require("electron");
 const path = require("node:path");
@@ -26,27 +23,23 @@ const characterMap = require("./character-map.json");
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "labatar-media",
-    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true,
+    },
   },
 ]);
-let overlayWindow = null;
-let overlayMonitor = null;
-let gameDisplayId = null;
-let onlyShowWhenGameFocused = true;
-let lastGameBounds = null;
-let lastGameWindowTitle = null;
-let missedGameFocusChecks = 0;
-let overlayEnabled = false;
 let updateCheckPromise = null;
 let updateDownloadPromise = null;
 let updateMenuItem = null;
 let updateState = "idle";
 let latestUpdateInfo = null;
 let mainWindow = null;
-const getActiveWindow = async () => (await import("active-win")).activeWindow();
 
 const isDev = !app.isPackaged;
-const overlayAvailable = true;
 const defaultReplaysFolder = path.join(
   "C:\\",
   "Program Files (x86)",
@@ -59,6 +52,7 @@ const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
 const obsPasswordFile = () => path.join(app.getPath("userData"), "obs-password.enc");
 const recordingDiagnosticLogFile = () => path.join(app.getPath("userData"), "recording-debug.log");
 const defaultObsProfileName = "Labatar Recording";
+const labatarRecordingFrameRate = { numerator: 60, denominator: 1 };
 const labatarSceneCollectionName = "Labatar";
 const labatarSceneNames = {
   gameOnly: "Labatar - Game Only",
@@ -95,6 +89,7 @@ let obsState = {
   currentSceneCollectionName: null,
   currentSceneName: null,
   recordDirectory: null,
+  videoSettings: null,
   automation: {
     enabled: false,
     status: "disabled",
@@ -254,6 +249,9 @@ async function refreshObsState(client = getObsClient()) {
     const currentScene = version.availableRequests?.includes("GetCurrentProgramScene")
       ? await client.call("GetCurrentProgramScene")
       : null;
+    const videoSettings = version.availableRequests?.includes("GetVideoSettings")
+      ? await client.call("GetVideoSettings")
+      : null;
     const recordStatus = await client.call("GetRecordStatus");
     let recordDirectory = null;
     if (version.availableRequests?.includes("GetRecordDirectory")) {
@@ -269,6 +267,16 @@ async function refreshObsState(client = getObsClient()) {
       currentSceneCollectionName: sceneCollections?.currentSceneCollectionName ?? null,
       currentSceneName: currentScene?.sceneName ?? currentScene?.currentProgramSceneName ?? null,
       recordDirectory,
+      videoSettings: videoSettings
+        ? {
+            fpsNumerator: Number(videoSettings.fpsNumerator) || null,
+            fpsDenominator: Number(videoSettings.fpsDenominator) || null,
+            baseWidth: Number(videoSettings.baseWidth) || null,
+            baseHeight: Number(videoSettings.baseHeight) || null,
+            outputWidth: Number(videoSettings.outputWidth) || null,
+            outputHeight: Number(videoSettings.outputHeight) || null,
+          }
+        : null,
       recording: {
         active: Boolean(recordStatus.outputActive),
         paused: recordStatus.outputState === "OBS_WEBSOCKET_OUTPUT_PAUSED",
@@ -280,7 +288,15 @@ async function refreshObsState(client = getObsClient()) {
       recordingActive: Boolean(recordStatus.outputActive),
       profileName: profiles.currentProfileName,
     });
-    return { version, profiles, sceneCollections, currentScene, recordStatus, recordDirectory };
+    return {
+      version,
+      profiles,
+      sceneCollections,
+      currentScene,
+      videoSettings,
+      recordStatus,
+      recordDirectory,
+    };
   } catch (error) {
     logRecordingDiagnostic("obs-refresh-failed", {
       durationMs: Date.now() - startedAt,
@@ -451,6 +467,25 @@ async function finalizeObsRecording(outputPath, reason) {
     );
     recording.outputPath = namedOutputPath;
     manifestPath = recordingManifestPath(namedOutputPath);
+    const captureSettings = recording.videoSettings ?? obsState.videoSettings;
+    const capture = captureSettings
+      ? {
+          fpsNumerator: Number(captureSettings.fpsNumerator) || null,
+          fpsDenominator: Number(captureSettings.fpsDenominator) || null,
+          sourceWidth: Number(captureSettings.baseWidth) || null,
+          sourceHeight: Number(captureSettings.baseHeight) || null,
+          outputWidth: Number(captureSettings.outputWidth) || null,
+          outputHeight: Number(captureSettings.outputHeight) || null,
+          outputNormalized:
+            Number(captureSettings.baseWidth) !== Number(captureSettings.outputWidth) ||
+            Number(captureSettings.baseHeight) !== Number(captureSettings.outputHeight),
+          normalization:
+            Number(captureSettings.baseWidth) !== Number(captureSettings.outputWidth) ||
+            Number(captureSettings.baseHeight) !== Number(captureSettings.outputHeight)
+              ? "even-output-dimensions"
+              : null,
+        }
+      : null;
     try {
       await fs.promises.writeFile(
         manifestPath,
@@ -467,6 +502,7 @@ async function finalizeObsRecording(outputPath, reason) {
             metadata: recording.metadata,
             games: recording.games ?? [],
             replays: recording.replays ?? [],
+            capture,
             obs: {
               version: obsState.obsVersion,
               webSocketVersion: obsState.obsWebSocketVersion,
@@ -721,6 +757,7 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
     games: [],
     replays: [],
     lobbyId: normalizedMetadata?.lobbyId || null,
+    videoSettings: obsState.videoSettings ? { ...obsState.videoSettings } : null,
   };
   try {
     logRecordingDiagnostic("obs-start-record-request", {
@@ -1100,6 +1137,116 @@ async function connectToObs(request = {}) {
   }
 }
 
+async function ensureLabatarVideoSettings(client, version, dimensions = null) {
+  if (
+    !version.availableRequests?.includes("GetVideoSettings") ||
+    !version.availableRequests?.includes("SetVideoSettings")
+  ) {
+    throw new Error("This OBS WebSocket version cannot configure video frame rate.");
+  }
+
+  const current = await client.call("GetVideoSettings");
+  const currentFpsNumerator = Number(current.fpsNumerator);
+  const currentFpsDenominator = Number(current.fpsDenominator);
+  const currentFps = currentFpsNumerator / currentFpsDenominator;
+  const request = {};
+  if (currentFps !== labatarRecordingFrameRate.numerator) {
+    request.fpsNumerator = labatarRecordingFrameRate.numerator;
+    request.fpsDenominator = labatarRecordingFrameRate.denominator;
+  }
+
+  const targetBase = dimensions?.base ?? null;
+  const targetOutput = dimensions?.output ?? null;
+  if (targetBase) {
+    const targetBaseWidth = Math.round(Number(targetBase.width));
+    const targetBaseHeight = Math.round(Number(targetBase.height));
+    if (
+      targetBaseWidth > 0 &&
+      targetBaseHeight > 0 &&
+      (Number(current.baseWidth) !== targetBaseWidth ||
+        Number(current.baseHeight) !== targetBaseHeight)
+    ) {
+      request.baseWidth = targetBaseWidth;
+      request.baseHeight = targetBaseHeight;
+    }
+  }
+  if (targetOutput) {
+    const targetOutputWidth = Math.round(Number(targetOutput.width));
+    const targetOutputHeight = Math.round(Number(targetOutput.height));
+    if (
+      targetOutputWidth > 0 &&
+      targetOutputHeight > 0 &&
+      (Number(current.outputWidth) !== targetOutputWidth ||
+        Number(current.outputHeight) !== targetOutputHeight)
+    ) {
+      request.outputWidth = targetOutputWidth;
+      request.outputHeight = targetOutputHeight;
+    }
+  }
+
+  if (Object.keys(request).length === 0) return current;
+
+  const [recordStatus, streamStatus] = await Promise.all([
+    client.call("GetRecordStatus"),
+    client.call("GetStreamStatus"),
+  ]);
+  if (recordStatus.outputActive) {
+    throw new Error("Stop the active OBS recording before changing video settings.");
+  }
+  if (streamStatus.outputActive) {
+    throw new Error("Stop the active OBS stream before changing video settings.");
+  }
+
+  await client.call("SetVideoSettings", request);
+  const updated = await client.call("GetVideoSettings");
+  const updatedFps = Number(updated.fpsNumerator) / Number(updated.fpsDenominator);
+  if (updatedFps !== labatarRecordingFrameRate.numerator) {
+    throw new Error(
+      `OBS did not accept the required ${labatarRecordingFrameRate.numerator} fps setting.`,
+    );
+  }
+  if (targetBase) {
+    const targetBaseWidth = Math.round(Number(targetBase.width));
+    const targetBaseHeight = Math.round(Number(targetBase.height));
+    if (
+      Number(updated.baseWidth) !== targetBaseWidth ||
+      Number(updated.baseHeight) !== targetBaseHeight
+    ) {
+      throw new Error("OBS did not accept the required base resolution.");
+    }
+  }
+  if (targetOutput) {
+    const targetOutputWidth = Math.round(Number(targetOutput.width));
+    const targetOutputHeight = Math.round(Number(targetOutput.height));
+    if (
+      Number(updated.outputWidth) !== targetOutputWidth ||
+      Number(updated.outputHeight) !== targetOutputHeight
+    ) {
+      throw new Error("OBS did not accept the required output resolution.");
+    }
+  }
+  if (dimensions) {
+    logRecordingDiagnostic("obs-video-settings-applied", {
+      requestedBase: targetBase,
+      requestedOutput: targetOutput,
+      actual: {
+        fpsNumerator: Number(updated.fpsNumerator) || null,
+        fpsDenominator: Number(updated.fpsDenominator) || null,
+        baseWidth: Number(updated.baseWidth) || null,
+        baseHeight: Number(updated.baseHeight) || null,
+        outputWidth: Number(updated.outputWidth) || null,
+        outputHeight: Number(updated.outputHeight) || null,
+      },
+      outputNormalized:
+        targetBase && targetOutput
+          ? Number(targetBase.width) !== Number(targetOutput.width) ||
+            Number(targetBase.height) !== Number(targetOutput.height)
+          : false,
+    });
+  }
+  return updated;
+}
+
 async function prepareObsProfile(request = {}) {
   const client = getObsClient();
   invalidatePreparedObsProfile();
@@ -1121,6 +1268,7 @@ async function prepareObsProfile(request = {}) {
   if (version.availableRequests?.includes("SetRecordDirectory")) {
     await client.call("SetRecordDirectory", { recordDirectory });
   }
+  await ensureLabatarVideoSettings(client, version);
   const currentSettings = readSettings();
   writeSettings({
     ...currentSettings,
@@ -1265,7 +1413,6 @@ async function setupLabatarObsScenes(request = {}) {
   }
 
   async function resizeOutputToSourceSize(sceneName, inputName) {
-    if (!version.availableRequests?.includes("SetVideoSettings")) return null;
     const items = await client.call("GetSceneItemList", { sceneName });
     const sourceItem = (items.sceneItems ?? []).find((item) => item.sourceName === inputName);
     if (!sourceItem) return null;
@@ -1276,28 +1423,19 @@ async function setupLabatarObsScenes(request = {}) {
     const sourceWidth = Math.round(Number(transform.sceneItemTransform?.sourceWidth ?? 0));
     const sourceHeight = Math.round(Number(transform.sceneItemTransform?.sourceHeight ?? 0));
     if (sourceWidth < 8 || sourceHeight < 8) return null;
-
-    const videoSettings = await client.call("GetVideoSettings");
-    if (
-      videoSettings.baseWidth === sourceWidth &&
-      videoSettings.baseHeight === sourceHeight &&
-      videoSettings.outputWidth === sourceWidth &&
-      videoSettings.outputHeight === sourceHeight
-    ) {
-      return { width: sourceWidth, height: sourceHeight };
-    }
-
-    const streamStatus = await client.call("GetStreamStatus");
-    if (streamStatus.outputActive) {
-      throw new Error("Stop the active OBS stream before resizing output to the game source.");
-    }
-    await client.call("SetVideoSettings", {
-      baseWidth: sourceWidth,
-      baseHeight: sourceHeight,
-      outputWidth: sourceWidth,
-      outputHeight: sourceHeight,
+    const outputWidth = sourceWidth - (sourceWidth % 2);
+    const outputHeight = sourceHeight - (sourceHeight % 2);
+    await ensureLabatarVideoSettings(client, version, {
+      base: { width: sourceWidth, height: sourceHeight },
+      output: { width: outputWidth, height: outputHeight },
     });
-    return { width: sourceWidth, height: sourceHeight };
+    return {
+      width: outputWidth,
+      height: outputHeight,
+      sourceWidth,
+      sourceHeight,
+      outputNormalized: outputWidth !== sourceWidth || outputHeight !== sourceHeight,
+    };
   }
 
   async function normalizeGameCaptureTransform(sceneName) {
@@ -1345,6 +1483,7 @@ async function setupLabatarObsScenes(request = {}) {
   for (const sceneName of [gameScene, desktopMicScene, micScene]) {
     await ensureInput(sceneName, gameInputName, "game_capture", gameCaptureSettings);
   }
+  await ensureLabatarVideoSettings(client, version);
   const outputResolution = await resizeOutputToSourceSize(gameScene, gameInputName);
   if (outputResolution) {
     for (const sceneName of [gameScene, desktopMicScene, micScene]) {
@@ -1649,6 +1788,7 @@ ipcMain.handle("obs:disconnect", async () => {
     error: null,
     currentSceneCollectionName: null,
     currentSceneName: null,
+    videoSettings: null,
     recording: { active: false, paused: false, outputPath: null },
   });
   return publicObsState();
@@ -2177,6 +2317,7 @@ function createRecordingResponse(filePath, stat, request) {
   const contentLength = Math.max(0, end - start + 1);
   const headers = {
     "Accept-Ranges": "bytes",
+    "Access-Control-Allow-Origin": "*",
     "Cache-Control": "no-cache",
     "Content-Length": String(contentLength),
     "Content-Type": recordingContentType(filePath),
@@ -2471,6 +2612,34 @@ async function setRecordingTags(request = {}) {
   return getRecordedVideoForPath(currentPath);
 }
 
+async function saveRecordingAnalysis(request = {}) {
+  const recordingId = String(request.recordingId ?? "");
+  const currentPath = resolveRecordingPath(recordingId);
+  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
+  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+
+  const analysis = request.analysis;
+  if (!analysis || analysis.schemaVersion !== 1 || !Array.isArray(analysis.moves)) {
+    throw new Error("Invalid recording analysis.");
+  }
+  const manifestPath = recordingManifestPathForVideo(currentPath);
+  let manifest;
+  try {
+    manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+  } catch {
+    manifest = {
+      schemaVersion: 1,
+      outputPath: currentPath,
+      metadata: null,
+      games: [],
+      replays: [],
+    };
+  }
+  manifest.analysis = analysis;
+  await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  return getRecordedVideoForPath(currentPath);
+}
+
 async function getRecordedVideoForPath(
   filePath,
   folder = path.resolve(getObsSettings().recordDirectory),
@@ -2499,6 +2668,8 @@ async function readRecordingManifest(videoPath) {
       metadata: manifest?.metadata ?? null,
       games: Array.isArray(manifest?.games) ? manifest.games : [],
       replays: Array.isArray(manifest?.replays) ? manifest.replays : [],
+      analysis:
+        manifest?.analysis && manifest.analysis.schemaVersion === 1 ? manifest.analysis : null,
       tags: normalizeRecordingTags(manifest?.tags, manifest?.metadata),
       replayPath: typeof manifest?.replayPath === "string" ? manifest.replayPath : null,
       replayFileName: typeof manifest?.replayFileName === "string" ? manifest.replayFileName : null,
@@ -2524,6 +2695,7 @@ async function readRecordingManifest(videoPath) {
       metadata: null,
       games: [],
       replays: [],
+      analysis: null,
       tags: { match: [], lab: [], combo: false, pressure: false },
       replayPath: null,
       replayFileName: null,
@@ -2632,6 +2804,7 @@ ipcMain.handle("recordings:list", async () => {
 ipcMain.handle("recordings:export-clip", async (_, request) => exportRecordingClip(request));
 ipcMain.handle("recordings:rename", async (_, request) => renameRecording(request));
 ipcMain.handle("recordings:set-tags", async (_, request) => setRecordingTags(request));
+ipcMain.handle("recordings:save-analysis", async (_, request) => saveRecordingAnalysis(request));
 ipcMain.handle("recordings:delete", async (_, request) => deleteRecording(request));
 ipcMain.on("recordings:start-drag", async (event, request) => {
   try {
@@ -2798,240 +2971,6 @@ ipcMain.handle("replays:zip", async (_, request) => {
   }
 });
 
-function createOverlayWindow() {
-  if (!overlayAvailable) return false;
-  overlayEnabled = true;
-  if (overlayWindow && !overlayWindow.isDestroyed()) {
-    return;
-  }
-  const display = screen.getPrimaryDisplay();
-  const width = Math.min(900, display.workAreaSize.width - 80);
-  overlayWindow = new BrowserWindow({
-    width,
-    height: display.workAreaSize.height,
-    x: Math.round((display.workAreaSize.width - width) / 2),
-    y: display.bounds.y,
-    frame: false,
-    transparent: true,
-    alwaysOnTop: true,
-    focusable: false,
-    show: false,
-    skipTaskbar: true,
-    resizable: false,
-    hasShadow: false,
-    webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  overlayWindow.setVisibleOnAllWorkspaces(false);
-  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-  overlayWindow.on("closed", () => {
-    overlayEnabled = false;
-    gameDisplayId = null;
-    lastGameBounds = null;
-    lastGameWindowTitle = null;
-    missedGameFocusChecks = 0;
-    if (overlayMonitor) clearInterval(overlayMonitor);
-    overlayMonitor = null;
-    overlayWindow = null;
-  });
-  if (isDev) void overlayWindow.loadURL("http://localhost:5173/?overlay=1");
-  else
-    void overlayWindow.loadFile(path.join(__dirname, "../dist/index.html"), {
-      search: "?overlay=1",
-    });
-  let monitorBusy = false;
-  let appliedBounds = null;
-  let appliedDisplayId = null;
-  const sameBounds = (left, right) =>
-    left &&
-    right &&
-    left.x === right.x &&
-    left.y === right.y &&
-    left.width === right.width &&
-    left.height === right.height;
-  const applyOverlayTarget = (display) => {
-    const bounds = { ...display.bounds };
-    const targetChanged = !sameBounds(appliedBounds, bounds) || appliedDisplayId !== display.id;
-    gameDisplayId = display.id;
-    lastGameBounds = bounds;
-    if (targetChanged) {
-      overlayWindow.setAlwaysOnTop(true, "screen-saver");
-      overlayWindow.setBounds(bounds);
-      appliedBounds = bounds;
-      appliedDisplayId = display.id;
-    }
-    if (!overlayWindow.isVisible()) overlayWindow.showInactive();
-  };
-  const syncOverlayWindow = async () => {
-    if (monitorBusy || !overlayWindow || overlayWindow.isDestroyed()) return;
-    monitorBusy = true;
-    try {
-      if (!overlayEnabled) {
-        overlayWindow.hide();
-        return;
-      }
-      const active = await getActiveWindow().catch(() => null);
-      const processName = active?.owner?.name?.toLowerCase() ?? "";
-      const processPath = active?.owner?.path?.toLowerCase() ?? "";
-      const isGame =
-        processName === "atla.exe" ||
-        processName === "avatar legends: the fighting game" ||
-        processPath.endsWith("\\atla.exe") ||
-        processPath.endsWith("/atla.exe") ||
-        processName.includes("atla") ||
-        processPath.includes("\\atla") ||
-        processPath.includes("/atla");
-      if (isDev && active && overlayWindow._lastActiveWindow !== isGame) {
-        console.log("Active window:", {
-          title: active.title,
-          process: active.owner?.name,
-          path: active.owner?.path,
-        });
-      }
-      overlayWindow._lastActiveWindow = isGame;
-      if (!isGame || !active?.bounds) {
-        if (!onlyShowWhenGameFocused) {
-          const display = lastGameBounds
-            ? screen.getDisplayMatching(lastGameBounds)
-            : screen.getPrimaryDisplay();
-          missedGameFocusChecks = 0;
-          applyOverlayTarget(display);
-          return;
-        }
-        missedGameFocusChecks += 1;
-        if (onlyShowWhenGameFocused && missedGameFocusChecks >= 4) overlayWindow.hide();
-        else if (lastGameBounds) {
-          const display = screen.getDisplayMatching(lastGameBounds);
-          applyOverlayTarget(display);
-          if (!overlayWindow.isVisible()) overlayWindow.showInactive();
-        }
-        return;
-      }
-      missedGameFocusChecks = 0;
-      lastGameWindowTitle = active.title || lastGameWindowTitle;
-      // The capture and overlay coordinates are display-based. Use Electron's
-      // display bounds instead of active-win's native window rectangle so DPI
-      // scaling cannot move or resize the overlay incorrectly.
-      const gameDisplay = screen.getDisplayMatching(active.bounds);
-      applyOverlayTarget(gameDisplay);
-    } finally {
-      monitorBusy = false;
-    }
-  };
-  overlayMonitor = setInterval(() => void syncOverlayWindow(), 250);
-  void syncOverlayWindow();
-  return true;
-}
-
-ipcMain.handle("overlay:show", () => createOverlayWindow());
-ipcMain.handle("overlay:hide", () => {
-  if (!overlayAvailable) return false;
-  overlayEnabled = false;
-  gameDisplayId = null;
-  lastGameBounds = null;
-  missedGameFocusChecks = 0;
-  overlayWindow?.hide();
-  return true;
-});
-ipcMain.handle(
-  "overlay:is-visible",
-  () =>
-    overlayAvailable &&
-    Boolean(overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible()),
-);
-ipcMain.handle("overlay:set-focus-mode", (_, enabled) => {
-  if (!overlayAvailable) return false;
-  onlyShowWhenGameFocused = Boolean(enabled);
-  if (!onlyShowWhenGameFocused && lastGameBounds && overlayWindow && !overlayWindow.isDestroyed()) {
-    overlayWindow.setBounds(lastGameBounds);
-    overlayWindow.showInactive();
-  }
-  return onlyShowWhenGameFocused;
-});
-
-ipcMain.handle("overlay:finalize-capture", () => {
-  if (!overlayAvailable) return false;
-  if (overlayWindow && !overlayWindow.isDestroyed()) {
-    overlayWindow.webContents.send("overlay:finalize-capture");
-  }
-  return true;
-});
-
-ipcMain.handle("overlay:begin-capture", () => {
-  if (!overlayAvailable) return false;
-  if (overlayWindow && !overlayWindow.isDestroyed()) {
-    overlayWindow.webContents.send("overlay:begin-capture");
-  }
-  return true;
-});
-
-function safeCaptureName(value, fallback) {
-  const name = String(value ?? "")
-    .replace(/[^a-zA-Z0-9._-]/g, "_")
-    .replace(/^\.+$/, "");
-  return name || fallback;
-}
-
-function captureSessionDirectory(sessionId) {
-  return path.join(captureRootDirectory(), safeCaptureName(sessionId, "session"));
-}
-
-function captureRootDirectory() {
-  return path.join(app.getPath("videos"), "Labatar", "captures");
-}
-
-ipcMain.handle("overlay:get-capture-folder", () => captureRootDirectory());
-
-ipcMain.handle("overlay:open-capture-folder", async () => {
-  const directory = captureRootDirectory();
-  await fs.promises.mkdir(directory, { recursive: true });
-  const error = await shell.openPath(directory);
-  if (error) throw new Error(error);
-  return directory;
-});
-
-ipcMain.handle("overlay:save-capture-screenshot", async (_, request) => {
-  const directory = captureSessionDirectory(request?.sessionId);
-  const filename = safeCaptureName(request?.filename, "capture.png");
-  const data = request?.data;
-  if (!data || (!ArrayBuffer.isView(data) && !(data instanceof ArrayBuffer))) {
-    throw new Error("Capture screenshot data is missing or invalid");
-  }
-  const bytes = ArrayBuffer.isView(data)
-    ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
-    : Buffer.from(new Uint8Array(data));
-  await fs.promises.mkdir(directory, { recursive: true });
-  const filePath = path.join(directory, filename);
-  await fs.promises.writeFile(filePath, bytes);
-  return { path: filePath };
-});
-
-ipcMain.handle("overlay:save-capture-video", async (_, request) => {
-  const directory = captureSessionDirectory(request?.sessionId);
-  const data = request?.data;
-  if (!data || (!ArrayBuffer.isView(data) && !(data instanceof ArrayBuffer))) {
-    throw new Error("Capture video data is missing or invalid");
-  }
-  const bytes = ArrayBuffer.isView(data)
-    ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
-    : Buffer.from(new Uint8Array(data));
-  await fs.promises.mkdir(directory, { recursive: true });
-  const filePath = path.join(directory, "session.webm");
-  await fs.promises.writeFile(filePath, bytes);
-  return { path: filePath };
-});
-
-ipcMain.handle("overlay:save-capture-session", async (_, request) => {
-  const directory = captureSessionDirectory(request?.sessionId);
-  await fs.promises.mkdir(directory, { recursive: true });
-  const filePath = path.join(directory, "session.json");
-  await fs.promises.writeFile(filePath, JSON.stringify(request?.manifest ?? {}, null, 2), "utf8");
-  return { path: filePath };
-});
-
 ipcMain.handle("replays:get-folder", () => {
   return getReplayFolder();
 });
@@ -3129,68 +3068,6 @@ function buildApplicationMenu() {
   Menu.setApplicationMenu(menu);
 }
 
-async function getGameCaptureSource() {
-  if (!overlayAvailable) return null;
-  const sources = await desktopCapturer.getSources({ types: ["window"] });
-  const displays = screen.getAllDisplays();
-  // `display_id` is the authoritative mapping. Source order is not guaranteed
-  // to match screen.getAllDisplays(), especially with monitors arranged left of
-  // the primary display. Some Electron versions also expose the same ID only
-  // in the source ID (`screen:<display-id>:<index>`), so support both forms.
-  const gameDisplay = lastGameBounds ? screen.getDisplayMatching(lastGameBounds) : null;
-  const overlayDisplay =
-    overlayWindow && !overlayWindow.isDestroyed()
-      ? screen.getDisplayMatching(overlayWindow.getBounds())
-      : null;
-  if (gameDisplay) gameDisplayId = gameDisplay.id;
-  if (!gameDisplayId && overlayDisplay) gameDisplayId = overlayDisplay.id;
-  const wantedDisplayId = String(gameDisplayId ?? screen.getPrimaryDisplay().id);
-  const sourceDisplayMatches = (candidate) => {
-    const sourceDisplayId = String(candidate.display_id ?? "");
-    const sourceIdDisplayId = String(candidate.id ?? "").match(/^screen:([^:]+):/i)?.[1] ?? "";
-    return sourceDisplayId === wantedDisplayId || sourceIdDisplayId === wantedDisplayId;
-  };
-  const normalizeTitle = (value) =>
-    String(value ?? "")
-      .trim()
-      .toLowerCase();
-  const gameTitle = normalizeTitle(lastGameWindowTitle);
-  const windowSources = sources.filter((candidate) => {
-    if (!String(candidate.id ?? "").startsWith("window:")) return false;
-    const sourceTitle = normalizeTitle(candidate.name);
-    return (
-      gameTitle &&
-      (sourceTitle === gameTitle ||
-        sourceTitle.includes(gameTitle) ||
-        gameTitle.includes(sourceTitle))
-    );
-  });
-  const windowSource = windowSources.find(sourceDisplayMatches) ?? windowSources[0] ?? null;
-  const source = windowSource;
-  // Deliberately disabled for now: a screen source can contain this overlay
-  // window and feed the overlay's own pixels back into the scanners.
-  // const screenSources = await desktopCapturer.getSources({ types: ["screen"] });
-  // const screenSource = screenSources.find(sourceDisplayMatches);
-  // const source = windowSource ?? screenSource;
-  if (isDev) {
-    console.log("Capture source:", {
-      gameDisplayId,
-      sourceId: source?.id,
-      sourceType: source?.id?.startsWith("window:") ? "game-window" : "unavailable",
-      sourceName: source?.name,
-      sourceDisplayId: source?.display_id,
-      availableSources: sources.map((candidate) => ({
-        id: candidate.id,
-        name: candidate.name,
-        displayId: candidate.display_id,
-      })),
-      displays: displays.map((display) => display.id),
-      matched: Boolean(source),
-    });
-  }
-  return source ?? null;
-}
-
 void app.whenReady().then(() => {
   protocol.handle("labatar-media", async (request) => {
     try {
@@ -3205,21 +3082,6 @@ void app.whenReady().then(() => {
     }
   });
   watchElectronFiles();
-  session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
-    const source = await getGameCaptureSource();
-    callback({ video: source });
-  });
-  ipcMain.handle("overlay:get-capture-source", async () => {
-    if (!overlayAvailable) return null;
-    const source = await getGameCaptureSource();
-    return source
-      ? {
-          id: source.id,
-          mode: source.id.startsWith("window:") ? "game-window" : "unavailable",
-          name: source.name,
-        }
-      : null;
-  });
   buildApplicationMenu();
   createWindow();
   configureAutoUpdater();

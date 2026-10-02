@@ -1,0 +1,8 @@
+[
+  { "name": "startup", "red": 55, "green": 120, "blue": 75 },
+  { "name": "active", "red": 145, "green": 0, "blue": 3 },
+  { "name": "recovery", "red": 40, "green": 78, "blue": 108 },
+  { "name": "blockstun", "red": 68, "green": 46, "blue": 121 },
+  { "name": "hitpause", "red": 76, "green": 76, "blue": 75 },
+  { "name": "idle", "red": 29, "green": 29, "blue": 33 }
+]

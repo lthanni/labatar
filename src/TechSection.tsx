@@ -34,7 +34,14 @@ import {
   techSelectedComboStorageKey,
   techSelectedRecordingStorageKey,
 } from "./tech-types";
-import type { TechCatalog, TechCombo, TechMove, TechResourceCosts } from "./tech-types";
+import type {
+  TechCatalog,
+  TechCombo,
+  TechMove,
+  TechResourceCosts,
+  TechRekkaFollowupPattern,
+} from "./tech-types";
+import { moveNotationsMatch, normalizeMoveNotation, parseMoveNotation } from "./move-notation";
 
 type TechCharacter = {
   value: string;
@@ -76,6 +83,7 @@ const screenPositions = ["corner", "midscreen", "fullscreen"];
 type MoveDraft = {
   input: string;
   isRekka: boolean;
+  allowsDirectionalFollowups: boolean;
   dependsOnMoveId: string;
   rekkaMinimumDuration: string;
   startup: string;
@@ -100,6 +108,7 @@ type ComboDraft = {
 const emptyMoveDraft: MoveDraft = {
   input: "",
   isRekka: false,
+  allowsDirectionalFollowups: false,
   dependsOnMoveId: "",
   rekkaMinimumDuration: "",
   startup: "",
@@ -134,13 +143,23 @@ function loadTechCatalog(): TechCatalog {
       const storedCharacter = stored?.[character.value];
       if (!storedCharacter) continue;
       if (Array.isArray(storedCharacter.moves)) {
-        catalog[character.value].moves = storedCharacter.moves.map((move) => ({
-          ...move,
-          isRekka: move.isRekka === true,
-          dependsOnMoveId: typeof move.dependsOnMoveId === "string" ? move.dependsOnMoveId : null,
-          rekkaMinimumDuration:
-            typeof move.rekkaMinimumDuration === "number" ? move.rekkaMinimumDuration : null,
-        }));
+        catalog[character.value].moves = storedCharacter.moves.map((move) => {
+          const normalizedInput =
+            typeof move.input === "string" ? normalizeMoveNotation(move.input) : null;
+          return {
+            ...move,
+            input: normalizedInput ?? move.input,
+            isRekka: move.isRekka === true,
+            rekkaFollowupPattern:
+              (move.rekkaFollowupPattern as TechRekkaFollowupPattern | null) ===
+              "directional-button"
+                ? "directional-button"
+                : null,
+            dependsOnMoveId: typeof move.dependsOnMoveId === "string" ? move.dependsOnMoveId : null,
+            rekkaMinimumDuration:
+              typeof move.rekkaMinimumDuration === "number" ? move.rekkaMinimumDuration : null,
+          };
+        });
       }
       if (Array.isArray(storedCharacter.combos)) {
         catalog[character.value].combos = storedCharacter.combos.map((combo) => {
@@ -196,17 +215,14 @@ function getComboStarterMove(combo: TechCombo, moves: TechMove[]) {
 
 function splitComboRoute(route: string) {
   return route
-    .replace(/->|>|,|\u2192/g, " ")
+    .replace(/->|>|,|~|\u2192/g, " ")
     .split(/\s+/)
     .map((token) => token.trim())
     .filter(Boolean);
 }
 
 function findKnownMove(input: string, moves: TechMove[]) {
-  const normalizedInput = input.replace(/\s+/g, "").toLowerCase();
-  return (
-    moves.find((move) => move.input.replace(/\s+/g, "").toLowerCase() === normalizedInput) ?? null
-  );
+  return moves.find((move) => moveNotationsMatch(move.input, input)) ?? null;
 }
 
 function resolveComboRoute(route: string, moves: TechMove[]) {
@@ -349,6 +365,9 @@ function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMov
                   secondary={
                     [
                       parentMove ? `Follow-up after ${parentMove.input}` : null,
+                      move.rekkaFollowupPattern === "directional-button"
+                        ? "Accepts 1-9 + button followups"
+                        : null,
                       move.isRekka && move.rekkaMinimumDuration != null
                         ? `Rekka minimum ${move.rekkaMinimumDuration}`
                         : null,
@@ -507,8 +526,21 @@ function ComboSelector({
               return (
                 <ListItemButton
                   key={combo.id}
+                  component="div"
+                  role="button"
+                  tabIndex={0}
                   selected={combo.id === selectedId}
                   onClick={() => onSelect(combo.id)}
+                  onKeyDown={(event) => {
+                    if (
+                      event.target !== event.currentTarget ||
+                      (event.key !== "Enter" && event.key !== " ")
+                    ) {
+                      return;
+                    }
+                    event.preventDefault();
+                    onSelect(combo.id);
+                  }}
                 >
                   <ListItemText
                     primary={
@@ -517,7 +549,13 @@ function ComboSelector({
                         {getComboRouteEntries(combo, moves).some(({ move }) => !move) && (
                           <Chip label="Unknown move" size="small" color="warning" />
                         )}
-                        <Button size="small" onClick={() => onEdit(combo)}>
+                        <Button
+                          size="small"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onEdit(combo);
+                          }}
+                        >
                           Edit
                         </Button>
                       </Stack>
@@ -694,6 +732,7 @@ export function TechSection() {
   const [catalog, setCatalog] = useState<TechCatalog>(loadTechCatalog);
   const [moveDraft, setMoveDraft] = useState<MoveDraft>(emptyMoveDraft);
   const [editingMoveId, setEditingMoveId] = useState<string | null>(null);
+  const [moveInputError, setMoveInputError] = useState<string | null>(null);
   const [comboDraft, setComboDraft] = useState<ComboDraft>(emptyComboDraft);
   const [editingComboId, setEditingComboId] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
@@ -768,15 +807,18 @@ export function TechSection() {
     setSelectedComboId(null);
     setMoveDraft(emptyMoveDraft);
     setEditingMoveId(null);
+    setMoveInputError(null);
     setComboDraft(emptyComboDraft);
     setEditingComboId(null);
   };
 
   const editMove = (move: TechMove) => {
     setEditingMoveId(move.id);
+    setMoveInputError(null);
     setMoveDraft({
-      input: move.input,
+      input: normalizeMoveNotation(move.input) ?? move.input,
       isRekka: move.isRekka,
+      allowsDirectionalFollowups: move.rekkaFollowupPattern === "directional-button",
       dependsOnMoveId: move.dependsOnMoveId ?? "",
       rekkaMinimumDuration: String(move.rekkaMinimumDuration ?? ""),
       startup: String(move.startup ?? ""),
@@ -791,12 +833,20 @@ export function TechSection() {
   };
 
   const saveMove = () => {
-    const input = moveDraft.input.trim();
-    if (!input) return;
+    const parsedInput = parseMoveNotation(moveDraft.input);
+    if (!parsedInput.ok) {
+      setMoveInputError(parsedInput.error);
+      return;
+    }
+    const input = parsedInput.notation;
+    setMoveInputError(null);
+    const rekkaFollowupPattern: TechRekkaFollowupPattern | null =
+      moveDraft.isRekka && moveDraft.allowsDirectionalFollowups ? "directional-button" : null;
     const moveValues = {
       character,
       input,
       isRekka: moveDraft.isRekka,
+      rekkaFollowupPattern,
       dependsOnMoveId: rekkaParentOptions.some((move) => move.id === moveDraft.dependsOnMoveId)
         ? moveDraft.dependsOnMoveId
         : null,
@@ -951,9 +1001,12 @@ export function TechSection() {
                       placeholder="2B or 214C"
                       size="small"
                       value={moveDraft.input}
-                      onChange={(event) =>
-                        setMoveDraft((current) => ({ ...current, input: event.target.value }))
-                      }
+                      onChange={(event) => {
+                        setMoveInputError(null);
+                        setMoveDraft((current) => ({ ...current, input: event.target.value }));
+                      }}
+                      error={Boolean(moveInputError)}
+                      helperText={moveInputError ?? "Example: 2B, j.2C, 236F, 22EX, or 5X."}
                       required
                       sx={{ flex: 1 }}
                     />
@@ -973,6 +1026,23 @@ export function TechSection() {
                       }
                       label="Rekka move"
                     />
+                    {moveDraft.isRekka && (
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            checked={moveDraft.allowsDirectionalFollowups}
+                            onChange={(event) =>
+                              setMoveDraft((current) => ({
+                                ...current,
+                                allowsDirectionalFollowups: event.target.checked,
+                              }))
+                            }
+                            size="small"
+                          />
+                        }
+                        label="1-9 + button followups"
+                      />
+                    )}
                     {moveDraft.isRekka && (
                       <TextField
                         label="Minimum duration"
@@ -1054,6 +1124,7 @@ export function TechSection() {
                       onClick={() => {
                         setMoveDraft(emptyMoveDraft);
                         setEditingMoveId(null);
+                        setMoveInputError(null);
                       }}
                       sx={{ alignSelf: "flex-start" }}
                     >

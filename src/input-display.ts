@@ -1,4 +1,13 @@
-export type InputMarkerColor = "red" | "cyan" | "blue" | "yellow";
+import {
+  defaultInputButtonSlotRatios,
+  inputButtonByMarkerColor,
+  inputColorRules,
+  type InputMarkerColor,
+  inputDisplayGeometryFromConfig,
+  type InputButtonSlot,
+  type InputDisplaySegmentLayout,
+} from "./input-display-config";
+import { defaultDetectorConfig } from "./detector-config";
 
 export type InputMarker = {
   color: InputMarkerColor;
@@ -9,6 +18,12 @@ export type InputMarker = {
   height: number;
   fillRatio: number;
 };
+
+export type InputSegmentCheckReason =
+  | "joystick-and-marker"
+  | "missing-black-band"
+  | "missing-joystick-circle"
+  | "missing-joystick-marker";
 
 export type InputDisplayRow = {
   top: number;
@@ -30,11 +45,19 @@ export type InputDisplayRow = {
     markerY?: number;
   };
   buttonChecks?: Array<{
-    slot: "A" | "B" | "C" | "S";
+    slot: InputButtonSlot;
     detected: boolean;
     confidence: number;
     marker?: InputMarker;
   }>;
+  segmentCheck?: {
+    populated: boolean;
+    reason: InputSegmentCheckReason;
+  };
+  backgroundCheck?: {
+    detected: boolean;
+    coverage: number;
+  };
   numberReading?: {
     text: string;
     confidence: number;
@@ -128,12 +151,7 @@ type NumberDigitBox = {
   height: number;
 };
 
-export const inputButtonSlotRatios = [
-  { slot: "A" as const, ratio: 0.43, yRatio: 0.3 },
-  { slot: "B" as const, ratio: 0.5, yRatio: 0.3 },
-  { slot: "C" as const, ratio: 0.57, yRatio: 0.3 },
-  { slot: "S" as const, ratio: 0.43, yRatio: 0.7 },
-];
+export const inputButtonSlotRatios = defaultInputButtonSlotRatios;
 
 export type InputDisplayGeometry = {
   segmentCount: number;
@@ -145,6 +163,9 @@ export type InputDisplayGeometry = {
   buttonRegionRadius: number;
   numberStartX: number;
   numberEndX: number;
+  numberTop: number;
+  numberHeight: number;
+  segmentLayout: InputDisplaySegmentLayout;
   numberDigitXs?: number[];
   numberDigitWidth?: number;
   numberDigitTop?: number;
@@ -153,47 +174,10 @@ export type InputDisplayGeometry = {
 };
 
 export const defaultInputDisplayGeometry: InputDisplayGeometry = {
-  segmentCount: 13,
-  segmentTop: 2,
-  // Segment height is expressed as a percentage of the input ROI. This is
-  // equivalent to the previous 2%-to-98% span divided across 13 rows.
-  segmentHeight: 96 / 13,
-  joystickCenterX: 38,
-  joystickRegionEndX: 44,
-  buttonSlotRatios: inputButtonSlotRatios,
-  buttonRegionRadius: 6.5,
-  numberStartX: 68,
-  numberEndX: 98,
-  numberDigitXs: [70, 79, 88],
-  numberDigitWidth: 8,
-  numberDigitTop: 10,
-  numberDigitHeight: 80,
+  ...inputDisplayGeometryFromConfig(defaultDetectorConfig, []),
 };
 
-const colorRules: ColorRule[] = [
-  {
-    color: "red",
-    matches: (red, green, blue) => red > 150 && red > green * 1.35 && red > blue * 1.35,
-  },
-  {
-    color: "cyan",
-    matches: (red, green, blue) => red < 125 && green > 135 && blue > 135 && blue <= green * 1.2,
-  },
-  {
-    color: "blue",
-    matches: (red, green, blue) => red < 125 && blue > 145 && blue > green * 1.2,
-  },
-  {
-    color: "yellow",
-    matches: (red, green, blue) =>
-      red > 150 &&
-      green > 130 &&
-      blue < 115 &&
-      red > blue * 1.35 &&
-      green > blue * 1.35 &&
-      red <= green * 1.4,
-  },
-];
+const colorRules: ColorRule[] = inputColorRules;
 
 function pixelIndex(width: number, x: number, y: number) {
   return (y * width + x) * 4;
@@ -398,7 +382,20 @@ function findLightComponents(image: RgbImage, maxXRatio = 0.55): LightComponent[
       }
       const componentWidth = maxX - minX + 1;
       const componentHeight = maxY - minY + 1;
-      if (area >= 40 && componentWidth >= 12 && componentHeight >= 12) {
+      const aspectRatio =
+        Math.max(componentWidth, componentHeight) /
+        Math.max(1, Math.min(componentWidth, componentHeight));
+      const fillRatio = area / (componentWidth * componentHeight);
+      const maxJoystickDimension = Math.max(24, Math.min(image.width * 0.18, image.height * 0.12));
+      if (
+        area >= 40 &&
+        componentWidth >= 12 &&
+        componentHeight >= 12 &&
+        componentWidth <= maxJoystickDimension &&
+        componentHeight <= maxJoystickDimension &&
+        aspectRatio <= 1.8 &&
+        fillRatio >= 0.15
+      ) {
         components.push({
           x: sumX / area,
           y: sumY / area,
@@ -468,8 +465,10 @@ function normalizeGlyphMask(image: RgbImage, range: [number, number], top: numbe
 
 function readNumberInSegment(
   image: RgbImage,
-  centerY: number,
-  halfHeight: number,
+  segmentTop: number,
+  segmentHeight: number,
+  numberTop: number,
+  numberHeight: number,
   numberStartX: number,
   numberEndX: number,
   calibratedTemplates: DigitTemplate[] = [],
@@ -477,12 +476,12 @@ function readNumberInSegment(
 ): NumberReading | null {
   const startX = Math.floor(image.width * (numberStartX / 100));
   const endX = Math.floor(image.width * (numberEndX / 100));
-  const startY = Math.max(0, Math.floor(centerY - halfHeight));
-  const endY = Math.min(image.height, Math.ceil(centerY + halfHeight));
+  const numberRegionTop = segmentTop + segmentHeight * (numberTop / 100);
+  const numberRegionHeight = segmentHeight * (numberHeight / 100);
+  const startY = Math.max(0, Math.floor(numberRegionTop));
+  const endY = Math.min(image.height, Math.ceil(numberRegionTop + numberRegionHeight));
   const glyphs: Array<{ range: [number, number]; top: number; bottom: number }> = [];
   if (digitBoxes.length > 0) {
-    const segmentHeight = halfHeight / 0.48;
-    const segmentTop = centerY - segmentHeight / 2;
     for (const box of digitBoxes) {
       const boxStartX = Math.max(0, Math.floor(image.width * (box.x / 100)));
       const boxEndX = Math.min(image.width, Math.ceil(image.width * ((box.x + box.width) / 100)));
@@ -569,7 +568,12 @@ function readNumberInSegment(
       }
       const width = range[1] - range[0] + 1;
       const height = bottom - top + 1;
-      if (width >= 1 && width <= image.width * 0.12 && height >= 5 && height <= halfHeight * 2) {
+      if (
+        width >= 1 &&
+        width <= image.width * 0.12 &&
+        height >= 5 &&
+        height <= numberRegionHeight
+      ) {
         glyphs.push({ range, top, bottom });
       }
     }
@@ -649,7 +653,7 @@ function buildButtonChecks(
     A: "blue",
     B: "yellow",
     C: "red",
-    S: "cyan",
+    F: "cyan",
   };
   const candidates = row.markers
     .filter(
@@ -699,10 +703,40 @@ function buildButtonChecks(
   });
 }
 
+function detectSegmentBackground(
+  image: RgbImage,
+  top: number,
+  bottom: number,
+  background: InputDisplaySegmentLayout["background"],
+) {
+  const startX = Math.max(0, Math.floor(image.width * (background.startX / 100)));
+  const endX = Math.min(image.width, Math.ceil(image.width * (background.endX / 100)));
+  const startY = Math.max(0, Math.floor(top));
+  const endY = Math.min(image.height, Math.ceil(bottom));
+  let darkPixels = 0;
+  let totalPixels = 0;
+  for (let y = startY; y < endY; y += 1) {
+    for (let x = startX; x < endX; x += 1) {
+      const index = pixelIndex(image.width, x, y);
+      const red = image.data[index];
+      const green = image.data[index + 1];
+      const blue = image.data[index + 2];
+      if (Math.max(red, green, blue) <= background.darkPixelThreshold) darkPixels += 1;
+      totalPixels += 1;
+    }
+  }
+  const coverage = darkPixels / Math.max(1, totalPixels);
+  return {
+    detected: coverage >= background.minimumCoverage,
+    coverage,
+  };
+}
+
 export function detectInputDisplay(
   image: RgbImage,
   geometry: InputDisplayGeometry = defaultInputDisplayGeometry,
 ): InputDisplayObservation {
+  const segmentLayout = geometry.segmentLayout;
   const markers = mergeNearbyMarkers(
     colorRules.flatMap((rule) => findComponents(image, rule)),
     image,
@@ -712,12 +746,13 @@ export function detectInputDisplay(
   const segmentHeight = Math.max(1, image.height * (Math.max(0, geometry.segmentHeight) / 100));
   const joystickComponents = findLightComponents(
     image,
-    Math.max(0.45, Math.min(0.7, geometry.joystickRegionEndX / 100 + 0.1)),
+    Math.max(0.45, Math.min(0.7, segmentLayout.joystick.regionEndX / 100 + 0.1)),
   );
   const rows = Array.from({ length: segmentCount }, (_, segmentIndex) => {
     const top = segmentTop + segmentIndex * segmentHeight;
     const bottom = top + segmentHeight;
     const center = (top + bottom) / 2;
+    const backgroundCheck = detectSegmentBackground(image, top, bottom, segmentLayout.background);
     const rowMarkers = markers
       .filter((marker) => marker.y >= top && marker.y < bottom)
       .sort((left, right) => left.x - right.x);
@@ -725,17 +760,28 @@ export function detectInputDisplay(
       top,
       bottom,
       markers: rowMarkers,
+      backgroundCheck,
     };
+    const expectedJoystickX = image.width * (segmentLayout.joystick.centerX / 100);
     const joystickComponent = joystickComponents
       .filter((candidate) => candidate.y >= top && candidate.y < bottom)
-      .sort((left, right) => Math.abs(left.y - center) - Math.abs(right.y - center))[0];
-    const joystickCenterX = joystickComponent?.x ?? image.width * (geometry.joystickCenterX / 100);
+      .sort(
+        (left, right) =>
+          Math.hypot(left.x - expectedJoystickX, left.y - center) -
+          Math.hypot(right.x - expectedJoystickX, right.y - center),
+      )[0];
+    const joystickCenterX = joystickComponent?.x ?? expectedJoystickX;
+    const joystickCenterY =
+      joystickComponent?.y ?? top + segmentHeight * (segmentLayout.joystick.centerY / 100);
+    const joystickRadiusX = image.width * (segmentLayout.joystick.radius / 100);
+    const joystickRadiusY = segmentHeight * 0.48;
     const joystickMarker = rowMarkers
       .filter(
         (marker) =>
           marker.color === "red" &&
-          marker.x <= image.width * (geometry.joystickRegionEndX / 100) &&
-          Math.abs(marker.x - joystickCenterX) <= image.width * 0.18,
+          marker.x <= image.width * (segmentLayout.joystick.regionEndX / 100) &&
+          Math.abs(marker.x - joystickCenterX) <= joystickRadiusX &&
+          Math.abs(marker.y - joystickCenterY) <= joystickRadiusY,
       )
       .sort(
         (left, right) => Math.abs(left.x - joystickCenterX) - Math.abs(right.x - joystickCenterX),
@@ -753,9 +799,19 @@ export function detectInputDisplay(
       detected: Boolean(joystickMarker),
       confidence: joystickMarker ? (joystickComponent ? 0.95 : 0.7) : joystickComponent ? 0.35 : 0,
       centerX: joystickComponent?.x ?? joystickCenterX,
-      centerY: joystickComponent?.y ?? center,
+      centerY: joystickCenterY,
       markerX: joystickMarker?.x,
       markerY: joystickMarker?.y,
+    };
+    row.segmentCheck = {
+      populated: Boolean(backgroundCheck.detected && joystickComponent && joystickMarker),
+      reason: !backgroundCheck.detected
+        ? "missing-black-band"
+        : joystickComponent
+          ? joystickMarker
+            ? "joystick-and-marker"
+            : "missing-joystick-marker"
+          : "missing-joystick-circle",
     };
     row.buttonChecks = buildButtonChecks(
       row,
@@ -770,12 +826,17 @@ export function detectInputDisplay(
     });
     // Keep only blobs that belong to a fixed control location. Components
     // elsewhere in the ROI are background/debug-art noise, not input data.
+    // In particular, do not retain every marker to the right of the joystick:
+    // background pixels in that area can be cyan and would otherwise be
+    // mistaken for the F button by the resolver's legacy fallback.
     row.markers = rowMarkers.filter((marker) => acceptedMarkers.has(marker));
     row.numberReading =
       readNumberInSegment(
         image,
-        center,
-        segmentHeight * 0.48,
+        top,
+        segmentHeight,
+        segmentLayout.number.top,
+        segmentLayout.number.height,
         geometry.numberStartX,
         geometry.numberEndX,
         geometry.digitTemplates,
@@ -826,17 +887,16 @@ export function formatInputDisplayDebug(observation: InputDisplayObservation) {
       const number = row.numberReading
         ? `${row.numberReading.text}(${row.numberReading.confidence.toFixed(2)})`
         : "-";
-      return `r${index} j=${joystick} b=${buttons} n=${number}`;
+      const segment = row.segmentCheck?.populated ? "ok" : "empty";
+      const background = row.backgroundCheck
+        ? `${row.backgroundCheck.detected ? "ok" : "-"}(${row.backgroundCheck.coverage.toFixed(2)})`
+        : "-";
+      return `r${index} segment=${segment} band=${background} j=${joystick} b=${buttons} n=${number}`;
     })
     .join(" | ");
 }
 
-const buttonByColor: Record<InputMarkerColor, string> = {
-  blue: "A",
-  yellow: "B",
-  red: "C",
-  cyan: "S",
-};
+const buttonByColor: Record<InputMarkerColor, string> = inputButtonByMarkerColor;
 
 function median(values: number[]) {
   if (values.length === 0) return 0;
@@ -855,7 +915,7 @@ function resolveInputRow(
   observation: InputDisplayObservation,
   row: InputDisplayRow | undefined,
 ): ResolvedInput | null {
-  if (!row || row.markers.length === 0) return null;
+  if (!row || row.markers.length === 0 || row.segmentCheck?.populated === false) return null;
 
   const joystickCenterX =
     row.joystick?.centerX ??
@@ -877,6 +937,10 @@ function resolveInputRow(
   const checkedButtonMarkers = row.buttonChecks
     ?.filter((check) => check.detected && check.marker)
     .map((check) => check.marker as InputMarker);
+  // A detected button check is authoritative for calibrated observations. If
+  // no button passed its expected color/position/shape checks, the row has no
+  // buttons. Falling back to every marker to the right of the joystick turns
+  // unrelated background blobs into inputs (especially cyan -> F).
   const buttonMarkers = row.buttonChecks
     ? (checkedButtonMarkers ?? [])
     : row.markers.filter((marker) => marker.x > buttonThreshold);
@@ -997,7 +1061,7 @@ export function resolveRecentInput(
   // through the button row so the input sequence is read chronologically. A
   // bounded window prevents an old motion elsewhere in the 13-row history
   // from being paired with a new button.
-  const motionHistoryLimit = 8;
+  const motionHistoryLimit = Math.min(12, Math.max(8, Math.round(maxRows)));
   const historyStart = Math.min(
     observation.rows.length - 1,
     buttonRowIndex + motionHistoryLimit - 1,
