@@ -73,8 +73,8 @@ The current prototype proves that browser-based analysis can produce diagnostics
 1. Detector functions are split into pure modules such as `src/framebar-detector.ts` and `src/input-display.ts`.
 2. `src/recording-processor.ts` orchestrates those modules without importing React or a live overlay component.
 3. Calibration, templates, and runtime color mappings are read from renderer `localStorage`.
-4. Offline analysis uses a hidden HTML video and canvas seeking.
-5. The processor uses a logical 60 FPS sampling interval rather than preserving a source-frame timeline; each new analysis now records that limitation and its maximum seek error explicitly.
+4. Desktop analysis now uses the Electron FFmpeg frame reader and canvas sampling when available; the hidden HTML video remains a browser/fallback adapter.
+5. The FFmpeg path samples sequential source frames, while the browser fallback uses a logical 60 FPS seeking interval; each analysis records which path was used.
 6. Some calibration values are percentages while other values are source-pixel offsets, but the calibration snapshot does not consistently identify its source dimensions.
 7. The debugger has historically had separate geometry code from the detector, allowing the displayed regions to drift from the pixels actually sampled.
 8. Older analyses do not necessarily contain the exact configuration, templates, or color map used to generate them.
@@ -234,7 +234,7 @@ Each saved analysis must retain the exact snapshot used. Current renderer storag
 
 ## Media backend decision
 
-The offline pipeline should compare two frame-provider implementations before committing to one:
+The offline pipeline supports two frame-provider implementations:
 
 ### Browser video and canvas
 
@@ -242,7 +242,7 @@ Useful for rapid preview, but requires careful handling of codec support, seekin
 
 ### FFmpeg frame extraction
 
-Likely preferable for offline processing because FFmpeg is already packaged, source timestamps are easier to preserve, and the pipeline can run independently of the React renderer.
+The desktop path uses this provider because FFmpeg is already packaged and sequential decoded frames are reproducible. The current reader preserves source frame order; source presentation timestamps remain a follow-up requirement for variable-frame-rate media.
 
 The decision gate is a benchmark using the same fixture clips. The selected provider must demonstrate:
 
@@ -319,7 +319,8 @@ The artifact must be generated from the same geometry and detector output used b
 6. Add fixture regression checks.
 7. Revalidate single-move processing.
 8. Add combo/pressure sequence correlation.
-9. Only then investigate hitbox capture and corner-distance experiments.
+9. Validate visible overlay colors and geometry against manually reviewed frames.
+10. Expand hitbox tracks into verified hitbox/hurtbox semantics, then investigate corner-distance experiments.
 
 ## Decision rules
 

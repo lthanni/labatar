@@ -141,6 +141,8 @@ Everything in the codebase ultimately supports those three goals.
 
 ## Working notes
 
+- The Tech move list and Capture selector contract is documented in [`MOVE_SECTION_INTENT.md`](MOVE_SECTION_INTENT.md).
+
 - The app can be developed locally with the Electron + Vite flow described in the project README.
 - The current package setup and scripts indicate this project expects Node 22+, pnpm, and a Windows environment for full runtime validation.
 - A lot of business logic is embedded in TypeScript modules rather than a backend service, so the codebase is more “desktop app with structured local analysis” than a standard web app.
