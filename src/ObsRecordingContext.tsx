@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Button, Chip, Stack } from "@mui/material";
+import { Button, Chip, IconButton, Stack, Tooltip } from "@mui/material";
 import type { ObsSettings, ObsState } from "./obs-types";
 import type { MoveCaptureState, MoveTakeOutcome } from "./move-capture-types";
 
@@ -428,7 +428,7 @@ export function useObsRecording() {
   return context;
 }
 
-export function ObsRecordingControls() {
+export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () => void }) {
   const {
     busy,
     state,
@@ -446,18 +446,27 @@ export function ObsRecordingControls() {
 
   return (
     <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: "stretch" }}>
-      <Button
-        size="small"
-        variant={connected ? "outlined" : "contained"}
-        onClick={() => void (connected ? disconnect() : connect())}
-        disabled={busy || recording || state.status === "connecting"}
-      >
-        {state.status === "connecting"
-          ? "Connecting..."
-          : connected
-            ? "Disconnect OBS"
-            : "Connect to OBS"}
-      </Button>
+      <Stack direction="row" spacing={0.5} sx={{ alignItems: "center" }}>
+        <Button
+          size="small"
+          variant={connected ? "outlined" : "contained"}
+          onClick={() => void (connected ? disconnect() : connect())}
+          disabled={busy || recording || state.status === "connecting"}
+        >
+          {state.status === "connecting"
+            ? "Connecting..."
+            : connected
+              ? "Disconnect OBS"
+              : "Connect to OBS"}
+        </Button>
+        <Tooltip title="OBS settings">
+          <IconButton size="small" aria-label="OBS settings" onClick={onOpenSettings}>
+            <span aria-hidden="true" style={{ fontSize: 20, lineHeight: 1 }}>
+              ⚙
+            </span>
+          </IconButton>
+        </Tooltip>
+      </Stack>
       {state.automation.enabled ? (
         <Button
           size="small"

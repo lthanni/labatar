@@ -137,6 +137,16 @@ const productionObsRecordDirectory = () =>
   path.join(app.getPath("videos"), "Labatar", "recordings");
 const defaultObsRecordDirectory = () =>
   isDev ? path.resolve(__dirname, "..", ".dev", "recordings") : productionObsRecordDirectory();
+
+function isDevelopmentObsRecordDirectory(directory) {
+  const segments = path.resolve(directory).split(path.sep).filter(Boolean);
+  return (
+    segments.length >= 2 &&
+    segments.at(-2).toLowerCase() === ".dev" &&
+    segments.at(-1).toLowerCase() === "recordings"
+  );
+}
+
 let obsClient = null;
 let obsConnectionToken = 0;
 let preparedObsProfile = null;
@@ -202,7 +212,9 @@ function getObsSettings() {
     (!savedRecordDirectory ||
       path.resolve(savedRecordDirectory) === path.resolve(productionObsRecordDirectory()))
       ? defaultObsRecordDirectory()
-      : (savedRecordDirectory ?? defaultObsRecordDirectory());
+      : !isDev && savedRecordDirectory && isDevelopmentObsRecordDirectory(savedRecordDirectory)
+        ? productionObsRecordDirectory()
+        : (savedRecordDirectory ?? defaultObsRecordDirectory());
   return {
     host: typeof saved.host === "string" && saved.host.trim() ? saved.host.trim() : "127.0.0.1",
     port: Number.isInteger(Number(saved.port)) ? Number(saved.port) : 4455,

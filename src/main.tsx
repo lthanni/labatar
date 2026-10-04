@@ -8,6 +8,10 @@ import {
   Card,
   CardContent,
   Checkbox,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   FormControlLabel,
   IconButton,
@@ -702,34 +706,38 @@ function App() {
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [recordingsRefreshToken, setRecordingsRefreshToken] = useState(0);
+  const [obsSettingsOpen, setObsSettingsOpen] = useState(false);
   const recordingsTabIndex = 1;
   const captureTabIndex = 2;
   const nerdProcessingTabIndex = 3;
   const techTabIndex = 4;
+  const recordingTabAvailable = Boolean(window.electronAPI?.recordings);
   const tabStorageKey = "avatar-app-last-tab-v2";
   const { state: obsState } = useObsRecording();
+  const availableTabIndices = [
+    0,
+    ...(recordingTabAvailable ? [recordingsTabIndex] : []),
+    ...(developerTabsAvailable ? [captureTabIndex, nerdProcessingTabIndex, techTabIndex] : []),
+  ];
   const [tab, setTab] = useState(() => {
     const storedTab = localStorage.getItem(tabStorageKey);
     const legacyTab = Number(localStorage.getItem("avatar-app-last-tab"));
     const savedTab = Number(storedTab ?? (legacyTab === 2 ? techTabIndex : legacyTab));
-    const availableTabs = developerTabsAvailable
-      ? [0, recordingsTabIndex, captureTabIndex, nerdProcessingTabIndex, techTabIndex]
-      : [0];
-    return availableTabs.includes(savedTab) ? savedTab : 0;
+    return availableTabIndices.includes(savedTab) ? savedTab : 0;
   });
   const [mountedTabs, setMountedTabs] = useState(() => ({
     replay: tab === 0,
-    recordings: developerTabsAvailable && tab === recordingsTabIndex,
+    recordings: recordingTabAvailable && tab === recordingsTabIndex,
     capture: developerTabsAvailable && tab === captureTabIndex,
     nerdProcessing: developerTabsAvailable && tab === nerdProcessingTabIndex,
     tech: tab === techTabIndex,
   }));
   const changeTab = (nextTab: number) => {
-    if (!developerTabsAvailable && nextTab !== 0) return;
+    if (!availableTabIndices.includes(nextTab)) return;
     setTab(nextTab);
     setMountedTabs((current) => ({
       replay: current.replay || nextTab === 0,
-      recordings: developerTabsAvailable && (current.recordings || nextTab === recordingsTabIndex),
+      recordings: recordingTabAvailable && (current.recordings || nextTab === recordingsTabIndex),
       capture: developerTabsAvailable && (current.capture || nextTab === captureTabIndex),
       nerdProcessing:
         developerTabsAvailable && (current.nerdProcessing || nextTab === nerdProcessingTabIndex),
@@ -749,7 +757,7 @@ function App() {
 
   useEffect(() => {
     const showRecordings = () => {
-      if (developerTabsAvailable) changeTab(recordingsTabIndex);
+      if (recordingTabAvailable) changeTab(recordingsTabIndex);
     };
     const showTech = () => changeTab(techTabIndex);
     window.addEventListener(techSelectRecordingEvent, showRecordings);
@@ -758,7 +766,7 @@ function App() {
       window.removeEventListener(techSelectRecordingEvent, showRecordings);
       window.removeEventListener(techSelectComboEvent, showTech);
     };
-  }, [developerTabsAvailable, recordingsTabIndex, techTabIndex]);
+  }, [recordingTabAvailable, recordingsTabIndex, techTabIndex]);
 
   useEffect(() => window.electronAPI?.updates.onStatus(setUpdateStatus), []);
   useEffect(() => {
@@ -775,13 +783,13 @@ function App() {
       >
         <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)}>
           <Tab label="Match history" />
-          {developerTabsAvailable && <Tab label="Recordings" value={recordingsTabIndex} />}
-          {developerTabsAvailable && <Tab label="Capture" value={captureTabIndex} />}
+          {recordingTabAvailable && <Tab label="Recordings" value={recordingsTabIndex} />}
+          {developerTabsAvailable && <Tab label="Dev-only capture" value={captureTabIndex} />}
           {developerTabsAvailable && <Tab label="Nerd processing" value={nerdProcessingTabIndex} />}
           {developerTabsAvailable && <Tab label="Tech" value={techTabIndex} />}
         </Tabs>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: "center" }}>
-          <ObsRecordingControls />
+          <ObsRecordingControls onOpenSettings={() => setObsSettingsOpen(true)} />
           {appVersion && (
             <Typography variant="caption" color="text.secondary">
               v{appVersion}
@@ -789,12 +797,26 @@ function App() {
           )}
         </Stack>
       </Stack>
+      <Dialog
+        open={obsSettingsOpen}
+        onClose={() => setObsSettingsOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>OBS settings</DialogTitle>
+        <DialogContent sx={{ pt: 1 }}>
+          <ObsRecordingPanel />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setObsSettingsOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
       {mountedTabs.replay && (
         <Box sx={{ display: tab === 0 ? "block" : "none" }}>
           <ReplayAnalysis />
         </Box>
       )}
-      {developerTabsAvailable && mountedTabs.recordings && (
+      {recordingTabAvailable && mountedTabs.recordings && (
         <Box
           sx={{
             display: tab === recordingsTabIndex ? "block" : "none",
@@ -812,10 +834,7 @@ function App() {
       )}
       {developerTabsAvailable && mountedTabs.capture && (
         <Box sx={{ display: tab === captureTabIndex ? "block" : "none" }}>
-          <Stack spacing={2}>
-            <MoveCapturePanel />
-            <ObsRecordingPanel />
-          </Stack>
+          <MoveCapturePanel />
         </Box>
       )}
       {developerTabsAvailable && mountedTabs.nerdProcessing && (
