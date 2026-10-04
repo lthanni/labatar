@@ -34,11 +34,23 @@ import { AvatarGrid, type ReplayRow } from "./AvatarGrid";
 import type { AnalysisSummary } from "./AnalyticsSection";
 import { useCallback } from "react";
 import { ObsRecordingPanel } from "./ObsRecordingPanel";
+import { ObsRecordingControls, ObsRecordingProvider, useObsRecording } from "./ObsRecordingContext";
+import { MoveCapturePanel } from "./MoveCapturePanel";
 import { RecordingViewer } from "./RecordingViewer";
 import { TechSection } from "./TechSection";
 import type { ObsSettings, ObsState, RecordingMetadata } from "./obs-types";
 import type { RecordedVideo, RecordingTags } from "./recording-types";
 import type { RecordingAnalysis } from "./recording-analysis-types";
+import type {
+  KnownMoveCaptureVariant,
+  MoveCaptureState,
+  MoveCatalog,
+  MoveTakeOutcome,
+} from "./move-capture-types";
+import type {
+  ProcessingConfiguration,
+  ProcessingConfigurationResult,
+} from "./processing-config-types";
 import { techSelectComboEvent, techSelectRecordingEvent } from "./tech-types";
 
 declare global {
@@ -46,6 +58,23 @@ declare global {
     electronAPI?: {
       app: {
         getVersion: () => Promise<string>;
+      };
+      processingConfiguration: {
+        load: () => Promise<ProcessingConfigurationResult>;
+        save: (request: {
+          configuration: ProcessingConfiguration;
+          expectedRevision: number;
+        }) => Promise<ProcessingConfigurationResult>;
+        export: () => Promise<string | null>;
+        import: (request: {
+          expectedRevision: number | null;
+        }) => Promise<ProcessingConfigurationResult | null>;
+      };
+      capture: {
+        getState: () => Promise<CaptureState>;
+        setSettings: (request: { hotkey: string }) => Promise<CaptureState>;
+        toggle: () => Promise<{ outputPath?: string | null }>;
+        onState: (listener: (state: CaptureState) => void) => () => void;
       };
       obs: {
         getState: () => Promise<ObsState>;
@@ -116,23 +145,72 @@ declare global {
           folder: string;
           recordings: RecordedVideo[];
         }>;
+        openFrameReader: (request: { recordingId: string }) => Promise<{
+          sessionId: string;
+          frameRate: number;
+        }>;
+        readFrame: (request: { sessionId: string; frameIndex: number }) => Promise<{
+          frameIndex: number;
+          data: string;
+        }>;
+        closeFrameReader: (request: { sessionId: string }) => Promise<boolean>;
         exportClip: (request: {
           recordingId: string;
           startTime: number;
           endTime: number;
         }) => Promise<RecordedVideo>;
         renameRecording: (request: { recordingId: string; name: string }) => Promise<RecordedVideo>;
+        reprocessName: (request: { recordingId: string }) => Promise<RecordedVideo>;
+        openYouTubeStudio: (request: { recordingId: string }) => Promise<void>;
         setTags: (request: { recordingId: string; tags: RecordingTags }) => Promise<RecordedVideo>;
         saveAnalysis: (request: {
           recordingId: string;
           analysis: RecordingAnalysis;
         }) => Promise<RecordedVideo>;
+        setMoveEvidence: (request: {
+          recordingId: string;
+          action: "accept" | "archive";
+          reason?: string;
+        }) => Promise<RecordedVideo>;
         deleteRecording: (request: { recordingId: string }) => Promise<{ id: string }>;
         startDrag: (request: { recordingId: string }) => void;
+      };
+      moveCatalog: {
+        load: () => Promise<{
+          catalog: MoveCatalog;
+          path: string;
+          recoveredFromBackup: boolean;
+        }>;
+        knownVariants: () => Promise<KnownMoveCaptureVariant[]>;
+        save: (request: { catalog: MoveCatalog; expectedRevision: number }) => Promise<{
+          catalog: MoveCatalog;
+          path: string;
+          recoveredFromBackup: boolean;
+        }>;
+      };
+      moveCapture: {
+        getState: () => Promise<MoveCaptureState>;
+        arm: (request: {
+          characterId: string;
+          moveId: string;
+          moveInput: string;
+          isStance: boolean;
+          isCharged: boolean;
+          outcome: MoveTakeOutcome;
+        }) => Promise<MoveCaptureState>;
+        disarm: () => Promise<MoveCaptureState>;
+        onState: (listener: (state: MoveCaptureState) => void) => () => void;
       };
     };
   }
 }
+
+type CaptureState = {
+  hotkey: string;
+  hotkeyRegistered: boolean;
+  lastAction: "started" | "stopped" | null;
+  error: string | null;
+};
 
 type UpdateStatus = {
   state: "checking" | "available" | "downloading" | "downloaded" | "not-available" | "error";
@@ -624,15 +702,26 @@ function App() {
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [recordingsRefreshToken, setRecordingsRefreshToken] = useState(0);
-  const techTabIndex = 2;
+  const recordingsTabIndex = 1;
+  const captureTabIndex = 2;
+  const nerdProcessingTabIndex = 3;
+  const techTabIndex = 4;
+  const tabStorageKey = "avatar-app-last-tab-v2";
+  const { state: obsState } = useObsRecording();
   const [tab, setTab] = useState(() => {
-    const savedTab = Number(localStorage.getItem("avatar-app-last-tab"));
-    const availableTabs = developerTabsAvailable ? [0, 1, techTabIndex] : [0];
+    const storedTab = localStorage.getItem(tabStorageKey);
+    const legacyTab = Number(localStorage.getItem("avatar-app-last-tab"));
+    const savedTab = Number(storedTab ?? (legacyTab === 2 ? techTabIndex : legacyTab));
+    const availableTabs = developerTabsAvailable
+      ? [0, recordingsTabIndex, captureTabIndex, nerdProcessingTabIndex, techTabIndex]
+      : [0];
     return availableTabs.includes(savedTab) ? savedTab : 0;
   });
   const [mountedTabs, setMountedTabs] = useState(() => ({
     replay: tab === 0,
-    recording: developerTabsAvailable && tab === 1,
+    recordings: developerTabsAvailable && tab === recordingsTabIndex,
+    capture: developerTabsAvailable && tab === captureTabIndex,
+    nerdProcessing: developerTabsAvailable && tab === nerdProcessingTabIndex,
     tech: tab === techTabIndex,
   }));
   const changeTab = (nextTab: number) => {
@@ -640,18 +729,27 @@ function App() {
     setTab(nextTab);
     setMountedTabs((current) => ({
       replay: current.replay || nextTab === 0,
-      recording: developerTabsAvailable && (current.recording || nextTab === 1),
+      recordings: developerTabsAvailable && (current.recordings || nextTab === recordingsTabIndex),
+      capture: developerTabsAvailable && (current.capture || nextTab === captureTabIndex),
+      nerdProcessing:
+        developerTabsAvailable && (current.nerdProcessing || nextTab === nerdProcessingTabIndex),
       tech: current.tech || nextTab === techTabIndex,
     }));
-    localStorage.setItem("avatar-app-last-tab", String(nextTab));
+    localStorage.setItem(tabStorageKey, String(nextTab));
   };
   const refreshRecordings = useCallback(() => {
     setRecordingsRefreshToken((current) => current + 1);
   }, []);
 
+  const previousRecordingActive = useRef(false);
+  useEffect(() => {
+    if (previousRecordingActive.current && !obsState.recording.active) refreshRecordings();
+    previousRecordingActive.current = obsState.recording.active;
+  }, [obsState.recording.active, refreshRecordings]);
+
   useEffect(() => {
     const showRecordings = () => {
-      if (developerTabsAvailable) changeTab(1);
+      if (developerTabsAvailable) changeTab(recordingsTabIndex);
     };
     const showTech = () => changeTab(techTabIndex);
     window.addEventListener(techSelectRecordingEvent, showRecordings);
@@ -660,7 +758,7 @@ function App() {
       window.removeEventListener(techSelectRecordingEvent, showRecordings);
       window.removeEventListener(techSelectComboEvent, showTech);
     };
-  }, [developerTabsAvailable, techTabIndex]);
+  }, [developerTabsAvailable, recordingsTabIndex, techTabIndex]);
 
   useEffect(() => window.electronAPI?.updates.onStatus(setUpdateStatus), []);
   useEffect(() => {
@@ -670,40 +768,70 @@ function App() {
   return (
     <>
       <UpdateStatusBanner status={updateStatus} onClose={() => setUpdateStatus(null)} />
-      <Stack direction="row" sx={{ mb: 2, alignItems: "center", justifyContent: "space-between" }}>
+      <Stack
+        direction={{ xs: "column", lg: "row" }}
+        spacing={1.5}
+        sx={{ mb: 2, alignItems: { lg: "center" }, justifyContent: "space-between" }}
+      >
         <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)}>
           <Tab label="Match history" />
-          {developerTabsAvailable && <Tab label="Recordings" />}
-          {developerTabsAvailable && <Tab label="Tech" />}
+          {developerTabsAvailable && <Tab label="Recordings" value={recordingsTabIndex} />}
+          {developerTabsAvailable && <Tab label="Capture" value={captureTabIndex} />}
+          {developerTabsAvailable && <Tab label="Nerd processing" value={nerdProcessingTabIndex} />}
+          {developerTabsAvailable && <Tab label="Tech" value={techTabIndex} />}
         </Tabs>
-        {appVersion && (
-          <Typography variant="caption" color="text.secondary">
-            v{appVersion}
-          </Typography>
-        )}
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: "center" }}>
+          <ObsRecordingControls />
+          {appVersion && (
+            <Typography variant="caption" color="text.secondary">
+              v{appVersion}
+            </Typography>
+          )}
+        </Stack>
       </Stack>
       {mountedTabs.replay && (
         <Box sx={{ display: tab === 0 ? "block" : "none" }}>
           <ReplayAnalysis />
         </Box>
       )}
-      {developerTabsAvailable && mountedTabs.recording && (
+      {developerTabsAvailable && mountedTabs.recordings && (
         <Box
           sx={{
-            display: tab === 1 ? "block" : "none",
+            display: tab === recordingsTabIndex ? "block" : "none",
             height: "calc(100vh - 96px)",
             minHeight: 0,
             overflow: "hidden",
           }}
         >
-          <Stack spacing={2} sx={{ height: "100%", minHeight: 0 }}>
-            <Box sx={{ flexShrink: 0 }}>
-              <ObsRecordingPanel onRecordingStopped={refreshRecordings} />
-            </Box>
-            <Box sx={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
-              <RecordingViewer active={tab === 1} refreshToken={recordingsRefreshToken} />
-            </Box>
+          <RecordingViewer
+            active={tab === recordingsTabIndex}
+            refreshToken={recordingsRefreshToken}
+            mode="recordings"
+          />
+        </Box>
+      )}
+      {developerTabsAvailable && mountedTabs.capture && (
+        <Box sx={{ display: tab === captureTabIndex ? "block" : "none" }}>
+          <Stack spacing={2}>
+            <MoveCapturePanel />
+            <ObsRecordingPanel />
           </Stack>
+        </Box>
+      )}
+      {developerTabsAvailable && mountedTabs.nerdProcessing && (
+        <Box
+          sx={{
+            display: tab === nerdProcessingTabIndex ? "block" : "none",
+            height: "calc(100vh - 96px)",
+            minHeight: 0,
+            overflow: "hidden",
+          }}
+        >
+          <RecordingViewer
+            active={tab === nerdProcessingTabIndex}
+            refreshToken={recordingsRefreshToken}
+            mode="nerd-processing"
+          />
         </Box>
       )}
       {developerTabsAvailable && mountedTabs.tech && (
@@ -736,7 +864,9 @@ createRoot(root).render(
         }}
       >
         <AgGridProvider modules={agGridModules}>
-          <App />
+          <ObsRecordingProvider>
+            <App />
+          </ObsRecordingProvider>
         </AgGridProvider>
       </Box>
     </ThemeProvider>

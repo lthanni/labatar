@@ -1,5 +1,6 @@
 import type { RecordingMetadata } from "./obs-types";
 import type { RecordingAnalysis } from "./recording-analysis-types";
+import type { RecordingMoveTake } from "./move-capture-types";
 
 export type RecordingTagCategory = "match" | "lab" | "combo" | "pressure";
 export type RecordingTagSubtag = "ranked" | "casual" | "practice" | "new-combos" | "new-pressure";
@@ -47,12 +48,21 @@ export type RecordedGame = {
 export type RecordedVideo = {
   id: string;
   name: string;
+  source?: "automatic" | "manual" | null;
   url: string;
   size: number;
   modifiedAt: number;
   metadata: RecordingMetadata | null;
   tags: RecordingTags;
   analysis: RecordingAnalysis | null;
+  analysisHistory?: Array<{
+    processedAt: string;
+    inputs: string[];
+    moves: Array<{ notation: string | null; startTime: number; endTime: number }>;
+    warnings: string[];
+    processorVersion: string | null;
+    processorFingerprint: string | null;
+  }>;
   games: RecordedGame[];
   replays: Array<{
     matchId: string | null;
@@ -62,6 +72,7 @@ export type RecordedVideo = {
   }>;
   replayPath: string | null;
   replayFileName: string | null;
+  moveTake?: RecordingMoveTake | null;
   clip: RecordingClipMetadata | null;
   capture?: RecordingCaptureMetadata | null;
 };

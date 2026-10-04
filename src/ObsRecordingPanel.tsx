@@ -1,269 +1,50 @@
-import { useEffect, useRef, useState } from "react";
 import {
-  Alert,
   Accordion,
   AccordionDetails,
   AccordionSummary,
+  Alert,
   Box,
   Button,
   Checkbox,
   FormControlLabel,
-  Paper,
   Stack,
   TextField,
   Typography,
 } from "@mui/material";
-import type { ObsSettings, ObsState } from "./obs-types";
+import { useEffect, useState } from "react";
+import { useObsRecording } from "./ObsRecordingContext";
 
-const defaultSettings: ObsSettings = {
-  host: "127.0.0.1",
-  port: 4455,
-  profileName: "Labatar Recording",
-  recordDirectory: "",
-  passwordSaved: false,
+type CaptureState = {
+  hotkey: string;
+  hotkeyRegistered: boolean;
+  lastAction: "started" | "stopped" | null;
+  error: string | null;
 };
 
-const savedPasswordMask = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022";
-const labatarSceneNames = [
-  "Labatar - Game Only",
-  "Labatar - Game + Desktop + Mic",
-  "Labatar - Game + Mic",
-];
-
-const disconnectedState: ObsState = {
-  status: "disconnected",
-  host: defaultSettings.host,
-  port: defaultSettings.port,
-  error: null,
-  obsVersion: null,
-  obsWebSocketVersion: null,
-  currentProfileName: null,
-  profiles: [],
-  currentSceneCollectionName: null,
-  currentSceneName: null,
-  recordDirectory: null,
-  videoSettings: null,
-  automation: {
-    enabled: false,
-    status: "disabled",
-    logPath: null,
-    lobbyId: null,
-    currentMatch: null,
-    setNumber: 0,
-    gameNumber: 0,
-    lastReplayPath: null,
-    pendingRecordings: 0,
-    error: null,
-  },
-  recording: {
-    active: false,
-    paused: false,
-    outputPath: null,
-    sessionId: null,
-    source: null,
-    metadata: null,
-    startedAt: null,
-  },
-};
-
-function displayError(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
-}
-
-export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?: () => void }) {
-  const [state, setState] = useState<ObsState>(disconnectedState);
-  const [settings, setSettings] = useState<ObsSettings>(defaultSettings);
-  const [password, setPassword] = useState("");
-  const [passwordFocused, setPasswordFocused] = useState(false);
-  const [rememberPassword, setRememberPassword] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const previousRecordingActive = useRef(false);
-
-  useEffect(() => {
-    if (!window.electronAPI?.obs) return;
-    let active = true;
-    const unsubscribe = window.electronAPI.obs.onState((nextState) => {
-      if (active) setState(nextState);
-    });
-    void Promise.all([
-      window.electronAPI.obs.getState(),
-      window.electronAPI.obs.getSettings(),
-    ]).then(([nextState, nextSettings]) => {
-      if (!active) return;
-      setState(nextState);
-      setSettings(nextSettings);
-      setRememberPassword(nextSettings.passwordSaved);
-    });
-    return () => {
-      active = false;
-      unsubscribe();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (previousRecordingActive.current && !state.recording.active) {
-      onRecordingStopped?.();
-    }
-    previousRecordingActive.current = state.recording.active;
-  }, [onRecordingStopped, state.recording.active]);
-
-  const updateSetting = <K extends keyof ObsSettings>(key: K, value: ObsSettings[K]) => {
-    setSettings((current) => ({ ...current, [key]: value }));
-  };
-  const connect = async () => {
-    if (!window.electronAPI?.obs) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await window.electronAPI.obs.connect({
-        host: settings.host,
-        port: Number(settings.port),
-        password,
-        rememberPassword,
-      });
-      setSettings((current) => ({
-        ...current,
-        passwordSaved: rememberPassword && (current.passwordSaved || Boolean(password)),
-      }));
-      setNotice("Connected to OBS.");
-    } catch (connectError) {
-      setError(displayError(connectError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const clearPassword = async () => {
-    if (!window.electronAPI?.obs) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await window.electronAPI.obs.clearPassword();
-      setSettings((current) => ({ ...current, passwordSaved: false }));
-      setPassword("");
-      setPasswordFocused(false);
-      setNotice("Saved OBS password removed.");
-    } catch (clearError) {
-      setError(displayError(clearError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const disconnect = async () => {
-    if (!window.electronAPI?.obs) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await window.electronAPI.obs.disconnect();
-      setNotice("Disconnected from OBS.");
-    } catch (disconnectError) {
-      setError(displayError(disconnectError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const toggleAutomaticRecording = async (enabled: boolean) => {
-    if (!window.electronAPI?.obs) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await window.electronAPI.obs.setAutomaticRecording(enabled);
-      setNotice(
-        enabled
-          ? "Log monitoring is active. OBS will record detected games automatically."
-          : "Log monitoring stopped.",
-      );
-    } catch (toggleError) {
-      setError(displayError(toggleError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const startManualRecording = async () => {
-    if (!window.electronAPI?.obs) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await window.electronAPI.obs.startManualRecording({
-        setup: {
-          profileName: settings.profileName,
-          recordDirectory: settings.recordDirectory,
-        },
-      });
-      setNotice(`Manual recording started. Videos will be saved to ${settings.recordDirectory}.`);
-    } catch (startError) {
-      setError(displayError(startError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const stopManualRecording = async () => {
-    if (!window.electronAPI?.obs) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const result = await window.electronAPI.obs.stopRecording();
-      setNotice(
-        result.outputPath
-          ? `Manual recording saved: ${result.outputPath}`
-          : "Manual recording stopped.",
-      );
-    } catch (stopError) {
-      setError(displayError(stopError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const setupScenes = async () => {
-    if (!window.electronAPI?.obs) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const result = await window.electronAPI.obs.setupScenes({
-        profileName: settings.profileName,
-        recordDirectory: settings.recordDirectory,
-      });
-      setNotice(
-        `Labatar profile and ${result.scenes.length} scenes are ready in the ${result.sceneCollectionName} scene collection. Game audio uses ${result.gameAudioMode === "separate" ? "a separate application audio source" : "the window capture source"}. ${result.outputResolution ? `Output resized to ${result.outputResolution.width}×${result.outputResolution.height}.` : "Open the game and run setup again to resize output to the game source."}`,
-      );
-    } catch (setupError) {
-      setError(displayError(setupError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const setScene = async (sceneName: string) => {
-    if (!window.electronAPI?.obs) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const nextState = await window.electronAPI.obs.setScene(sceneName);
-      setState(nextState);
-    } catch (sceneError) {
-      setError(displayError(sceneError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
+export function ObsRecordingPanel() {
+  const {
+    state,
+    settings,
+    password,
+    passwordFocused,
+    rememberPassword,
+    busy,
+    notice,
+    error,
+    savedPasswordMask,
+    labatarSceneNames,
+    updateSetting,
+    setPassword,
+    setPasswordFocused,
+    setRememberPassword,
+    connect,
+    clearPassword,
+    disconnect,
+    setupScenes,
+    setScene,
+  } = useObsRecording();
   const connected = state.status === "connected";
   const recording = state.recording.active;
-  const manualRecording = recording && state.recording.source === "manual";
-  const automaticRecordingActive = recording && state.recording.source === "automatic";
-  const displayedError = error ?? state.error ?? state.automation.error;
   const expectedProfileName = settings.profileName.trim();
   const expectedProfileMissing =
     connected &&
@@ -280,6 +61,51 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
       ? state.videoSettings.fpsNumerator / state.videoSettings.fpsDenominator
       : null;
   const recordingFpsMismatch = connected && configuredFps !== 60;
+  const displayedError = error ?? state.error ?? state.automation.error;
+  const [captureState, setCaptureState] = useState<CaptureState | null>(null);
+  const [captureHotkey, setCaptureHotkey] = useState("F9");
+  const [captureBusy, setCaptureBusy] = useState(false);
+  const [captureNotice, setCaptureNotice] = useState<string | null>(null);
+  const [captureError, setCaptureError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!window.electronAPI?.capture) return;
+    let active = true;
+    const unsubscribe = window.electronAPI.capture.onState((nextState) => {
+      if (!active) return;
+      setCaptureState(nextState);
+      setCaptureHotkey(nextState.hotkey);
+    });
+    void window.electronAPI.capture.getState().then((nextState) => {
+      if (!active) return;
+      setCaptureState(nextState);
+      setCaptureHotkey(nextState.hotkey);
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  const saveCaptureSettings = async () => {
+    if (!window.electronAPI?.capture) return;
+    setCaptureBusy(true);
+    setCaptureNotice(null);
+    setCaptureError(null);
+    try {
+      const nextState = await window.electronAPI.capture.setSettings({
+        hotkey: captureHotkey,
+      });
+      setCaptureState(nextState);
+      setCaptureNotice(
+        `Global capture shortcut ${nextState.hotkey} ${nextState.hotkeyRegistered ? "registered" : "not registered"}.`,
+      );
+    } catch (saveError) {
+      setCaptureError(saveError instanceof Error ? saveError.message : String(saveError));
+    } finally {
+      setCaptureBusy(false);
+    }
+  };
 
   return (
     <Accordion
@@ -294,91 +120,22 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
       }}
     >
       <AccordionSummary
-        component="div"
-        role="button"
-        tabIndex={0}
-        onKeyDown={(event) => {
-          if (
-            event.target !== event.currentTarget ||
-            (event.key !== "Enter" && event.key !== " ")
-          ) {
-            return;
-          }
-          event.preventDefault();
-          event.currentTarget.click();
-        }}
         expandIcon={<span aria-hidden="true">v</span>}
         sx={{ "& .MuiAccordionSummary-content": { alignItems: "center" } }}
       >
         <Box sx={{ flex: 1, minWidth: 0 }}>
-          <Typography variant="h6">Recording configuration</Typography>
+          <Typography variant="h6">Capture configuration</Typography>
           <Typography color="text.secondary">
-            Connect Labatar to OBS and configure automatic or manual recording.
+            Connect Labatar to OBS and configure the profile, scenes, and automatic recording.
           </Typography>
         </Box>
-        <Stack
-          direction={{ xs: "column", sm: "row" }}
-          spacing={1}
-          sx={{ ml: 1, mr: 1, flexShrink: 0 }}
+        <Typography
+          variant="caption"
+          color={recording ? "error.main" : connected ? "success.main" : "text.secondary"}
+          sx={{ mr: 2, flexShrink: 0 }}
         >
-          {state.automation.enabled ? (
-            <Paper variant="outlined" sx={{ px: 1, py: 0.5, mr: 1 }}>
-              <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                <Box>
-                  <Typography variant="caption" color="success.main" sx={{ display: "block" }}>
-                    Automatic recording active
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                    {automaticRecordingActive ? "Recording in progress" : "Waiting for game"}
-                    {" | Detection: " + state.automation.status}
-                  </Typography>
-                </Box>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  color="error"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void toggleAutomaticRecording(false);
-                  }}
-                  onFocus={(event) => event.stopPropagation()}
-                  disabled={!connected || busy || manualRecording}
-                >
-                  Stop recording
-                </Button>
-              </Stack>
-            </Paper>
-          ) : (
-            <Button
-              size="small"
-              variant="contained"
-              onClick={(event) => {
-                event.stopPropagation();
-                void toggleAutomaticRecording(true);
-              }}
-              onFocus={(event) => event.stopPropagation()}
-              disabled={!connected || busy || manualRecording}
-              sx={{ mr: 1 }}
-            >
-              Start automatic recording
-            </Button>
-          )}
-          <Button
-            size="small"
-            variant={manualRecording ? "outlined" : "contained"}
-            color={manualRecording ? "error" : "primary"}
-            onClick={(event) => {
-              event.stopPropagation();
-              void (manualRecording ? stopManualRecording() : startManualRecording());
-            }}
-            onFocus={(event) => event.stopPropagation()}
-            disabled={
-              !connected || busy || (!manualRecording && (recording || state.automation.enabled))
-            }
-          >
-            {manualRecording ? "Stop recording" : "Start recording"}
-          </Button>
-        </Stack>
+          {recording ? "Recording active" : state.status}
+        </Typography>
       </AccordionSummary>
       <AccordionDetails sx={{ px: 3, pb: 3 }}>
         <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 2 }}>
@@ -452,6 +209,56 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
             {state.obsWebSocketVersion ? ` | WebSocket ${state.obsWebSocketVersion}` : ""}
           </Typography>
 
+          <Box sx={{ borderTop: 1, borderColor: "divider", pt: 2 }}>
+            <Typography variant="subtitle2">Global capture shortcut</Typography>
+            <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1 }}>
+              This shortcut starts and stops the OBS recording without requiring Labatar to be
+              focused.
+            </Typography>
+            <Stack
+              direction={{ xs: "column", md: "row" }}
+              spacing={1}
+              sx={{ alignItems: "center" }}
+            >
+              <TextField
+                label="Shortcut"
+                size="small"
+                value={captureHotkey}
+                onChange={(event) => setCaptureHotkey(event.target.value)}
+                disabled={captureBusy || recording}
+                helperText="Examples: F9 or CommandOrControl+Shift+R"
+                sx={{ minWidth: 260 }}
+              />
+              <Button
+                variant="outlined"
+                onClick={() => void saveCaptureSettings()}
+                disabled={captureBusy || recording}
+              >
+                Save shortcut
+              </Button>
+            </Stack>
+            <Typography
+              variant="caption"
+              color={captureState?.hotkeyRegistered ? "success.main" : "warning.main"}
+              component="div"
+              sx={{ mt: 1 }}
+            >
+              {captureState
+                ? `${captureState.hotkey}: ${captureState.hotkeyRegistered ? "registered" : "not registered"}`
+                : "Loading shortcut status..."}
+            </Typography>
+            {captureNotice && (
+              <Alert severity="success" sx={{ mt: 1 }}>
+                {captureNotice}
+              </Alert>
+            )}
+            {captureError && (
+              <Alert severity="error" sx={{ mt: 1 }}>
+                {captureError}
+              </Alert>
+            )}
+          </Box>
+
           {connected && (
             <>
               <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
@@ -459,7 +266,6 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
                   label="Labatar profile"
                   size="small"
                   value={settings.profileName}
-                  onChange={(event) => updateSetting("profileName", event.target.value)}
                   disabled
                   sx={{ minWidth: 220 }}
                 />
@@ -467,7 +273,6 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
                   label="Recording directory"
                   size="small"
                   value={settings.recordDirectory}
-                  onChange={(event) => updateSetting("recordDirectory", event.target.value)}
                   disabled
                   fullWidth
                 />
@@ -539,8 +344,7 @@ export function ObsRecordingPanel({ onRecordingStopped }: { onRecordingStopped?:
 
           {recording && (
             <Typography variant="body2" color="error.main">
-              Recording active
-              {state.recording.sessionId ? ` | ${state.recording.sessionId}` : ""}
+              Recording active{state.recording.sessionId ? ` | ${state.recording.sessionId}` : ""}
             </Typography>
           )}
           {notice && <Alert severity="success">{notice}</Alert>}

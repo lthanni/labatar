@@ -53,6 +53,7 @@ export function findClosestFramebarColor(
   green: number,
   blue: number,
   definitions: FramebarColorDefinition[],
+  distanceThreshold = framebarColorDistanceThreshold,
 ): FramebarColorMatch | null {
   const sample = toColorFeatures(red, green, blue);
   const closest = definitions.reduce<FramebarColorMatch | null>((best, definition) => {
@@ -74,10 +75,10 @@ export function findClosestFramebarColor(
     return {
       ...definition,
       distance,
-      confidence: Math.max(0, 1 - distance / framebarColorDistanceThreshold),
+      confidence: Math.max(0, 1 - distance / distanceThreshold),
     };
   }, null);
-  return closest && closest.distance <= framebarColorDistanceThreshold ? closest : null;
+  return closest && closest.distance <= distanceThreshold ? closest : null;
 }
 
 // Keep the storage key stable so existing calibrated runtime mappings remain readable.

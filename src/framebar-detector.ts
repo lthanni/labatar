@@ -24,6 +24,15 @@ export function calculateOnBlock(
   if (phases.recovery <= 0 || opponentPhases.blockstun <= 0) return null;
   return opponentPhases.blockstun - phases.recovery - postHitpauseActiveFrames;
 }
+
+export function calculateOnHit(
+  phases: Pick<FramePhaseCounts, "recovery">,
+  opponentPhases: Pick<DefensivePhaseCounts, "hitstun">,
+  postHitpauseActiveFrames = 0,
+) {
+  if (phases.recovery <= 0 || opponentPhases.hitstun <= 0) return null;
+  return opponentPhases.hitstun - phases.recovery - postHitpauseActiveFrames;
+}
 export type FramebarTimelineSample = {
   timestamp: number;
   player1: string;

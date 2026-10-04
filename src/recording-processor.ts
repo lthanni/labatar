@@ -1,12 +1,8 @@
-import {
-  findClosestFramebarColor,
-  framebarColorMap,
-  type FramebarColorMatch,
-} from "./framebar-color-map";
+import { findClosestFramebarColor, type FramebarColorMatch } from "./framebar-color-map";
 import {
   detectInputDisplay,
   formatInputDisplayObservation,
-  readDigitTemplates,
+  inputDisplayObservationsMatch,
   resolveNewestInput,
   type InputDisplayObservation,
   type ResolvedInput,
@@ -19,6 +15,7 @@ import {
   groupFramebarStates,
   isIdleFramebar,
   calculateOnBlock,
+  calculateOnHit,
   countPostHitpauseActiveFrames,
   resolveFramebarSampleSpacing,
   scanFramebar,
@@ -29,27 +26,32 @@ import {
   type FramebarTimelineSample,
 } from "./framebar-detector";
 import {
-  hasStoredDetectorConfig,
-  readDetectorConfig,
-  readRuntimeFramebarColorMap,
-  type DetectorConfig,
-} from "./detector-config";
-import {
   createTrainingMeterTracker,
-  readTrainingMeterCalibration,
   updateTrainingMeterTracker,
   type TrainingMeterTracker,
 } from "./training-meter";
+import { detectVisibleHitboxes } from "./hitbox-detector";
+import {
+  assertCompatibleProcessingConfiguration,
+  effectiveDetectorConfig,
+  getProcessingConfiguration,
+  recordingProcessorVersion,
+  recordingProcessorFingerprint,
+} from "./processing-config";
+import type { ProcessingConfiguration } from "./processing-config-types";
 import type {
   RecordingAnalysis,
   RecordingAnalysisDefense,
   RecordingAnalysisHit,
+  RecordingAnalysisHitbox,
+  RecordingAnalysisHitboxSample,
+  RecordingAnalysisHitboxTrack,
   RecordingAnalysisInputEvent,
   RecordingAnalysisMove,
   RecordingAnalysisPhases,
 } from "./recording-analysis-types";
 import {
-  findInputForFramebarStart,
+  findInputForStartup,
   INPUT_ASSOCIATION_LOOKAHEAD_SECONDS,
   type RecordingInputCandidate,
 } from "./recording-input-association";
@@ -61,6 +63,11 @@ export type RecordingProcessorProgress = {
   duration: number;
 };
 
+export type RecordingFrameProvider = {
+  frameRate: number;
+  readFrame: (frameIndex: number) => Promise<ImageBitmap | null>;
+};
+
 type InputPoint = RecordingInputCandidate;
 
 type ActiveMove = {
@@ -68,6 +75,8 @@ type ActiveMove = {
   framebarStartTime: number;
   input: InputPoint | null;
 };
+
+type HitboxFrameObservation = RecordingAnalysisHitboxSample;
 
 function waitForVideo(video: HTMLVideoElement) {
   return new Promise<void>((resolve, reject) => {
@@ -123,7 +132,9 @@ function makeReadPixel(pixels: Uint8ClampedArray, width: number, height: number)
 }
 
 function drawRegion(
-  video: HTMLVideoElement,
+  source: CanvasImageSource,
+  sourceWidth: number,
+  sourceHeight: number,
   context: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
   xPercent: number,
@@ -131,61 +142,16 @@ function drawRegion(
   widthPercent: number,
   heightPercent: number,
 ) {
-  const x = Math.max(0, video.videoWidth * (xPercent / 100));
-  const y = Math.max(0, video.videoHeight * (yPercent / 100));
-  const width = Math.max(
-    1,
-    Math.min(video.videoWidth - x, video.videoWidth * (widthPercent / 100)),
-  );
-  const height = Math.max(
-    1,
-    Math.min(video.videoHeight - y, video.videoHeight * (heightPercent / 100)),
-  );
+  const x = Math.max(0, sourceWidth * (xPercent / 100));
+  const y = Math.max(0, sourceHeight * (yPercent / 100));
+  const width = Math.max(1, Math.min(sourceWidth - x, sourceWidth * (widthPercent / 100)));
+  const height = Math.max(1, Math.min(sourceHeight - y, sourceHeight * (heightPercent / 100)));
   const canvasWidth = Math.max(1, Math.round(width));
   const canvasHeight = Math.max(1, Math.round(height));
   if (canvas.width !== canvasWidth) canvas.width = canvasWidth;
   if (canvas.height !== canvasHeight) canvas.height = canvasHeight;
-  context.drawImage(video, x, y, width, height, 0, 0, canvasWidth, canvasHeight);
+  context.drawImage(source, x, y, width, height, 0, 0, canvasWidth, canvasHeight);
   return { width: canvasWidth, height: canvasHeight };
-}
-
-// The overlay's pixel offsets were calibrated against the 2560x1440 OBS
-// output. Recordings can be resized by OBS, while the ROI positions remain
-// percentage based. Scale only the pixel offsets used inside those ROIs.
-function scaleDetectorConfig(config: DetectorConfig, videoWidth: number, videoHeight: number) {
-  const widthScale = videoWidth / 2560;
-  const heightScale = videoHeight / 1440;
-  return {
-    ...config,
-    baseSampleOffset: config.baseSampleOffset * heightScale,
-    yellowSampleOffset: config.yellowSampleOffset * heightScale,
-    sampleStartOffset: config.sampleStartOffset * widthScale,
-    sampleSpacing: config.sampleSpacing * widthScale,
-    gateSampleOffset: config.gateSampleOffset * heightScale,
-    gateStartOffset: config.gateStartOffset * widthScale,
-    gateSpacing: config.gateSpacing * widthScale,
-  };
-}
-
-function fallbackFramebarColor(red: number, green: number, blue: number): FramebarColorMatch {
-  const maximum = Math.max(red, green, blue);
-  const minimum = Math.min(red, green, blue);
-  const saturation = maximum - minimum;
-  const idle = saturation < 24 || maximum < 58;
-  return {
-    name: idle ? "idle" : "active",
-    red,
-    green,
-    blue,
-    distance: 0,
-    confidence: idle ? 0.35 : 0.3,
-  };
-}
-
-function mappedColorGetter() {
-  const mappings = [...framebarColorMap, ...readRuntimeFramebarColorMap()];
-  return (red: number, green: number, blue: number): FramebarColorMatch | null =>
-    findClosestFramebarColor(red, green, blue, mappings);
 }
 
 function bestFramebar(timeline: FramebarTimelineSample[], startTime: number, endTime: number) {
@@ -206,6 +172,7 @@ function createMove(
   endTime: number,
   timeline: FramebarTimelineSample[],
   index: number,
+  hitboxTimeline: HitboxFrameObservation[],
 ): RecordingAnalysisMove {
   const best = bestFramebar(timeline, active.framebarStartTime, endTime);
   const phases: RecordingAnalysisPhases = best?.player1Phases ?? {
@@ -220,6 +187,7 @@ function createMove(
     other: 0,
   };
   const onBlock = calculateOnBlock(phases, opponentPhases, best?.postHitpauseActiveFrames ?? 0);
+  const onHit = calculateOnHit(phases, opponentPhases, best?.postHitpauseActiveFrames ?? 0);
   const status: RecordingAnalysisHit["status"] =
     opponentPhases.blockstun > 0 ? "blocked" : opponentPhases.hitstun > 0 ? "hit" : "unknown";
   const moveId = `processed-move-${index + 1}`;
@@ -232,8 +200,16 @@ function createMove(
     phases,
     opponentPhases,
     onBlock,
+    onHit,
     hitboxTrackIds: [],
   };
+  const hitboxTracks = buildHitboxTracks(
+    hitboxTimeline.filter(
+      (sample) => sample.time >= active.framebarStartTime && sample.time <= endTime,
+    ),
+    moveId,
+  );
+  hit.hitboxTrackIds = hitboxTracks.map((track) => track.id);
   return {
     id: moveId,
     notation: active.input?.input.notation ?? null,
@@ -245,18 +221,72 @@ function createMove(
     phases,
     opponentPhases,
     onBlock,
+    onHit,
     hits: [hit],
-    hitboxTracks: null,
-    hitboxStatus: "unavailable",
+    hitboxTracks: hitboxTracks.length > 0 ? hitboxTracks : null,
+    hitboxStatus: hitboxTracks.length > 0 ? "detected" : "not-found",
     analysisRuleId: null,
   };
+}
+
+function boxIntersectionOverUnion(left: RecordingAnalysisHitbox, right: RecordingAnalysisHitbox) {
+  const intersectionLeft = Math.max(left.x, right.x);
+  const intersectionTop = Math.max(left.y, right.y);
+  const intersectionRight = Math.min(left.x + left.width, right.x + right.width);
+  const intersectionBottom = Math.min(left.y + left.height, right.y + right.height);
+  const intersectionWidth = Math.max(0, intersectionRight - intersectionLeft);
+  const intersectionHeight = Math.max(0, intersectionBottom - intersectionTop);
+  const intersection = intersectionWidth * intersectionHeight;
+  const union = left.width * left.height + right.width * right.height - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+function buildHitboxTracks(samples: HitboxFrameObservation[], moveId: string) {
+  const tracks: Array<RecordingAnalysisHitboxTrack & { lastBox: RecordingAnalysisHitbox }> = [];
+  for (const sample of samples) {
+    const assigned = new Set<string>();
+    for (const box of sample.boxes) {
+      const candidate = tracks
+        .filter(
+          (track) =>
+            !assigned.has(track.id) &&
+            track.lastBox.kind === box.kind &&
+            sample.frame - (track.samples.at(-1)?.frame ?? sample.frame) <= 2,
+        )
+        .sort(
+          (left, right) =>
+            boxIntersectionOverUnion(right.lastBox, box) -
+            boxIntersectionOverUnion(left.lastBox, box),
+        )[0];
+      const track =
+        candidate && boxIntersectionOverUnion(candidate.lastBox, box) >= 0.05
+          ? candidate
+          : {
+              id: `${moveId}-hitbox-${tracks.length + 1}`,
+              hitId: `${moveId}-hit-1`,
+              samples: [],
+              lastBox: box,
+            };
+      track.samples.push({ frame: sample.frame, time: sample.time, boxes: [box] });
+      track.lastBox = box;
+      assigned.add(track.id);
+      if (!tracks.includes(track)) tracks.push(track);
+    }
+  }
+  return tracks.map(({ lastBox: _lastBox, ...track }) => track);
 }
 
 export async function processRecording(
   url: string,
   onProgress?: (progress: RecordingProcessorProgress) => void,
   fallbackVideo?: HTMLVideoElement,
+  frameProvider?: RecordingFrameProvider,
+  configuration?: ProcessingConfiguration,
 ): Promise<RecordingAnalysis> {
+  const processingConfiguration = structuredClone(
+    configuration ?? (await getProcessingConfiguration()),
+  );
+  assertCompatibleProcessingConfiguration(processingConfiguration);
   const video = document.createElement("video");
   video.crossOrigin = "anonymous";
   video.muted = true;
@@ -294,41 +324,48 @@ export async function processRecording(
     throw new Error("The recording has no readable duration.");
   }
 
-  const savedConfig = readDetectorConfig();
-  const configSource = hasStoredDetectorConfig() ? "saved" : "default-scaled";
-  const config =
-    configSource === "saved"
-      ? savedConfig
-      : scaleDetectorConfig(savedConfig, processingVideo.videoWidth, processingVideo.videoHeight);
+  const configSource = "persistent";
+  const config = effectiveDetectorConfig(
+    processingConfiguration,
+    processingVideo.videoWidth,
+    processingVideo.videoHeight,
+  );
   const inputCanvas = document.createElement("canvas");
   const inputContext = inputCanvas.getContext("2d", { willReadFrequently: true });
   const player1Canvas = document.createElement("canvas");
   const player1Context = player1Canvas.getContext("2d", { willReadFrequently: true });
   const player2Canvas = document.createElement("canvas");
   const player2Context = player2Canvas.getContext("2d", { willReadFrequently: true });
-  if (!inputContext || !player1Context || !player2Context) {
+  const hitboxCanvas = document.createElement("canvas");
+  const hitboxContext = hitboxCanvas.getContext("2d", { willReadFrequently: true });
+  if (!inputContext || !player1Context || !player2Context || !hitboxContext) {
     throw new Error("The recording could not be analyzed because canvas is unavailable.");
   }
 
   const duration = processingVideo.duration;
-  const frameRate = 60;
+  const frameRate = frameProvider?.frameRate ?? 60;
   const total = Math.max(1, Math.ceil(duration * frameRate));
-  const inputConfig = inputDisplayGeometryFromConfig(config, readDigitTemplates());
-  const mappedColor = mappedColorGetter();
-  let usedFallbackFramebarColor = false;
-  const getMappedColor = (red: number, green: number, blue: number): FramebarColorMatch => {
-    const mapped = mappedColor(red, green, blue);
-    if (mapped) return mapped;
-    usedFallbackFramebarColor = true;
-    return fallbackFramebarColor(red, green, blue);
+  const inputConfig = inputDisplayGeometryFromConfig(
+    config,
+    processingConfiguration.digitTemplates,
+  );
+  const unmappedFramebarColors = new Map<string, number>();
+  const getMappedColor = (red: number, green: number, blue: number): FramebarColorMatch | null => {
+    const mapped = findClosestFramebarColor(
+      red,
+      green,
+      blue,
+      processingConfiguration.framebar.colors,
+      processingConfiguration.framebar.distanceThreshold,
+    );
+    if (!mapped) {
+      const key = `${red},${green},${blue}`;
+      unmappedFramebarColors.set(key, (unmappedFramebarColors.get(key) ?? 0) + 1);
+    }
+    return mapped;
   };
   const meterTracker: TrainingMeterTracker = createTrainingMeterTracker();
-  const calibration = readTrainingMeterCalibration();
-  const trainingThresholds = calibration.fitted ?? {
-    enterThreshold: 0.4,
-    exitThreshold: 0.32,
-    oneSidedEnterThreshold: 0.55,
-  };
+  const trainingThresholds = processingConfiguration.trainingMeter.thresholds;
   const p1StableStates: string[] = [];
   const p1CandidateStates: string[] = [];
   const p1CandidateCounts: number[] = [];
@@ -336,6 +373,7 @@ export async function processRecording(
   const p2CandidateStates: string[] = [];
   const p2CandidateCounts: number[] = [];
   const timeline: FramebarTimelineSample[] = [];
+  const hitboxTimeline: HitboxFrameObservation[] = [];
   const diagnostics: NonNullable<RecordingAnalysis["diagnostics"]> = [];
   const inputTimeline: InputPoint[] = [];
   const inputEvents: RecordingAnalysisInputEvent[] = [];
@@ -343,12 +381,15 @@ export async function processRecording(
   const moves: RecordingAnalysisMove[] = [];
   const warnings: string[] = [];
   let stableInputSignature = "";
-  let pendingInputSignature = "";
+  let pendingInputObservation: InputDisplayObservation | null = null;
   let pendingInputCount = 0;
   let stableInput: ResolvedInput | null = null;
   let pendingResolvedSignature = "";
   let pendingResolvedCount = 0;
   let lastStableInputNotation: string | null = null;
+  let rawButtonNotation: string | null = null;
+  let rawButtonFirstSeenTime = 0;
+  let rawButtonFrameCount = 0;
   let hasInputBaseline = false;
   let previousFramebarSignature = "";
   let lastFramebarChangeTime = 0;
@@ -360,7 +401,7 @@ export async function processRecording(
 
   const finishMove = (endTime: number) => {
     if (!activeMove) return;
-    moves.push(createMove(activeMove, endTime, timeline, moves.length));
+    moves.push(createMove(activeMove, endTime, timeline, moves.length, hitboxTimeline));
     activeMove = null;
   };
 
@@ -384,13 +425,28 @@ export async function processRecording(
     return associated;
   };
 
+  let sampledFrameCount = 0;
   for (let frame = 0; frame < total; frame += 1) {
     const time = Math.min(duration, frame / frameRate);
-    const actualTime = await seekVideo(processingVideo, time);
-    maximumSeekErrorSeconds = Math.max(maximumSeekErrorSeconds, Math.abs(actualTime - time));
+    let frameSource: CanvasImageSource = processingVideo;
+    let frameWidth = processingVideo.videoWidth;
+    let frameHeight = processingVideo.videoHeight;
+    let exactFrame: ImageBitmap | null = null;
+    if (frameProvider) {
+      exactFrame = await frameProvider.readFrame(frame);
+      if (!exactFrame) break;
+      frameSource = exactFrame;
+      frameWidth = exactFrame.width;
+      frameHeight = exactFrame.height;
+    } else {
+      const actualTime = await seekVideo(processingVideo, time);
+      maximumSeekErrorSeconds = Math.max(maximumSeekErrorSeconds, Math.abs(actualTime - time));
+    }
 
     const inputSize = drawRegion(
-      processingVideo,
+      frameSource,
+      frameWidth,
+      frameHeight,
       inputContext,
       inputCanvas,
       config.inputSourceX,
@@ -406,10 +462,23 @@ export async function processRecording(
       },
       inputConfig,
     );
+    const newestInput = resolveNewestInput(inputObservation);
+    const newestButtonNotation = newestInput?.buttons.length ? newestInput.notation : null;
+    if (newestButtonNotation && newestButtonNotation === rawButtonNotation) {
+      rawButtonFrameCount += 1;
+    } else {
+      rawButtonNotation = newestButtonNotation;
+      rawButtonFirstSeenTime = time;
+      rawButtonFrameCount = newestButtonNotation ? 1 : 0;
+    }
     const inputSignature = formatInputDisplayObservation(inputObservation);
-    if (inputSignature === pendingInputSignature) pendingInputCount += 1;
+    if (
+      pendingInputObservation &&
+      inputDisplayObservationsMatch(inputObservation, pendingInputObservation)
+    )
+      pendingInputCount += 1;
     else {
-      pendingInputSignature = inputSignature;
+      pendingInputObservation = inputObservation;
       pendingInputCount = 1;
     }
     if (stableInputSignature === "" || pendingInputCount >= 3) {
@@ -417,7 +486,7 @@ export async function processRecording(
       // Only the newest history row can introduce a new input. Looking back
       // through older rows resurrects stale buttons after the game has already
       // appended a newer move, which was the source of the 5A -> 2A error.
-      stableInput = inputObservation.rows.length ? resolveNewestInput(inputObservation) : null;
+      stableInput = newestInput;
     }
     const resolvedSignature = stableInput?.notation ?? "none";
     if (resolvedSignature === pendingResolvedSignature) pendingResolvedCount += 1;
@@ -446,7 +515,9 @@ export async function processRecording(
     }
 
     const p1Size = drawRegion(
-      processingVideo,
+      frameSource,
+      frameWidth,
+      frameHeight,
       player1Context,
       player1Canvas,
       config.player1SourceX,
@@ -455,7 +526,9 @@ export async function processRecording(
       config.framebarSourceHeight,
     );
     const p2Size = drawRegion(
-      processingVideo,
+      frameSource,
+      frameWidth,
+      frameHeight,
       player2Context,
       player2Canvas,
       config.sourceX,
@@ -515,21 +588,36 @@ export async function processRecording(
     });
     let moveEvent: "start" | "end" | null = null;
     const framebarIdle = isIdleFramebar(p1Groups);
-    if (changed && !framebarIdle && !activeMove && !pendingMoveStart) {
+    const framebarHasActiveState = p1Groups.some((group) =>
+      group.state.toLowerCase().includes("active"),
+    );
+    const hasRecognizedMoveState = p1Groups.some((group) =>
+      /startup|active|recovery/i.test(group.state),
+    );
+    if (changed && hasRecognizedMoveState && !framebarIdle && !activeMove && !pendingMoveStart) {
       // Wait briefly for the input history to append its newest row. This
       // avoids committing an attack from a stale row and also lets a short
       // initial framebar settling artifact disappear without creating a move.
       pendingMoveStart = { framebarStartTime: time };
     }
     if (pendingMoveStart && !activeMove) {
-      const candidate = findInputForFramebarStart(
-        inputTimeline,
-        pendingMoveStart.framebarStartTime,
-      );
+      // The newest button row can appear just before startup, with its counter
+      // at zero or one. Track its first decoded frame because digit OCR is not
+      // reliable enough to use the displayed counter as the event timestamp.
+      const candidate = findInputForStartup({
+        inputs: inputTimeline,
+        framebarStartTime: pendingMoveStart.framebarStartTime,
+        currentTime: time,
+        frameRate,
+        newestInput,
+        newestButtonFirstSeenTime: rawButtonFirstSeenTime,
+        newestButtonFrameCount: rawButtonFrameCount,
+      });
       const associationWindowExpired =
         time - pendingMoveStart.framebarStartTime > INPUT_ASSOCIATION_LOOKAHEAD_SECONDS;
-      if (candidate && (!candidate.preexisting || associationWindowExpired)) {
+      if (candidate) {
         const input = associateInput(candidate);
+        if (candidate.input === newestInput) lastStableInputNotation = newestInput.notation;
         activeMove = {
           startTime: input.time,
           framebarStartTime: pendingMoveStart.framebarStartTime,
@@ -551,6 +639,22 @@ export async function processRecording(
         };
         pendingMoveStart = null;
         moveEvent = "start";
+      }
+    }
+    // The game exposes the useful hitbox overlay during active framebar cells.
+    // Do not interpret similarly colored character or UI pixels from startup,
+    // recovery, or idle frames as hitboxes.
+    if (framebarHasActiveState) {
+      const hitboxWidth = Math.max(1, Math.min(frameWidth, 1280));
+      const hitboxHeight = Math.max(1, Math.round((frameHeight / frameWidth) * hitboxWidth));
+      if (hitboxCanvas.width !== hitboxWidth) hitboxCanvas.width = hitboxWidth;
+      if (hitboxCanvas.height !== hitboxHeight) hitboxCanvas.height = hitboxHeight;
+      hitboxContext.drawImage(frameSource, 0, 0, hitboxWidth, hitboxHeight);
+      const boxes = detectVisibleHitboxes(
+        hitboxContext.getImageData(0, 0, hitboxWidth, hitboxHeight),
+      );
+      if (boxes.length > 0) {
+        hitboxTimeline.push({ frame, time, boxes });
       }
     }
     if (activeMove && !changed && time - lastFramebarChangeTime >= 0.15) {
@@ -602,6 +706,8 @@ export async function processRecording(
       onProgress?.({ completed: frame + 1, total, time, duration });
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     }
+    sampledFrameCount = frame + 1;
+    exactFrame?.close();
   }
   finishMove(duration);
   const sourceWidth = processingVideo.videoWidth;
@@ -614,12 +720,21 @@ export async function processRecording(
     fallbackVideo.muted = fallbackState.muted;
     if (fallbackState.wasPlaying) void fallbackVideo.play();
   }
-  const trainingFrameRatio = trainingFrames / total;
+  if (sampledFrameCount === 0) {
+    throw new Error(
+      "No video frames were decoded. The existing analysis was preserved; check the FFmpeg frame reader before reprocessing.",
+    );
+  }
+  const processedFrameTotal = Math.max(1, sampledFrameCount);
+  const trainingFrameRatio = trainingFrames / processedFrameTotal;
   if (trainingFrameRatio < 0.2)
     warnings.push("Training mode could not be confirmed for most frames.");
   if (moves.length === 0) warnings.push("No move episodes were detected.");
-  if (usedFallbackFramebarColor) {
-    warnings.push("Framebar color mappings were unavailable; phase labels are approximate.");
+  if (unmappedFramebarColors.size) {
+    const commonColors = [...unmappedFramebarColors].sort((a, b) => b[1] - a[1]).slice(0, 5);
+    warnings.push(
+      `Some sampled framebar colors did not match calibration and were left unknown: ${commonColors.map(([color, count]) => `RGB(${color}) x${count}`).join("; ")}. Check the sample positions and color palette.`,
+    );
   }
   return {
     schemaVersion: 1,
@@ -627,11 +742,11 @@ export async function processRecording(
     duration,
     sourceWidth,
     sourceHeight,
-    sampledFrames: total,
+    sampledFrames: sampledFrameCount,
     timing: {
-      mode: "logical-60fps-browser-seeking",
-      nominalFrameRate: 60,
-      sourceFrameRate: null,
+      mode: frameProvider ? "logical-source-frame-ffmpeg" : "logical-60fps-browser-seeking",
+      nominalFrameRate: frameRate,
+      sourceFrameRate: frameProvider ? frameRate : null,
       sourceTimestampsAvailable: false,
       requestedFrameCount: total,
       maximumSeekErrorSeconds,
@@ -640,6 +755,13 @@ export async function processRecording(
     moves,
     inputEvents,
     warnings,
+    processingSnapshot: {
+      processorVersion: recordingProcessorVersion,
+      processorFingerprint: recordingProcessorFingerprint,
+      configuration: processingConfiguration,
+      effectiveDetector: config,
+      sourceSize: { width: sourceWidth, height: sourceHeight },
+    },
     detectorConfig: config,
     detectorConfigSource: configSource,
     detectorRegions: {

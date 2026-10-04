@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Autocomplete,
   Box,
@@ -26,6 +26,14 @@ import {
   Typography,
 } from "@mui/material";
 import type { RecordedVideo } from "./recording-types";
+import { moveTakeOutcomes, type MoveTakeOutcome } from "./move-capture-types";
+import { withCommonTechMoves } from "./common-tech-moves";
+import { effectiveMeasurement } from "./move-measurements";
+import {
+  chargedInputFor,
+  linkLegacyChargedMoves,
+  withChargedVariant,
+} from "./charged-move-variants";
 import {
   techCatalogStorageKey,
   techCatalogUpdatedEvent,
@@ -39,9 +47,16 @@ import type {
   TechCombo,
   TechMove,
   TechResourceCosts,
-  TechRekkaFollowupPattern,
+  TechStanceFollowupPattern,
+  TechMeasuredField,
 } from "./tech-types";
-import { moveNotationsMatch, normalizeMoveNotation, parseMoveNotation } from "./move-notation";
+import {
+  classifyMoveInput,
+  isFlowCancellableByDefault,
+  moveNotationsMatch,
+  normalizeMoveNotation,
+  parseMoveNotation,
+} from "./move-notation";
 
 type TechCharacter = {
   value: string;
@@ -79,13 +94,27 @@ const supportsByCharacter: Record<string, string[]> = {
 };
 
 const screenPositions = ["corner", "midscreen", "fullscreen"];
+const measuredFields: Array<{ key: TechMeasuredField; label: string }> = [
+  { key: "startup", label: "Startup" },
+  { key: "active", label: "Active" },
+  { key: "recovery", label: "Recovery" },
+  { key: "onBlock", label: "On block" },
+  { key: "blockstun", label: "Blockstun" },
+  { key: "hitstunGrounded", label: "Grounded hitstun" },
+  { key: "onHitGrounded", label: "On grounded hit" },
+  { key: "hitstunAirborne", label: "Airborne hitstun" },
+  { key: "onHitAirborne", label: "On airborne hit" },
+];
 
 type MoveDraft = {
   input: string;
-  isRekka: boolean;
+  notApplicable: Partial<Record<MoveTakeOutcome, string>>;
+  flowCancellable: boolean | null;
+  isStanceParent: boolean;
+  hasChargedVersion: boolean;
   allowsDirectionalFollowups: boolean;
   dependsOnMoveId: string;
-  rekkaMinimumDuration: string;
+  stanceMinimumDuration: string;
   startup: string;
   active: string;
   recovery: string;
@@ -107,10 +136,13 @@ type ComboDraft = {
 
 const emptyMoveDraft: MoveDraft = {
   input: "",
-  isRekka: false,
+  notApplicable: {},
+  flowCancellable: null,
+  isStanceParent: false,
+  hasChargedVersion: false,
   allowsDirectionalFollowups: false,
   dependsOnMoveId: "",
-  rekkaMinimumDuration: "",
+  stanceMinimumDuration: "",
   startup: "",
   active: "",
   recovery: "",
@@ -132,7 +164,7 @@ const emptyComboDraft: ComboDraft = {
 
 function loadTechCatalog(): TechCatalog {
   const catalog: TechCatalog = Object.fromEntries(
-    characters.map(({ value }) => [value, { moves: [], combos: [] }]),
+    characters.map(({ value }) => [value, { moves: [], supportMoves: [], combos: [] }]),
   );
   try {
     const stored = JSON.parse(localStorage.getItem(techCatalogStorageKey) ?? "null") as Record<
@@ -142,22 +174,59 @@ function loadTechCatalog(): TechCatalog {
     for (const character of characters) {
       const storedCharacter = stored?.[character.value];
       if (!storedCharacter) continue;
+      catalog[character.value].supportMoves = Array.isArray(storedCharacter.supportMoves)
+        ? storedCharacter.supportMoves.filter(
+            (entry) =>
+              typeof entry?.id === "string" &&
+              typeof entry?.baseMoveId === "string" &&
+              typeof entry?.support === "string",
+          )
+        : [];
       if (Array.isArray(storedCharacter.moves)) {
         catalog[character.value].moves = storedCharacter.moves.map((move) => {
+          const legacyMove = move as TechMove & {
+            isRekka?: boolean;
+            isStance?: boolean;
+            rekkaFollowupPattern?: TechStanceFollowupPattern;
+            rekkaMinimumDuration?: number;
+          };
+          const currentMove = { ...legacyMove };
+          delete currentMove.isRekka;
+          delete currentMove.isStance;
+          delete currentMove.rekkaFollowupPattern;
+          delete currentMove.rekkaMinimumDuration;
           const normalizedInput =
-            typeof move.input === "string" ? normalizeMoveNotation(move.input) : null;
+            typeof move.input === "string"
+              ? normalizeMoveNotation(move.input, {
+                  allowDirectionless: Boolean(move.dependsOnMoveId),
+                })
+              : null;
           return {
-            ...move,
+            ...currentMove,
             input: normalizedInput ?? move.input,
-            isRekka: move.isRekka === true,
-            rekkaFollowupPattern:
-              (move.rekkaFollowupPattern as TechRekkaFollowupPattern | null) ===
+            isStanceParent: move.isStanceParent === true || legacyMove.isRekka === true,
+            isCharged: move.isCharged === true,
+            flowCancellable:
+              typeof move.flowCancellable === "boolean"
+                ? move.flowCancellable
+                : isFlowCancellableByDefault(normalizedInput ?? move.input, {
+                    allowDirectionless: Boolean(move.dependsOnMoveId),
+                  }),
+            notApplicable: move.notApplicable ?? {},
+            stanceFollowupPattern:
+              (move.stanceFollowupPattern as TechStanceFollowupPattern | null) ===
               "directional-button"
                 ? "directional-button"
-                : null,
+                : legacyMove.rekkaFollowupPattern === "directional-button"
+                  ? "directional-button"
+                  : null,
             dependsOnMoveId: typeof move.dependsOnMoveId === "string" ? move.dependsOnMoveId : null,
-            rekkaMinimumDuration:
-              typeof move.rekkaMinimumDuration === "number" ? move.rekkaMinimumDuration : null,
+            stanceMinimumDuration:
+              typeof move.stanceMinimumDuration === "number"
+                ? move.stanceMinimumDuration
+                : (legacyMove.rekkaMinimumDuration ?? null),
+            chargedMoveId: typeof move.chargedMoveId === "string" ? move.chargedMoveId : null,
+            baseMoveId: typeof move.baseMoveId === "string" ? move.baseMoveId : null,
           };
         });
       }
@@ -187,6 +256,11 @@ function loadTechCatalog(): TechCatalog {
     }
   } catch {
     // Use the empty catalog if local storage contains invalid tech data.
+  }
+  for (const character of characters) {
+    catalog[character.value].moves = linkLegacyChargedMoves(
+      withCommonTechMoves(character.value, catalog[character.value].moves),
+    );
   }
   return catalog;
 }
@@ -222,7 +296,8 @@ function splitComboRoute(route: string) {
 }
 
 function findKnownMove(input: string, moves: TechMove[]) {
-  return moves.find((move) => moveNotationsMatch(move.input, input)) ?? null;
+  const matches = moves.filter((move) => moveNotationsMatch(move.input, input));
+  return matches[0] ?? null;
 }
 
 function resolveComboRoute(route: string, moves: TechMove[]) {
@@ -295,13 +370,13 @@ function getEffectiveStartup(
   if (!move || move.startup == null || visited.has(move.id)) return null;
   if (!move.dependsOnMoveId) return move.startup;
   const parent = moves.find((candidate) => candidate.id === move.dependsOnMoveId);
-  if (!parent || parent.rekkaMinimumDuration == null) return null;
+  if (!parent || parent.stanceMinimumDuration == null) return null;
   visited.add(move.id);
-  return parent.rekkaMinimumDuration + move.startup;
+  return parent.stanceMinimumDuration + move.startup;
 }
 
 function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMove) => void }) {
-  const moveTableColumns = "minmax(220px, 1fr) repeat(8, 76px) 70px";
+  const moveTableColumns = "minmax(220px, 1fr) repeat(8, 76px) 92px";
   return (
     <Paper variant="outlined" sx={{ overflowX: "auto" }}>
       <Box
@@ -340,6 +415,16 @@ function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMov
             const parentMove = move.dependsOnMoveId
               ? moves.find((candidate) => candidate.id === move.dependsOnMoveId)
               : null;
+            const linkedChargeMove = move.chargedMoveId
+              ? moves.find((candidate) => candidate.id === move.chargedMoveId)
+              : null;
+            const linkedBaseMove = move.baseMoveId
+              ? moves.find((candidate) => candidate.id === move.baseMoveId)
+              : null;
+            const linkedMove = linkedChargeMove ?? linkedBaseMove;
+            const inputClass = classifyMoveInput(move.input, {
+              allowDirectionless: Boolean(move.dependsOnMoveId),
+            });
             return (
               <ListItemButton
                 key={move.id}
@@ -359,17 +444,30 @@ function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMov
                   primary={
                     <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
                       <span>{move.input}</span>
-                      {move.isRekka && <Chip label="Rekka" size="small" color="primary" />}
+                      {move.isStanceParent && <Chip label="Stance" size="small" color="primary" />}
+                      {move.isCharged && <Chip label="Charged" size="small" color="warning" />}
+                      {move.dependsOnMoveId && (
+                        <Chip label="Followup" size="small" color="secondary" />
+                      )}
+                      {inputClass === "normal" && <Chip label="Normal" size="small" />}
+                      {inputClass === "command-normal" && (
+                        <Chip label="Command normal" size="small" />
+                      )}
+                      {move.flowCancellable && (
+                        <Chip label="Flow-cancellable" size="small" color="success" />
+                      )}
                     </Stack>
                   }
                   secondary={
                     [
                       parentMove ? `Follow-up after ${parentMove.input}` : null,
-                      move.rekkaFollowupPattern === "directional-button"
+                      linkedChargeMove ? `Charged: ${linkedChargeMove.input}` : null,
+                      linkedBaseMove ? `Standard: ${linkedBaseMove.input}` : null,
+                      move.stanceFollowupPattern === "directional-button"
                         ? "Accepts 1-9 + button followups"
                         : null,
-                      move.isRekka && move.rekkaMinimumDuration != null
-                        ? `Rekka minimum ${move.rekkaMinimumDuration}`
+                      move.isStanceParent && move.stanceMinimumDuration != null
+                        ? `Stance minimum ${move.stanceMinimumDuration}`
                         : null,
                     ]
                       .filter(Boolean)
@@ -387,9 +485,16 @@ function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMov
                 <Typography variant="body2">{frameValue(move.hitstun)}</Typography>
                 <Typography variant="body2">{move.resourceCosts.pips}</Typography>
                 <Typography variant="body2">{move.resourceCosts.flow}</Typography>
-                <Button size="small" onClick={() => onEdit(move)}>
-                  Edit
-                </Button>
+                <Stack spacing={0.25}>
+                  <Button size="small" onClick={() => onEdit(move)}>
+                    Edit
+                  </Button>
+                  {linkedMove && (
+                    <Button size="small" onClick={() => onEdit(linkedMove)}>
+                      Linked
+                    </Button>
+                  )}
+                </Stack>
               </ListItemButton>
             );
           })}
@@ -733,6 +838,7 @@ export function TechSection() {
   const [moveDraft, setMoveDraft] = useState<MoveDraft>(emptyMoveDraft);
   const [editingMoveId, setEditingMoveId] = useState<string | null>(null);
   const [moveInputError, setMoveInputError] = useState<string | null>(null);
+  const moveInputRef = useRef<HTMLInputElement>(null);
   const [comboDraft, setComboDraft] = useState<ComboDraft>(emptyComboDraft);
   const [editingComboId, setEditingComboId] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
@@ -744,8 +850,10 @@ export function TechSection() {
     [support, techData.combos],
   );
   const selectedCombo = combos.find((combo) => combo.id === selectedComboId) ?? null;
-  const rekkaParentOptions = moves.filter((move) => move.isRekka && move.id !== editingMoveId);
-  const selectedRekkaParent = rekkaParentOptions.some(
+  const stanceParentOptions = moves.filter(
+    (move) => move.isStanceParent && move.id !== editingMoveId,
+  );
+  const selectedStanceParent = stanceParentOptions.some(
     (move) => move.id === moveDraft.dependsOnMoveId,
   )
     ? moveDraft.dependsOnMoveId
@@ -754,6 +862,19 @@ export function TechSection() {
   useEffect(() => {
     localStorage.setItem(techCatalogStorageKey, JSON.stringify(catalog));
     window.dispatchEvent(new Event(techCatalogUpdatedEvent));
+  }, [catalog]);
+
+  useEffect(() => {
+    const syncCatalog = () => {
+      const stored = localStorage.getItem(techCatalogStorageKey);
+      if (stored && stored !== JSON.stringify(catalog)) setCatalog(loadTechCatalog());
+    };
+    window.addEventListener(techCatalogUpdatedEvent, syncCatalog);
+    window.addEventListener("storage", syncCatalog);
+    return () => {
+      window.removeEventListener(techCatalogUpdatedEvent, syncCatalog);
+      window.removeEventListener("storage", syncCatalog);
+    };
   }, [catalog]);
 
   useEffect(() => {
@@ -816,11 +937,16 @@ export function TechSection() {
     setEditingMoveId(move.id);
     setMoveInputError(null);
     setMoveDraft({
-      input: normalizeMoveNotation(move.input) ?? move.input,
-      isRekka: move.isRekka,
-      allowsDirectionalFollowups: move.rekkaFollowupPattern === "directional-button",
+      input:
+        normalizeMoveNotation(move.input, { allowDirectionless: Boolean(move.dependsOnMoveId) }) ??
+        move.input,
+      isStanceParent: move.isStanceParent,
+      notApplicable: move.notApplicable ?? {},
+      flowCancellable: move.flowCancellable,
+      hasChargedVersion: Boolean(move.chargedMoveId),
+      allowsDirectionalFollowups: move.stanceFollowupPattern === "directional-button",
       dependsOnMoveId: move.dependsOnMoveId ?? "",
-      rekkaMinimumDuration: String(move.rekkaMinimumDuration ?? ""),
+      stanceMinimumDuration: String(move.stanceMinimumDuration ?? ""),
       startup: String(move.startup ?? ""),
       active: String(move.active ?? ""),
       recovery: String(move.recovery ?? ""),
@@ -833,25 +959,54 @@ export function TechSection() {
   };
 
   const saveMove = () => {
-    const parsedInput = parseMoveNotation(moveDraft.input);
+    const stanceParentId = stanceParentOptions.some((move) => move.id === moveDraft.dependsOnMoveId)
+      ? moveDraft.dependsOnMoveId
+      : null;
+    const parsedInput = parseMoveNotation(moveDraft.input, {
+      allowDirectionless: Boolean(stanceParentId),
+    });
     if (!parsedInput.ok) {
       setMoveInputError(parsedInput.error);
       return;
     }
+    if (parsedInput.isDirectionless && !stanceParentId) {
+      setMoveInputError("A bare button must depend on a stance move.");
+      return;
+    }
+    const editingMove = moves.find((move) => move.id === editingMoveId);
+    if (parsedInput.isCharged && !editingMove?.baseMoveId) {
+      setMoveInputError("Create a charged version from its standard move instead.");
+      return;
+    }
+    if (moveDraft.hasChargedVersion && !chargedInputFor(parsedInput.notation)) {
+      setMoveInputError("This move cannot have a charged version.");
+      return;
+    }
     const input = parsedInput.notation;
     setMoveInputError(null);
-    const rekkaFollowupPattern: TechRekkaFollowupPattern | null =
-      moveDraft.isRekka && moveDraft.allowsDirectionalFollowups ? "directional-button" : null;
+    const stanceFollowupPattern: TechStanceFollowupPattern | null =
+      moveDraft.isStanceParent && moveDraft.allowsDirectionalFollowups
+        ? "directional-button"
+        : null;
     const moveValues = {
       character,
       input,
-      isRekka: moveDraft.isRekka,
-      rekkaFollowupPattern,
-      dependsOnMoveId: rekkaParentOptions.some((move) => move.id === moveDraft.dependsOnMoveId)
-        ? moveDraft.dependsOnMoveId
-        : null,
-      rekkaMinimumDuration: moveDraft.isRekka
-        ? parseMoveNumber(moveDraft.rekkaMinimumDuration)
+      isStanceParent: moveDraft.isStanceParent,
+      notApplicable: Object.fromEntries(
+        Object.entries(moveDraft.notApplicable)
+          .map(([slot, reason]) => [slot, reason?.trim() ?? ""])
+          .filter(([, reason]) => Boolean(reason)),
+      ),
+      flowCancellable:
+        moveDraft.flowCancellable ??
+        isFlowCancellableByDefault(input, { allowDirectionless: Boolean(stanceParentId) }),
+      isCharged: Boolean(editingMove?.baseMoveId),
+      chargedMoveId: editingMove?.chargedMoveId ?? null,
+      baseMoveId: editingMove?.baseMoveId ?? null,
+      stanceFollowupPattern,
+      dependsOnMoveId: stanceParentId,
+      stanceMinimumDuration: moveDraft.isStanceParent
+        ? parseMoveNumber(moveDraft.stanceMinimumDuration)
         : null,
       startup: parseMoveNumber(moveDraft.startup),
       active: parseMoveNumber(moveDraft.active),
@@ -864,26 +1019,50 @@ export function TechSection() {
         flow: parseMoveNumber(moveDraft.flow) ?? 0,
       },
     };
-    setCatalog((current) => ({
-      ...current,
-      [character]: {
-        ...(current[character] ?? { combos: [] }),
-        moves: editingMoveId
-          ? (current[character]?.moves ?? []).map((move) => {
-              if (move.id === editingMoveId) return { ...move, ...moveValues };
-              if (!moveValues.isRekka && move.dependsOnMoveId === editingMoveId) {
-                return { ...move, dependsOnMoveId: null };
+    if (editingMove?.chargedMoveId && !moveDraft.hasChargedVersion) {
+      if (
+        !window.confirm(
+          `Remove the charged version of ${editingMove.input}? Its saved data will be lost.`,
+        )
+      )
+        return;
+    }
+    setCatalog((current) => {
+      const currentMoves = current[character]?.moves ?? [];
+      const id = editingMoveId ?? moveIdFor(character, input, currentMoves);
+      const updatedMoves = editingMoveId
+        ? currentMoves.map((move) => {
+            if (move.id === editingMoveId) {
+              const evidence = { ...move.evidence };
+              for (const field of [
+                "startup",
+                "active",
+                "recovery",
+                "onBlock",
+                "blockstun",
+              ] as const) {
+                if (evidence[field] && evidence[field].value !== moveValues[field])
+                  delete evidence[field];
               }
-              return move;
-            })
-          : [
-              ...(current[character]?.moves ?? []),
-              { id: moveIdFor(character, input, moves), ...moveValues },
-            ],
-      },
-    }));
+              return { ...move, ...moveValues, evidence };
+            }
+            if (!moveValues.isStanceParent && move.dependsOnMoveId === editingMoveId) {
+              return { ...move, dependsOnMoveId: null };
+            }
+            return move;
+          })
+        : [...currentMoves, { id, ...moveValues }];
+      return {
+        ...current,
+        [character]: {
+          ...(current[character] ?? { combos: [] }),
+          moves: withChargedVariant(updatedMoves, id, moveDraft.hasChargedVersion),
+        },
+      };
+    });
     setMoveDraft(emptyMoveDraft);
     setEditingMoveId(null);
+    window.requestAnimationFrame(() => moveInputRef.current?.focus());
   };
 
   const editCombo = (combo: TechCombo) => {
@@ -990,23 +1169,101 @@ export function TechSection() {
                 Moves for {characters.find((option) => option.value === character)?.label}
               </Typography>
               <MoveList moves={moves} onEdit={editMove} />
+              <Paper variant="outlined" sx={{ p: 1.5 }}>
+                <Typography variant="subtitle2">Accepted data with {support}</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Values inherit the character baseline unless this support has a separate saved
+                  move version. Select a value to open its source video.
+                </Typography>
+                {moves
+                  .filter((move) =>
+                    measuredFields.some(({ key }) =>
+                      effectiveMeasurement(catalog, character, support, move.id, key),
+                    ),
+                  )
+                  .map((move) => {
+                    const supportMove = techData.supportMoves?.find(
+                      (entry) => entry.baseMoveId === move.id && entry.support === support,
+                    );
+                    return (
+                      <Stack key={move.id} spacing={0.5} sx={{ mt: 1 }}>
+                        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                          <Typography variant="body2">{move.input}</Typography>
+                          {supportMove &&
+                            Object.keys(supportMove.measurements ?? {}).length > 0 && (
+                              <Chip size="small" label={`${support} version`} />
+                            )}
+                        </Stack>
+                        <Stack direction="row" sx={{ gap: 0.5, flexWrap: "wrap" }}>
+                          {measuredFields.map(({ key, label }) => {
+                            const value = effectiveMeasurement(
+                              catalog,
+                              character,
+                              support,
+                              move.id,
+                              key,
+                            );
+                            if (!value) return null;
+                            return (
+                              <Button
+                                key={key}
+                                size="small"
+                                variant={supportMove?.measurements[key] ? "contained" : "outlined"}
+                                onClick={() => selectLinkedRecording(value.recordingId)}
+                                title={`Source: ${value.recordingId}, frames ${value.startFrame}–${value.endFrame} at ${value.frameRate} fps`}
+                              >
+                                {label} {value.value}
+                              </Button>
+                            );
+                          })}
+                        </Stack>
+                      </Stack>
+                    );
+                  })}
+                {!moves.some((move) =>
+                  measuredFields.some(({ key }) =>
+                    effectiveMeasurement(catalog, character, support, move.id, key),
+                  ),
+                ) && (
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                    No accepted measurements yet.
+                  </Typography>
+                )}
+              </Paper>
               <Paper variant="outlined" sx={{ p: 2 }}>
-                <Stack spacing={1.5}>
+                <Stack
+                  component="form"
+                  spacing={1.5}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    saveMove();
+                  }}
+                >
                   <Typography variant="subtitle2">
                     {editingMoveId ? "Edit move" : "Add move"}
                   </Typography>
                   <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
                     <TextField
                       label="Input"
-                      placeholder="2B or 214C"
+                      placeholder={moveDraft.dependsOnMoveId ? "A or 2B" : "2B or 214C"}
                       size="small"
                       value={moveDraft.input}
+                      inputRef={moveInputRef}
+                      disabled={Boolean(
+                        editingMoveId &&
+                        moves.find((move) => move.id === editingMoveId)?.baseMoveId,
+                      )}
                       onChange={(event) => {
                         setMoveInputError(null);
                         setMoveDraft((current) => ({ ...current, input: event.target.value }));
                       }}
                       error={Boolean(moveInputError)}
-                      helperText={moveInputError ?? "Example: 2B, j.2C, 236F, 22EX, or 5X."}
+                      helperText={
+                        moveInputError ??
+                        (moveDraft.dependsOnMoveId
+                          ? "Followups may use A, B, C, F, EX, SUP, or X without a direction."
+                          : "Example: 2B, j.2C, 236F, 22EX, or 5X.")
+                      }
                       required
                       sx={{ flex: 1 }}
                     />
@@ -1015,18 +1272,55 @@ export function TechSection() {
                     <FormControlLabel
                       control={
                         <Switch
-                          checked={moveDraft.isRekka}
+                          checked={
+                            moveDraft.flowCancellable ??
+                            isFlowCancellableByDefault(moveDraft.input, {
+                              allowDirectionless: Boolean(moveDraft.dependsOnMoveId),
+                            })
+                          }
                           onChange={(event) =>
                             setMoveDraft((current) => ({
                               ...current,
-                              isRekka: event.target.checked,
+                              flowCancellable: event.target.checked,
                             }))
                           }
                         />
                       }
-                      label="Rekka move"
+                      label="Flow-cancellable"
                     />
-                    {moveDraft.isRekka && (
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={moveDraft.isStanceParent}
+                          onChange={(event) =>
+                            setMoveDraft((current) => ({
+                              ...current,
+                              isStanceParent: event.target.checked,
+                            }))
+                          }
+                        />
+                      }
+                      label="Stance move"
+                    />
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={moveDraft.hasChargedVersion}
+                          disabled={Boolean(
+                            editingMoveId &&
+                            moves.find((move) => move.id === editingMoveId)?.baseMoveId,
+                          )}
+                          onChange={(event) =>
+                            setMoveDraft((current) => ({
+                              ...current,
+                              hasChargedVersion: event.target.checked,
+                            }))
+                          }
+                        />
+                      }
+                      label="Has charged version"
+                    />
+                    {moveDraft.isStanceParent && (
                       <FormControlLabel
                         control={
                           <Checkbox
@@ -1043,16 +1337,16 @@ export function TechSection() {
                         label="1-9 + button followups"
                       />
                     )}
-                    {moveDraft.isRekka && (
+                    {moveDraft.isStanceParent && (
                       <TextField
                         label="Minimum duration"
                         type="number"
                         size="small"
-                        value={moveDraft.rekkaMinimumDuration}
+                        value={moveDraft.stanceMinimumDuration}
                         onChange={(event) =>
                           setMoveDraft((current) => ({
                             ...current,
-                            rekkaMinimumDuration: event.target.value,
+                            stanceMinimumDuration: event.target.value,
                           }))
                         }
                         sx={{ width: 150 }}
@@ -1061,13 +1355,13 @@ export function TechSection() {
                     <FormControl
                       size="small"
                       sx={{ minWidth: 240 }}
-                      disabled={rekkaParentOptions.length === 0}
+                      disabled={stanceParentOptions.length === 0}
                     >
-                      <InputLabel id="tech-rekka-parent-label">Depends on rekka</InputLabel>
+                      <InputLabel id="tech-stance-parent-label">Depends on stance</InputLabel>
                       <Select
-                        labelId="tech-rekka-parent-label"
-                        value={selectedRekkaParent}
-                        label="Depends on rekka"
+                        labelId="tech-stance-parent-label"
+                        value={selectedStanceParent}
+                        label="Depends on stance"
                         onChange={(event) =>
                           setMoveDraft((current) => ({
                             ...current,
@@ -1076,13 +1370,34 @@ export function TechSection() {
                         }
                       >
                         <MenuItem value="">None</MenuItem>
-                        {rekkaParentOptions.map((move) => (
+                        {stanceParentOptions.map((move) => (
                           <MenuItem key={move.id} value={move.id}>
                             {move.input}
                           </MenuItem>
                         ))}
                       </Select>
                     </FormControl>
+                  </Stack>
+                  <Typography variant="caption" color="text.secondary">
+                    If a capture situation cannot occur for this move, enter a reason. That
+                    situation will be skipped in gather mode.
+                  </Typography>
+                  <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
+                    {moveTakeOutcomes.map((slot) => (
+                      <TextField
+                        key={slot}
+                        size="small"
+                        label={`${slot} not applicable reason`}
+                        value={moveDraft.notApplicable[slot] ?? ""}
+                        onChange={(event) =>
+                          setMoveDraft((current) => ({
+                            ...current,
+                            notApplicable: { ...current.notApplicable, [slot]: event.target.value },
+                          }))
+                        }
+                        sx={{ minWidth: 205 }}
+                      />
+                    ))}
                   </Stack>
                   <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", gap: 1.5 }}>
                     {(
@@ -1111,8 +1426,8 @@ export function TechSection() {
                     ))}
                   </Stack>
                   <Button
+                    type="submit"
                     variant="contained"
-                    onClick={saveMove}
                     disabled={!moveDraft.input.trim()}
                     sx={{ alignSelf: "flex-start" }}
                   >
@@ -1120,6 +1435,7 @@ export function TechSection() {
                   </Button>
                   {editingMoveId && (
                     <Button
+                      type="button"
                       variant="text"
                       onClick={() => {
                         setMoveDraft(emptyMoveDraft);

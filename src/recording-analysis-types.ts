@@ -1,5 +1,6 @@
 import type { InputDisplaySegmentLayout } from "./input-display-config";
 import type { InputSegmentCheckReason } from "./input-display";
+import type { ProcessingSnapshot } from "./processing-config-types";
 
 export type RecordingAnalysisPhases = {
   startup: number;
@@ -25,6 +26,8 @@ export type RecordingAnalysisHit = {
   phases: RecordingAnalysisPhases;
   opponentPhases: RecordingAnalysisDefense;
   onBlock?: number | null;
+  /** Defender hitstun minus attacker recovery; positive means plus on hit. */
+  onHit?: number | null;
   hitboxTrackIds: string[];
 };
 
@@ -66,6 +69,8 @@ export type RecordingAnalysisMove = {
   opponentPhases: RecordingAnalysisDefense;
   /** Defender blockstun minus attacker recovery; positive means plus on block. */
   onBlock?: number | null;
+  /** Defender hitstun minus attacker recovery; positive means plus on hit. */
+  onHit?: number | null;
   /** Distinct contact events; legacy analyses may not contain this field. */
   hits?: RecordingAnalysisHit[];
   /** Null means hitbox extraction was not available for this analysis. */
@@ -163,9 +168,9 @@ export type RecordingAnalysisDiagnosticFrame = {
 };
 
 export type RecordingAnalysisTiming = {
-  /** The current browser adapter samples a logical timeline by seeking the video. */
-  mode: "logical-60fps-browser-seeking";
-  nominalFrameRate: 60;
+  /** Identifies whether analysis sampled browser seeks or decoded source frames. */
+  mode: "logical-60fps-browser-seeking" | "logical-source-frame-ffmpeg";
+  nominalFrameRate: number;
   sourceFrameRate: number | null;
   sourceTimestampsAvailable: false;
   requestedFrameCount: number;
@@ -187,9 +192,10 @@ export type RecordingAnalysis = {
   /** Manual state changes; grounded is the implicit default. */
   stateOverrides?: RecordingAnalysisStateOverride[];
   warnings: string[];
+  processingSnapshot?: ProcessingSnapshot;
   /** The exact calibration used for this analysis, retained for debugging. */
   detectorConfig?: DetectorConfig;
-  detectorConfigSource?: "saved" | "default-scaled";
+  detectorConfigSource?: "saved" | "default-scaled" | "persistent";
   detectorRegions?: {
     input: RecordingAnalysisRegion;
     inputSegments: RecordingAnalysisInputSegments;

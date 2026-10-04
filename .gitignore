@@ -2,6 +2,7 @@
 /logs/
 /replays/
 /.dev/recordings/
+/.dev/electron-user-data/
 *.log
 npm-debug.log*
 yarn-debug.log*

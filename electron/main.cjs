@@ -7,11 +7,12 @@ const {
   protocol,
   shell,
   safeStorage,
+  globalShortcut,
 } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const readline = require("node:readline");
-const { createHash } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { autoUpdater } = require("electron-updater");
 const { OBSWebSocket } = require("obs-websocket-js");
@@ -19,6 +20,60 @@ const ffmpegStaticPath = require("ffmpeg-static");
 const { MatchLogWatcher } = require("./match-watcher.cjs");
 const supportMap = require("./support-map.json");
 const characterMap = require("./character-map.json");
+const { createProcessingConfigurationStore } = require("./processing-config.cjs");
+const { createMoveCatalogStore } = require("./move-catalog.cjs");
+const { validateMoveTake } = require("./move-take-validation.cjs");
+const detectorKeys = require("./detector-config-keys.json");
+const { configureDevelopmentUserData } = require("./dev-user-data.cjs");
+const isDev = !app.isPackaged;
+const developmentUserData = isDev
+  ? configureDevelopmentUserData(app, path.resolve(__dirname, ".."))
+  : null;
+const processingConfigurationStore = () =>
+  createProcessingConfigurationStore(app.getPath("userData"), detectorKeys);
+const moveCatalogStore = () => createMoveCatalogStore(app.getPath("userData"));
+
+function startupDiagnosticLogFile() {
+  try {
+    return path.join(app.getPath("userData"), "startup-debug.log");
+  } catch {
+    const appData = process.env.APPDATA || process.cwd();
+    return path.join(appData, "Labatar", "startup-debug.log");
+  }
+}
+
+function startupDiagnostic(event, details = {}) {
+  try {
+    const logPath = startupDiagnosticLogFile();
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.appendFileSync(
+      logPath,
+      `${JSON.stringify({ at: new Date().toISOString(), event, ...details })}\n`,
+      "utf8",
+    );
+  } catch (error) {
+    console.error("Could not write Labatar startup diagnostic:", error);
+  }
+}
+
+function startupErrorDetails(error) {
+  return {
+    error: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack : null,
+  };
+}
+
+process.on("uncaughtException", (error) => {
+  startupDiagnostic("uncaught-exception", startupErrorDetails(error));
+});
+process.on("unhandledRejection", (reason) => {
+  startupDiagnostic("unhandled-rejection", startupErrorDetails(reason));
+});
+startupDiagnostic("main-module-loaded", {
+  isDev: !app.isPackaged,
+  electronVersion: process.versions.electron ?? null,
+  chromeVersion: process.versions.chrome ?? null,
+});
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -38,8 +93,16 @@ let updateMenuItem = null;
 let updateState = "idle";
 let latestUpdateInfo = null;
 let mainWindow = null;
+let captureShortcut = null;
+let captureTogglePromise = null;
+let captureState = {
+  hotkey: "F9",
+  hotkeyRegistered: false,
+  lastAction: null,
+  error: null,
+};
+let armedMoveCapture = null;
 
-const isDev = !app.isPackaged;
 const defaultReplaysFolder = path.join(
   "C:\\",
   "Program Files (x86)",
@@ -49,7 +112,12 @@ const defaultReplaysFolder = path.join(
   "Avatar Legends The Fighting Game",
 );
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
-const obsPasswordFile = () => path.join(app.getPath("userData"), "obs-password.enc");
+// Keep credentials outside the repository. Dev state is intentionally visible
+// to local tooling; the OS-encrypted OBS password is not diagnostic state.
+const obsPasswordFile = () =>
+  isDev && developmentUserData
+    ? developmentUserData.credentialPath
+    : path.join(app.getPath("userData"), "obs-password.enc");
 const recordingDiagnosticLogFile = () => path.join(app.getPath("userData"), "recording-debug.log");
 const defaultObsProfileName = "Labatar Recording";
 const labatarRecordingFrameRate = { numerator: 60, denominator: 1 };
@@ -384,6 +452,171 @@ function safeRecordingNamePart(value, fallback) {
   return cleaned || fallback;
 }
 
+function moveCatalogIdPart(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function knownMoveCaptureVariants() {
+  return Object.entries(supportMap)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([character, supports]) =>
+      Object.entries(supports)
+        .sort(([left], [right]) => Number(left) - Number(right))
+        .map(([supportId, support]) => ({
+          id: `${moveCatalogIdPart(character)}-${moveCatalogIdPart(support)}`,
+          label: `${character} / ${support}`,
+          character,
+          support,
+          supportId,
+        })),
+    );
+}
+
+function publicArmedMoveCapture() {
+  return armedMoveCapture
+    ? { ...armedMoveCapture, expectedInputs: [...armedMoveCapture.expectedInputs] }
+    : null;
+}
+
+function publicMoveCaptureState() {
+  const active = activeObsRecording?.moveTake;
+  return {
+    armed: publicArmedMoveCapture(),
+    active: active ? { ...active, expectedInputs: [...active.expectedInputs] } : null,
+  };
+}
+
+function sendMoveCaptureState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("move-capture:state", publicMoveCaptureState());
+}
+
+function armMoveCapture(request = {}) {
+  if (activeObsRecording) throw new Error("Stop the active recording before arming a move take.");
+  const characterId = String(request.characterId ?? "").trim();
+  const moveId = String(request.moveId ?? "").trim();
+  const moveInput = String(request.moveInput ?? "").trim();
+  const isStance = request.isStance === true;
+  const outcome = String(request.outcome ?? "").trim();
+  if (!new Set(["whiff", "block", "hit-grounded", "hit-airborne"]).has(outcome)) {
+    throw new Error("Select whiff, block, hit grounded, or hit airborne.");
+  }
+  const knownVariant = knownMoveCaptureVariants().find((variant) => variant.id === characterId);
+  if (!knownVariant)
+    throw new Error("The selected character or variant is not in Labatar's known data.");
+  if (!/^[a-z0-9][a-z0-9-]*$/i.test(moveId) || moveId.length > 100) {
+    throw new Error("The selected Tech move has an invalid id.");
+  }
+  if (
+    !/^(?:j\.)?(?:214|236|22|[1-9])?(?:\[(?:EX|SUP|A|B|C|F|X)\]|EX|SUP|A|B|C|F|X)$/i.test(moveInput)
+  ) {
+    throw new Error("The selected Tech move has an invalid input.");
+  }
+  if (!isStance && /^(?:\[(?:EX|SUP|A|B|C|F|X)\]|EX|SUP|A|B|C|F|X)$/i.test(moveInput)) {
+    throw new Error("Only stance followups can use a directionless input.");
+  }
+  armedMoveCapture = {
+    catalogMoveId: `${characterId}/${moveId}`,
+    characterId,
+    characterLabel: knownVariant.label,
+    moveId,
+    moveLabel: moveInput,
+    expectedInputs: [moveInput],
+    isStance,
+    isCharged: request.isCharged === true,
+    outcome,
+    armedAt: new Date().toISOString(),
+  };
+  sendMoveCaptureState();
+  return publicMoveCaptureState();
+}
+
+function disarmMoveCapture() {
+  if (activeObsRecording?.moveTake) {
+    throw new Error("The active move take remains associated with its recording.");
+  }
+  armedMoveCapture = null;
+  sendMoveCaptureState();
+  return publicMoveCaptureState();
+}
+
+function createRecordingMoveTake(armed) {
+  if (!armed) return null;
+  return {
+    ...armed,
+    expectedInputs: [...armed.expectedInputs],
+    id: randomUUID(),
+    status: "recording",
+    recordedAt: null,
+    evidenceStatus: "pending",
+    evidenceReason: null,
+    reviewedAt: null,
+    validation: {
+      status: "unprocessed",
+      message: "Processing has not yet compared this take with its expected input.",
+      expectedInputs: [...armed.expectedInputs],
+      observedInputs: [],
+      matchedAnalysisMoveId: null,
+      processedAt: null,
+    },
+  };
+}
+
+function moveTakeDirectory(moveTake) {
+  const recordDirectory = path.resolve(getObsSettings().recordDirectory);
+  return path.join(
+    recordDirectory,
+    "moves",
+    safeRecordingNamePart(moveTake.characterId, "unknown-character"),
+    safeRecordingNamePart(moveTake.moveId, "unknown-move"),
+    moveTake.isCharged ? "charged" : "standard",
+    moveTake.outcome,
+  );
+}
+
+async function moveRecordingToMoveTakeDirectory(outputPath, recording) {
+  const directory = moveTakeDirectory(recording.moveTake);
+  await fs.promises.mkdir(directory, { recursive: true });
+  const extension = path.extname(outputPath) || ".mp4";
+  const timestamp = new Date(recording.startedAt)
+    .toISOString()
+    .replace(/\.\d{3}Z$/, "")
+    .replace(/[:T]/g, "-");
+  const targetPath = await availableRecordingPath(directory, `take-${timestamp}`, extension);
+  await fs.promises.rename(outputPath, targetPath);
+  return targetPath;
+}
+
+async function archiveEarlierPendingMoveTakes(currentPath, take) {
+  const folder = path.resolve(getObsSettings().recordDirectory);
+  const files = await findRecordingFiles(folder);
+  for (const filePath of files) {
+    if (path.resolve(filePath) === path.resolve(currentPath)) continue;
+    const manifestPath = recordingManifestPathForVideo(filePath);
+    let manifest;
+    try {
+      manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+    } catch {
+      continue;
+    }
+    const oldTake = readMoveTake(manifest.moveTake);
+    if (
+      oldTake?.catalogMoveId !== take.catalogMoveId ||
+      oldTake.outcome !== take.outcome ||
+      oldTake.evidenceStatus !== "pending"
+    )
+      continue;
+    manifest.moveTake.evidenceStatus = "archived";
+    manifest.moveTake.evidenceReason = `Superseded by pending take ${take.id}.`;
+    manifest.moveTake.reviewedAt = new Date().toISOString();
+    await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  }
+}
+
 function recordingScore(replay) {
   const score = replay?.roundScore;
   if (typeof score !== "string") return "Unknown";
@@ -398,11 +631,26 @@ function recordingBaseName(metadata, replay = null) {
   return `${player1} - ${player2} - ${setLabel} - ${recordingScore(replay)}`;
 }
 
-function recordingSetBaseName(metadata) {
-  const player1 = safeRecordingNamePart(metadata?.player1, "Player 1");
-  const player2 = safeRecordingNamePart(metadata?.player2, "Player 2");
-  const setLabel = safeRecordingNamePart(metadata?.setLabel, "set 1");
-  return `${player1} - ${player2} - ${setLabel}`;
+function recordingSetBaseName(metadata, replay = null) {
+  const setLabel = safeRecordingNamePart(metadata?.setLabel, "set 1").replace(
+    /^set\s+(\d+)$/i,
+    "set$1",
+  );
+  if (!replay) {
+    const player1 = safeRecordingNamePart(metadata?.player1, "Player 1");
+    const player2 = safeRecordingNamePart(metadata?.player2, "Player 2");
+    return `${player1} - ${player2} - ${setLabel}`;
+  }
+  const playerName = (number) => {
+    const name = safeRecordingNamePart(replay[`player${number}`], `Player ${number}`);
+    const character = safeRecordingNamePart(
+      replay[`player${number}Character`],
+      metadata?.[`player${number}`] || "Unknown",
+    );
+    const support = safeRecordingNamePart(replay[`player${number}Support`], "None");
+    return `${name} (${character}-${support})`;
+  };
+  return `${playerName(1)} - ${playerName(2)} - ${setLabel}`;
 }
 
 function manualRecordingBaseName(startedAt) {
@@ -457,7 +705,7 @@ async function finalizeObsRecording(outputPath, reason) {
   let manifestPath = null;
   let manifestError = null;
   if (outputPath) {
-    const namedOutputPath = await renameObsRecordingFile(
+    let namedOutputPath = await renameObsRecordingFile(
       outputPath,
       recording.metadata,
       null,
@@ -465,6 +713,23 @@ async function finalizeObsRecording(outputPath, reason) {
         ? recordingSetBaseName(recording.metadata)
         : recording.fileNameBase,
     );
+    if (recording.moveTake) {
+      try {
+        namedOutputPath = await moveRecordingToMoveTakeDirectory(namedOutputPath, recording);
+        recording.moveTake.status = "captured";
+        recording.moveTake.recordedAt = new Date().toISOString();
+        recording.moveTake.storageError = null;
+      } catch (error) {
+        recording.moveTake.status = "captured";
+        recording.moveTake.recordedAt = new Date().toISOString();
+        recording.moveTake.storageError = obsErrorMessage(error);
+        logRecordingDiagnostic("move-take-file-move-failed", {
+          sessionId: recording.sessionId,
+          error: recording.moveTake.storageError,
+          outputPath: namedOutputPath,
+        });
+      }
+    }
     recording.outputPath = namedOutputPath;
     manifestPath = recordingManifestPath(namedOutputPath);
     const captureSettings = recording.videoSettings ?? obsState.videoSettings;
@@ -503,6 +768,7 @@ async function finalizeObsRecording(outputPath, reason) {
             games: recording.games ?? [],
             replays: recording.replays ?? [],
             capture,
+            moveTake: recording.moveTake ?? null,
             obs: {
               version: obsState.obsVersion,
               webSocketVersion: obsState.obsWebSocketVersion,
@@ -514,6 +780,15 @@ async function finalizeObsRecording(outputPath, reason) {
         ),
         "utf8",
       );
+      recording.manifestPath = manifestPath;
+      for (const replay of recording.replays ?? []) {
+        await attachReplayToRecording(recording, replay.replayPath, replay.matchId);
+      }
+      namedOutputPath = recording.outputPath;
+      manifestPath = recording.manifestPath;
+      if (recording.moveTake) {
+        await archiveEarlierPendingMoveTakes(namedOutputPath, recording.moveTake);
+      }
     } catch (error) {
       manifestError = obsErrorMessage(error);
     }
@@ -523,6 +798,7 @@ async function finalizeObsRecording(outputPath, reason) {
     manifestPath,
     manifestError,
   };
+  sendMoveCaptureState();
   return lastFinalizedObsRecording;
 }
 
@@ -532,13 +808,18 @@ async function attachReplayToRecording(recording, replayPath, matchId = null) {
     const manifest = JSON.parse(await fs.promises.readFile(recording.manifestPath, "utf8"));
     const replay = await parseReplayFile(replayPath, path.dirname(replayPath));
     const previousManifestPath = recording.manifestPath;
+    const firstGameMatchId = manifest.games?.[0]?.matchId;
+    const namesFirstGame =
+      recording.source === "automatic" && firstGameMatchId && firstGameMatchId === matchId;
     const namedOutputPath = recording.outputPath
-      ? await renameObsRecordingFile(
-          recording.outputPath,
-          manifest.metadata,
-          replay,
-          recording.source === "automatic" ? recordingSetBaseName(manifest.metadata) : null,
-        )
+      ? namesFirstGame
+        ? await renameObsRecordingFile(
+            recording.outputPath,
+            manifest.metadata,
+            replay,
+            recordingSetBaseName(manifest.metadata, replay),
+          )
+        : recording.outputPath
       : recording.outputPath;
     const namedManifestPath = namedOutputPath
       ? recordingManifestPath(namedOutputPath)
@@ -746,6 +1027,7 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
   const tags = normalizeRecordingTags(options.tags);
   const startedAt = new Date().toISOString();
   const sessionId = `${options.manual ? "manual" : "set"}-${Date.now()}`;
+  const moveTake = options.moveTake ? createRecordingMoveTake(options.moveTake) : null;
   lastFinalizedObsRecording = null;
   activeObsRecording = {
     sessionId,
@@ -758,7 +1040,9 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
     replays: [],
     lobbyId: normalizedMetadata?.lobbyId || null,
     videoSettings: obsState.videoSettings ? { ...obsState.videoSettings } : null,
+    moveTake,
   };
+  sendMoveCaptureState();
   try {
     logRecordingDiagnostic("obs-start-record-request", {
       source,
@@ -773,6 +1057,7 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
     });
   } catch (error) {
     activeObsRecording = null;
+    sendMoveCaptureState();
     if (reusePreparedProfile) invalidatePreparedObsProfile();
     logRecordingDiagnostic("obs-start-record-failed", {
       source,
@@ -786,11 +1071,11 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
     status: "connected",
     recording: { active: true, paused: false, outputPath: null },
   });
-  return { sessionId, startedAt, metadata: normalizedMetadata };
+  return { sessionId, startedAt, metadata: normalizedMetadata, moveTake };
 }
 
 async function startManualObsRecording(setup = {}) {
-  return startObsRecording(null, setup, { manual: true });
+  return startObsRecording(null, setup, { manual: true, moveTake: publicArmedMoveCapture() });
 }
 
 async function waitForObsRecordingState(client, expectedActive, timeoutMs = 5000) {
@@ -1595,6 +1880,86 @@ function writeSettings(settings) {
   fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
 }
 
+function getCaptureSettings() {
+  const saved = readSettings().capture ?? {};
+  const hotkey =
+    typeof saved.hotkey === "string" && saved.hotkey.trim() ? saved.hotkey.trim() : "F9";
+  return { hotkey };
+}
+
+function publicCaptureState() {
+  return captureState;
+}
+
+function sendCaptureState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("capture:state", publicCaptureState());
+}
+
+function setCaptureState(patch) {
+  captureState = { ...captureState, ...patch };
+  sendCaptureState();
+}
+
+function saveCaptureSettings(nextSettings) {
+  const current = readSettings();
+  writeSettings({
+    ...current,
+    capture: {
+      ...getCaptureSettings(),
+      ...nextSettings,
+    },
+  });
+}
+
+async function toggleLabatarCapture(trigger = "hotkey") {
+  if (captureTogglePromise) return captureTogglePromise;
+  captureTogglePromise = (async () => {
+    if (activeObsRecording) {
+      const result = await stopObsRecording(`capture-${trigger}`);
+      setCaptureState({ lastAction: "stopped", error: null });
+      return result;
+    }
+
+    const obsSettings = getObsSettings();
+    const result = await startManualObsRecording({
+      profileName: obsSettings.profileName,
+      recordDirectory: obsSettings.recordDirectory,
+    });
+    setCaptureState({ lastAction: "started", error: null });
+    return result;
+  })()
+    .catch((error) => {
+      setCaptureState({ error: obsErrorMessage(error) });
+      throw error;
+    })
+    .finally(() => {
+      captureTogglePromise = null;
+    });
+  return captureTogglePromise;
+}
+
+function registerCaptureShortcut(hotkey) {
+  if (captureShortcut) {
+    globalShortcut.unregister(captureShortcut);
+    captureShortcut = null;
+  }
+  const registered = globalShortcut.register(hotkey, () => {
+    void toggleLabatarCapture("hotkey").catch(() => undefined);
+  });
+  if (!registered) {
+    setCaptureState({
+      hotkey,
+      hotkeyRegistered: false,
+      error: `Could not register global shortcut ${hotkey}.`,
+    });
+    throw new Error(`Could not register global shortcut ${hotkey}. It may already be in use.`);
+  }
+  captureShortcut = hotkey;
+  setCaptureState({ hotkey, hotkeyRegistered: true, error: null });
+  return publicCaptureState();
+}
+
 function getReplayFolder() {
   const savedFolder = readSettings().replaysFolder;
   if (typeof savedFolder === "string" && savedFolder.trim()) return savedFolder;
@@ -1758,6 +2123,28 @@ function cleanReplayName(value) {
 }
 
 ipcMain.handle("app:get-version", () => app.getVersion());
+
+ipcMain.handle("capture:get-state", () => publicCaptureState());
+ipcMain.handle("capture:set-settings", (_, request) => {
+  const current = getCaptureSettings();
+  const hotkey = String(request?.hotkey ?? current.hotkey).trim();
+  if (!hotkey) throw new Error("Enter a global shortcut, such as F9 or CommandOrControl+Shift+R.");
+  const nextSettings = { hotkey };
+  saveCaptureSettings(nextSettings);
+  try {
+    return registerCaptureShortcut(nextSettings.hotkey);
+  } catch (error) {
+    saveCaptureSettings(current);
+    try {
+      registerCaptureShortcut(current.hotkey);
+    } catch {
+      // Keep the failed registration visible if the previous shortcut is no longer available.
+    }
+    setCaptureState({ error: obsErrorMessage(error) });
+    throw error;
+  }
+});
+ipcMain.handle("capture:toggle", async () => toggleLabatarCapture("labatar"));
 
 ipcMain.handle("obs:get-state", () => publicObsState());
 ipcMain.handle("obs:get-settings", () => {
@@ -2366,6 +2753,156 @@ function runFfmpeg(args) {
   });
 }
 
+const recordingFrameReaders = new Map();
+let nextRecordingFrameReaderId = 1;
+const MAX_CACHED_RECORDING_FRAMES = 120;
+const MAX_BUFFERED_RECORDING_FRAMES = 24;
+
+function rejectFrameReaderWaiters(reader, error) {
+  for (const waiter of reader.waiters.values()) waiter.reject(error);
+  reader.waiters.clear();
+}
+
+function pauseFrameReaderIfBuffered(reader) {
+  if (
+    reader.waiters.size === 0 &&
+    !reader.stdoutPaused &&
+    reader.frames.size >= MAX_BUFFERED_RECORDING_FRAMES
+  ) {
+    reader.child.stdout.pause();
+    reader.stdoutPaused = true;
+  }
+}
+
+function resolveRecordingFrame(reader, frame) {
+  const frameIndex = reader.nextFrameIndex;
+  reader.nextFrameIndex += 1;
+  reader.frames.set(frameIndex, frame);
+  while (reader.frames.size > MAX_CACHED_RECORDING_FRAMES) {
+    const oldestFrameIndex = reader.frames.keys().next().value;
+    reader.frames.delete(oldestFrameIndex);
+  }
+
+  const waiter = reader.waiters.get(frameIndex);
+  if (waiter) {
+    reader.waiters.delete(frameIndex);
+    waiter.resolve({ frameIndex, data: frame.toString("base64") });
+  }
+  pauseFrameReaderIfBuffered(reader);
+}
+
+function consumeRecordingFrameBytes(reader, chunk) {
+  reader.buffer = Buffer.concat([reader.buffer, chunk]);
+  while (true) {
+    const start = reader.buffer.indexOf(Buffer.from([0xff, 0xd8]));
+    if (start < 0) {
+      reader.buffer = reader.buffer.subarray(Math.max(0, reader.buffer.length - 1));
+      return;
+    }
+    const end = reader.buffer.indexOf(Buffer.from([0xff, 0xd9]), start + 2);
+    if (end < 0) {
+      if (start > 0) reader.buffer = reader.buffer.subarray(start);
+      return;
+    }
+    resolveRecordingFrame(reader, reader.buffer.subarray(start, end + 2));
+    reader.buffer = reader.buffer.subarray(end + 2);
+  }
+}
+
+function closeRecordingFrameReader(sessionId) {
+  const reader = recordingFrameReaders.get(sessionId);
+  if (!reader) return false;
+  recordingFrameReaders.delete(sessionId);
+  rejectFrameReaderWaiters(reader, new Error("The frame reader was closed."));
+  reader.child.stdout.removeAllListeners();
+  reader.child.stderr.removeAllListeners();
+  reader.child.removeAllListeners();
+  if (!reader.child.killed) reader.child.kill();
+  return true;
+}
+
+function openRecordingFrameReader(sourcePath) {
+  const sessionId = `frame-reader-${nextRecordingFrameReaderId++}`;
+  const child = spawn(
+    resolveFfmpegPath(),
+    [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      sourcePath,
+      "-map",
+      "0:v:0",
+      "-an",
+      "-fps_mode",
+      "passthrough",
+      "-f",
+      "image2pipe",
+      "-c:v",
+      "mjpeg",
+      "-q:v",
+      "3",
+      "pipe:1",
+    ],
+    { windowsHide: true },
+  );
+  const reader = {
+    sessionId,
+    child,
+    buffer: Buffer.alloc(0),
+    frames: new Map(),
+    nextFrameIndex: 0,
+    waiters: new Map(),
+    stderr: "",
+    stdoutPaused: false,
+    ended: false,
+  };
+  recordingFrameReaders.set(sessionId, reader);
+  child.stdout.on("data", (chunk) => consumeRecordingFrameBytes(reader, chunk));
+  child.stderr.on("data", (chunk) => {
+    reader.stderr += chunk.toString();
+  });
+  child.once("error", (error) => {
+    reader.ended = true;
+    rejectFrameReaderWaiters(reader, error);
+  });
+  child.once("close", (code) => {
+    reader.ended = true;
+    const error =
+      code === 0
+        ? new Error("The requested frame is past the end of the recording.")
+        : new Error(reader.stderr.trim() || `FFmpeg exited with code ${code}`);
+    rejectFrameReaderWaiters(reader, error);
+  });
+  return reader;
+}
+
+async function readRecordingFrame(request = {}) {
+  const sessionId = String(request.sessionId ?? "");
+  const frameIndex = Number(request.frameIndex);
+  const reader = recordingFrameReaders.get(sessionId);
+  if (!reader) throw new Error("The frame reader is no longer available.");
+  if (!Number.isInteger(frameIndex) || frameIndex < 0) {
+    throw new Error("The requested frame index is invalid.");
+  }
+
+  const cachedFrame = reader.frames.get(frameIndex);
+  if (cachedFrame) return { frameIndex, data: cachedFrame.toString("base64") };
+  if (frameIndex < reader.nextFrameIndex) {
+    throw new Error("The requested frame is outside the review cache.");
+  }
+  if (reader.ended) throw new Error("The requested frame is past the end of the recording.");
+
+  const result = new Promise((resolve, reject) => {
+    reader.waiters.set(frameIndex, { resolve, reject });
+  });
+  if (reader.stdoutPaused) {
+    reader.child.stdout.resume();
+    reader.stdoutPaused = false;
+  }
+  return result;
+}
+
 function clipTimeForFilename(seconds) {
   const totalMilliseconds = Math.max(0, Math.round(seconds * 1000));
   const milliseconds = totalMilliseconds % 1000;
@@ -2577,6 +3114,51 @@ async function renameRecording(request = {}) {
   return getRecordedVideoForPath(availableTargetPath, folder);
 }
 
+async function reprocessAutomaticRecordingName(request = {}) {
+  const recordingId = String(request.recordingId ?? "");
+  const currentPath = resolveRecordingPath(recordingId);
+  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
+  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+  let manifest;
+  try {
+    manifest = JSON.parse(
+      await fs.promises.readFile(recordingManifestPathForVideo(currentPath), "utf8"),
+    );
+  } catch {
+    throw new Error("The recording metadata could not be read.");
+  }
+  if (manifest.source !== "automatic") {
+    throw new Error("Only automatic recordings can rebuild their names.");
+  }
+  const firstGame = manifest.games?.[0];
+  if (!firstGame?.matchId) {
+    throw new Error("This recording has no first game in its metadata.");
+  }
+  const savedReplay = manifest.replays?.find((entry) => entry.matchId === firstGame.matchId);
+  const replayPath = firstGame.replayPath || savedReplay?.replayPath;
+  let replay = null;
+  if (replayPath) {
+    replay = await parseReplayFile(replayPath, path.dirname(replayPath)).catch(() => null);
+  }
+  replay ??= firstGame.replay ?? savedReplay?.replay ?? null;
+  if (!replay) {
+    throw new Error("The first game's replay is unavailable. Its name cannot be rebuilt.");
+  }
+  const name = recordingSetBaseName(manifest.metadata ?? firstGame.metadata, replay);
+  const currentBaseName = path.basename(currentPath, path.extname(currentPath));
+  if (
+    currentBaseName === name ||
+    (currentBaseName.startsWith(`${name} (`) &&
+      /^\d+\)$/.test(currentBaseName.slice(name.length + 2)))
+  ) {
+    return getRecordedVideoForPath(currentPath, path.resolve(getObsSettings().recordDirectory));
+  }
+  return renameRecording({
+    recordingId,
+    name,
+  });
+}
+
 async function deleteRecording(request = {}) {
   const recordingId = String(request.recordingId ?? "");
   const currentPath = resolveRecordingPath(recordingId);
@@ -2635,7 +3217,69 @@ async function saveRecordingAnalysis(request = {}) {
       replays: [],
     };
   }
+  if (manifest.analysis) {
+    manifest.analysisHistory = Array.isArray(manifest.analysisHistory)
+      ? [...manifest.analysisHistory, manifest.analysis]
+      : [manifest.analysis];
+  }
   manifest.analysis = analysis;
+  if (manifest.moveTake && typeof manifest.moveTake === "object") {
+    manifest.moveTake.validation = validateMoveTake(manifest.moveTake, analysis);
+  }
+  await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  return getRecordedVideoForPath(currentPath);
+}
+
+async function setMoveTakeEvidence(request = {}) {
+  const recordingId = String(request.recordingId ?? "");
+  const action = String(request.action ?? "");
+  if (action !== "accept" && action !== "archive") throw new Error("Invalid evidence action.");
+  const currentPath = resolveRecordingPath(recordingId);
+  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
+  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+  const manifestPath = recordingManifestPathForVideo(currentPath);
+  const manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+  const take = readMoveTake(manifest.moveTake);
+  if (!take) throw new Error("This recording is not a move take.");
+  if (action === "accept") {
+    if (!manifest.analysis) throw new Error("Process this take before accepting its evidence.");
+    if (
+      !take.validation.matchedAnalysisMoveId ||
+      !manifest.analysis.moves.some((move) => move.id === take.validation.matchedAnalysisMoveId)
+    ) {
+      throw new Error("No analyzed move is linked to this take. Reprocess or record it again.");
+    }
+    if (take.validation.status === "mismatch") {
+      throw new Error("The observed input differs from the selected move. Review or retry it.");
+    }
+    const folder = path.resolve(getObsSettings().recordDirectory);
+    const files = await findRecordingFiles(folder);
+    for (const filePath of files) {
+      if (path.resolve(filePath) === path.resolve(currentPath)) continue;
+      const otherManifestPath = recordingManifestPathForVideo(filePath);
+      let other;
+      try {
+        other = JSON.parse(await fs.promises.readFile(otherManifestPath, "utf8"));
+      } catch {
+        continue;
+      }
+      const otherTake = readMoveTake(other.moveTake);
+      if (
+        otherTake?.catalogMoveId !== take.catalogMoveId ||
+        otherTake.outcome !== take.outcome ||
+        otherTake.evidenceStatus !== "active"
+      )
+        continue;
+      other.moveTake.evidenceStatus = "archived";
+      other.moveTake.evidenceReason = `Replaced by ${take.id}.`;
+      other.moveTake.reviewedAt = new Date().toISOString();
+      await fs.promises.writeFile(otherManifestPath, JSON.stringify(other, null, 2), "utf8");
+    }
+  }
+  manifest.moveTake.evidenceStatus = action === "accept" ? "active" : "archived";
+  manifest.moveTake.evidenceReason =
+    action === "archive" ? String(request.reason ?? "Retake requested.").trim() : null;
+  manifest.moveTake.reviewedAt = new Date().toISOString();
   await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
   return getRecordedVideoForPath(currentPath);
 }
@@ -2657,6 +3301,71 @@ async function getRecordedVideoForPath(
   };
 }
 
+function readMoveTake(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const expectedInputs = Array.isArray(value.expectedInputs)
+    ? value.expectedInputs.filter((input) => typeof input === "string" && input.trim())
+    : [];
+  const outcome = typeof value.outcome === "string" ? value.outcome : "";
+  if (
+    !["whiff", "block", "hit", "hit-grounded", "hit-airborne"].includes(outcome) ||
+    typeof value.id !== "string" ||
+    typeof value.catalogMoveId !== "string" ||
+    typeof value.characterId !== "string" ||
+    typeof value.characterLabel !== "string" ||
+    typeof value.moveId !== "string" ||
+    typeof value.moveLabel !== "string" ||
+    typeof value.armedAt !== "string" ||
+    expectedInputs.length === 0
+  ) {
+    return null;
+  }
+  const validation =
+    value.validation && typeof value.validation === "object" ? value.validation : {};
+  const statuses = new Set(["unprocessed", "verified", "mismatch", "ambiguous", "unresolved"]);
+  const validationStatus = statuses.has(validation.status) ? validation.status : "unprocessed";
+  return {
+    id: value.id,
+    catalogMoveId: value.catalogMoveId,
+    characterId: value.characterId,
+    characterLabel: value.characterLabel,
+    moveId: value.moveId,
+    moveLabel: value.moveLabel,
+    expectedInputs,
+    // Historical takes predate stance and charge metadata.
+    isStance: value.isStance === true,
+    isCharged: value.isCharged === true,
+    outcome,
+    armedAt: value.armedAt,
+    status: value.status === "recording" ? "recording" : "captured",
+    recordedAt: typeof value.recordedAt === "string" ? value.recordedAt : null,
+    storageError: typeof value.storageError === "string" ? value.storageError : null,
+    evidenceStatus: ["pending", "active", "archived"].includes(value.evidenceStatus)
+      ? value.evidenceStatus
+      : "pending",
+    evidenceReason: typeof value.evidenceReason === "string" ? value.evidenceReason : null,
+    reviewedAt: typeof value.reviewedAt === "string" ? value.reviewedAt : null,
+    validation: {
+      status: validationStatus,
+      message:
+        typeof validation.message === "string"
+          ? validation.message
+          : "Processing has not yet compared this take with its expected input.",
+      expectedInputs: Array.isArray(validation.expectedInputs)
+        ? validation.expectedInputs.filter((input) => typeof input === "string" && input.trim())
+        : expectedInputs,
+      observedInputs: Array.isArray(validation.observedInputs)
+        ? validation.observedInputs.filter((input) => typeof input === "string" && input.trim())
+        : [],
+      matchedAnalysisMoveId:
+        typeof validation.matchedAnalysisMoveId === "string"
+          ? validation.matchedAnalysisMoveId
+          : null,
+      processedAt: typeof validation.processedAt === "string" ? validation.processedAt : null,
+    },
+  };
+}
+
 async function readRecordingManifest(videoPath) {
   try {
     const content = await fs.promises.readFile(recordingManifestPathForVideo(videoPath), "utf8");
@@ -2665,14 +3374,41 @@ async function readRecordingManifest(videoPath) {
     const startTime = Number(clip?.startTime);
     const endTime = Number(clip?.endTime);
     return {
+      source:
+        manifest?.source === "automatic"
+          ? "automatic"
+          : manifest?.source === "manual"
+            ? "manual"
+            : null,
       metadata: manifest?.metadata ?? null,
       games: Array.isArray(manifest?.games) ? manifest.games : [],
       replays: Array.isArray(manifest?.replays) ? manifest.replays : [],
       analysis:
         manifest?.analysis && manifest.analysis.schemaVersion === 1 ? manifest.analysis : null,
+      analysisHistory: (Array.isArray(manifest?.analysisHistory) ? manifest.analysisHistory : [])
+        .filter((analysis) => analysis?.schemaVersion === 1)
+        .map((analysis) => ({
+          processedAt: typeof analysis.processedAt === "string" ? analysis.processedAt : "unknown",
+          inputs: Array.isArray(analysis.inputEvents)
+            ? analysis.inputEvents
+                .map((event) => event.notation)
+                .filter((value) => typeof value === "string")
+            : [],
+          moves: Array.isArray(analysis.moves)
+            ? analysis.moves.map((move) => ({
+                notation: typeof move.notation === "string" ? move.notation : null,
+                startTime: Number(move.startTime) || 0,
+                endTime: Number(move.endTime) || 0,
+              }))
+            : [],
+          warnings: Array.isArray(analysis.warnings) ? analysis.warnings : [],
+          processorVersion: analysis.processingSnapshot?.processorVersion ?? null,
+          processorFingerprint: analysis.processingSnapshot?.processorFingerprint ?? null,
+        })),
       tags: normalizeRecordingTags(manifest?.tags, manifest?.metadata),
       replayPath: typeof manifest?.replayPath === "string" ? manifest.replayPath : null,
       replayFileName: typeof manifest?.replayFileName === "string" ? manifest.replayFileName : null,
+      moveTake: readMoveTake(manifest?.moveTake),
       clip:
         typeof clip?.sourceRecordingId === "string" &&
         clip.sourceRecordingId.trim() &&
@@ -2692,6 +3428,7 @@ async function readRecordingManifest(videoPath) {
     };
   } catch {
     return {
+      source: null,
       metadata: null,
       games: [],
       replays: [],
@@ -2699,6 +3436,7 @@ async function readRecordingManifest(videoPath) {
       tags: { match: [], lab: [], combo: false, pressure: false },
       replayPath: null,
       replayFileName: null,
+      moveTake: null,
       clip: null,
     };
   }
@@ -2801,10 +3539,68 @@ ipcMain.handle("recordings:list", async () => {
   return { folder, recordings };
 });
 
+ipcMain.handle("recordings:frame-reader-open", async (_, request) => {
+  const recordingId = String(request?.recordingId ?? "");
+  const sourcePath = resolveRecordingPath(recordingId);
+  const sourceStat = await fs.promises.stat(sourcePath).catch(() => null);
+  if (!sourceStat?.isFile()) throw new Error("The recording no longer exists.");
+  const reader = openRecordingFrameReader(sourcePath);
+  return { sessionId: reader.sessionId, frameRate: 60 };
+});
+
+ipcMain.handle("recordings:frame-reader-read", (_, request) => readRecordingFrame(request));
+ipcMain.handle("recordings:frame-reader-close", (_, request) =>
+  closeRecordingFrameReader(String(request?.sessionId ?? "")),
+);
+
 ipcMain.handle("recordings:export-clip", async (_, request) => exportRecordingClip(request));
 ipcMain.handle("recordings:rename", async (_, request) => renameRecording(request));
+ipcMain.handle("recordings:reprocess-name", async (_, request) =>
+  reprocessAutomaticRecordingName(request),
+);
+ipcMain.handle("recordings:open-youtube-studio", async (_, request) => {
+  const filePath = resolveRecordingPath(String(request?.recordingId ?? ""));
+  const stat = await fs.promises.stat(filePath).catch(() => null);
+  if (!stat?.isFile()) throw new Error("The recording no longer exists.");
+  await shell.openExternal("https://studio.youtube.com/");
+  shell.showItemInFolder(filePath);
+});
 ipcMain.handle("recordings:set-tags", async (_, request) => setRecordingTags(request));
 ipcMain.handle("recordings:save-analysis", async (_, request) => saveRecordingAnalysis(request));
+ipcMain.handle("recordings:set-move-evidence", async (_, request) => setMoveTakeEvidence(request));
+ipcMain.handle("move-catalog:load", () => moveCatalogStore().load());
+ipcMain.handle("move-catalog:known-variants", () => knownMoveCaptureVariants());
+ipcMain.handle("move-catalog:save", (_, request) =>
+  moveCatalogStore().save(request?.catalog, request?.expectedRevision),
+);
+ipcMain.handle("move-capture:get-state", () => publicMoveCaptureState());
+ipcMain.handle("move-capture:arm", (_, request) => armMoveCapture(request));
+ipcMain.handle("move-capture:disarm", () => disarmMoveCapture());
+ipcMain.handle("processing-config:load", () => processingConfigurationStore().load());
+ipcMain.handle("processing-config:save", (_, request) =>
+  processingConfigurationStore().save(request.configuration, request.expectedRevision),
+);
+ipcMain.handle("processing-config:export", async () => {
+  const store = processingConfigurationStore();
+  const { configuration } = store.load();
+  if (!configuration) throw new Error("No processing configuration has been saved.");
+  const result = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: `labatar-processing-revision-${configuration.revision}.json`,
+    filters: [{ name: "Processing configuration", extensions: ["json"] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  await fs.promises.writeFile(result.filePath, JSON.stringify(configuration, null, 2), "utf8");
+  return result.filePath;
+});
+ipcMain.handle("processing-config:import", async (_, request) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile"],
+    filters: [{ name: "Processing configuration", extensions: ["json"] }],
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const configuration = JSON.parse(await fs.promises.readFile(result.filePaths[0], "utf8"));
+  return processingConfigurationStore().restore(configuration, request.expectedRevision);
+});
 ipcMain.handle("recordings:delete", async (_, request) => deleteRecording(request));
 ipcMain.on("recordings:start-drag", async (event, request) => {
   try {
@@ -2995,6 +3791,7 @@ ipcMain.handle("replays:select-folder", async () => {
 });
 
 function createWindow() {
+  startupDiagnostic("create-window-start");
   const window = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -3005,14 +3802,36 @@ function createWindow() {
     },
   });
   mainWindow = window;
+  window.webContents.on("did-fail-load", (_, errorCode, errorDescription, validatedURL) => {
+    startupDiagnostic("renderer-load-failed", {
+      errorCode,
+      errorDescription,
+      validatedURL,
+    });
+  });
+  window.webContents.on("render-process-gone", (_, details) => {
+    startupDiagnostic("renderer-process-gone", details);
+  });
+  window.webContents.on("child-process-gone", (_, details) => {
+    startupDiagnostic("renderer-child-process-gone", details);
+  });
+  window.on("unresponsive", () => startupDiagnostic("window-unresponsive"));
   window.on("closed", () => {
+    startupDiagnostic("window-closed");
     if (mainWindow === window) mainWindow = null;
   });
 
   if (isDev) {
-    void window.loadURL("http://localhost:5173");
+    void window
+      .loadURL("http://localhost:5173")
+      .then(() => startupDiagnostic("renderer-loaded", { url: "http://localhost:5173" }))
+      .catch((error) => startupDiagnostic("renderer-load-error", startupErrorDetails(error)));
   } else {
-    void window.loadFile(path.join(__dirname, "../dist/index.html"));
+    const indexPath = path.join(__dirname, "../dist/index.html");
+    void window
+      .loadFile(indexPath)
+      .then(() => startupDiagnostic("renderer-loaded", { path: indexPath }))
+      .catch((error) => startupDiagnostic("renderer-load-error", startupErrorDetails(error)));
   }
 }
 
@@ -3069,6 +3888,7 @@ function buildApplicationMenu() {
 }
 
 void app.whenReady().then(() => {
+  startupDiagnostic("app-ready");
   protocol.handle("labatar-media", async (request) => {
     try {
       const url = new URL(request.url);
@@ -3081,15 +3901,33 @@ void app.whenReady().then(() => {
       return new Response("Not found", { status: 404 });
     }
   });
+  startupDiagnostic("media-protocol-registered");
   watchElectronFiles();
+  startupDiagnostic("electron-file-watchers-started");
   buildApplicationMenu();
+  startupDiagnostic("application-menu-built");
+  const captureSettings = getCaptureSettings();
+  setCaptureState({ hotkey: captureSettings.hotkey });
+  try {
+    registerCaptureShortcut(captureSettings.hotkey);
+    startupDiagnostic("capture-shortcut-registered", { hotkey: captureSettings.hotkey });
+  } catch (error) {
+    startupDiagnostic("capture-shortcut-registration-failed", startupErrorDetails(error));
+    console.warn(`Global capture shortcut unavailable: ${obsErrorMessage(error)}`);
+  }
   createWindow();
+  startupDiagnostic("window-created");
   configureAutoUpdater();
   if (!isDev) setTimeout(() => void checkForUpdates(), 4000);
 
   app.on("activate", () => {
+    startupDiagnostic("app-activated");
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on("gpu-process-crashed", (_, killed, exitCode, reason) => {
+  startupDiagnostic("gpu-process-crashed", { killed, exitCode, reason });
 });
 
 app.on("window-all-closed", () => {
@@ -3097,6 +3935,9 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  startupDiagnostic("before-quit");
+  if (captureShortcut) globalShortcut.unregister(captureShortcut);
+  for (const sessionId of recordingFrameReaders.keys()) closeRecordingFrameReader(sessionId);
   if (matchLogWatcher) void matchLogWatcher.stop();
   if (activeObsRecording && obsClient) void stopObsRecording("app-quit").catch(() => undefined);
   if (obsClient) void obsClient.disconnect().catch(() => undefined);

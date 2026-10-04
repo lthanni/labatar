@@ -873,6 +873,24 @@ export function formatInputDisplayObservation(observation: InputDisplayObservati
     .join(" | ");
 }
 
+export function inputDisplayObservationsMatch(
+  left: InputDisplayObservation,
+  right: InputDisplayObservation,
+) {
+  if (left.rows.length !== right.rows.length) return false;
+  return left.rows.every((row, rowIndex) => {
+    const otherMarkers = right.rows[rowIndex].markers;
+    return (
+      row.markers.length === otherMarkers.length &&
+      row.markers.every(
+        (marker, markerIndex) =>
+          marker.color === otherMarkers[markerIndex].color &&
+          Math.abs(Math.round(marker.x) - Math.round(otherMarkers[markerIndex].x)) <= 2,
+      )
+    );
+  });
+}
+
 export function formatInputDisplayDebug(observation: InputDisplayObservation) {
   return observation.rows
     .map((row, index) => {

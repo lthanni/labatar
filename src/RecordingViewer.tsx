@@ -34,12 +34,26 @@ import {
 import type { RecordedVideo, RecordingTagCategory, RecordingTags } from "./recording-types";
 import type {
   RecordingAnalysisDiagnosticFrame,
+  RecordingAnalysisHitbox,
   RecordingAnalysisState,
   RecordingAnalysisStateOverride,
 } from "./recording-analysis-types";
 import { applyManualInputStateOverrides, stateOverrideForEvent } from "./recording-analysis-state";
-import { processRecording, type RecordingProcessorProgress } from "./recording-processor";
-import { readDetectorConfig, type DetectorConfig } from "./detector-config";
+import {
+  processRecording,
+  type RecordingFrameProvider,
+  type RecordingProcessorProgress,
+} from "./recording-processor";
+import type { DetectorConfig } from "./detector-config";
+import {
+  effectiveDetectorConfig,
+  importProcessingConfiguration,
+  loadProcessingConfiguration,
+  reloadProcessingConfiguration,
+  updateProcessingConfiguration,
+  recordingProcessorFingerprint,
+} from "./processing-config";
+import type { ProcessingConfigurationResult } from "./processing-config-types";
 import {
   techCatalogStorageKey,
   techCatalogUpdatedEvent,
@@ -53,16 +67,37 @@ import {
   isDirectionalButtonFollowup,
   moveNotationsMatch,
   normalizeMoveNotation,
+  stanceFollowupMatches,
 } from "./move-notation";
 import { inputButtonDisplayColors, inputButtonSlotRatios } from "./input-display-config";
 import { buildRecordingDisplayRows, descendantClipRanges } from "./recording-hierarchy";
+import { useObsRecording } from "./ObsRecordingContext";
+import { CalibrationNumberField } from "./CalibrationNumberField";
 
 function readTechCatalog(): TechCatalog {
   try {
     const stored = JSON.parse(localStorage.getItem(techCatalogStorageKey) ?? "{}");
-    return stored && typeof stored === "object" && !Array.isArray(stored)
-      ? (stored as TechCatalog)
-      : {};
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
+    return Object.fromEntries(
+      Object.entries(stored).map(([character, data]) => [
+        character,
+        {
+          ...(data as TechCatalog[string]),
+          moves: ((data as TechCatalog[string]).moves ?? []).map((move) => {
+            const legacy = move as TechMove & {
+              isRekka?: boolean;
+              rekkaFollowupPattern?: "directional-button";
+            };
+            return {
+              ...move,
+              isStanceParent: move.isStanceParent === true || legacy.isRekka === true,
+              stanceFollowupPattern:
+                move.stanceFollowupPattern ?? legacy.rekkaFollowupPattern ?? null,
+            };
+          }),
+        },
+      ]),
+    );
   } catch {
     return {};
   }
@@ -85,6 +120,14 @@ function formatVideoTime(seconds: number) {
   return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
+function hitboxOverlayColor(kind: string | undefined) {
+  if (kind?.includes("green")) return "#35e58b";
+  if (kind?.includes("blue")) return "#42a5ff";
+  if (kind?.includes("red")) return "#ff5c6c";
+  if (kind?.includes("yellow")) return "#ffe066";
+  return "#ffffff";
+}
+
 function formatParsedInputRoute(
   inputEvents: NonNullable<RecordedVideo["analysis"]>["inputEvents"],
   catalog: TechCatalog,
@@ -92,43 +135,45 @@ function formatParsedInputRoute(
   if (!inputEvents || inputEvents.length === 0) return [];
   const moves: TechMove[] = Object.values(catalog).flatMap((data) => data.moves ?? []);
   const route: string[] = [];
-  let activeRekkaParent: TechMove | null = null;
+  let activeStanceParent: TechMove | null = null;
 
   for (const event of inputEvents) {
     const matchingMoves = moves.filter((move) => moveNotationsMatch(move.input, event.notation));
-    const rekkaParent = matchingMoves.find(
-      (move) => move.rekkaFollowupPattern === "directional-button",
-    );
-    if (rekkaParent) {
-      route.push(normalizeMoveNotation(rekkaParent.input) ?? event.notation);
-      activeRekkaParent = rekkaParent;
+    const stanceParent = matchingMoves.find((move) => move.isStanceParent);
+    if (stanceParent) {
+      route.push(normalizeMoveNotation(stanceParent.input) ?? event.notation);
+      activeStanceParent = stanceParent;
       continue;
     }
-    const followupMove = matchingMoves.find(
-      (move) => move.dependsOnMoveId === activeRekkaParent?.id,
+    const followupMove = moves.find(
+      (move) =>
+        move.dependsOnMoveId === activeStanceParent?.id &&
+        (moveNotationsMatch(move.input, event.notation) ||
+          stanceFollowupMatches(move.input, event.notation)),
     );
     if (
-      activeRekkaParent &&
-      isDirectionalButtonFollowup(event.notation) &&
-      (activeRekkaParent.rekkaFollowupPattern === "directional-button" || followupMove)
+      activeStanceParent &&
+      (followupMove ||
+        (activeStanceParent.stanceFollowupPattern === "directional-button" &&
+          isDirectionalButtonFollowup(event.notation)))
     ) {
       const notation =
-        normalizeMoveNotation(followupMove?.input ?? event.notation) ?? event.notation;
+        normalizeMoveNotation(followupMove?.input ?? event.notation, {
+          allowDirectionless: Boolean(followupMove),
+        }) ?? event.notation;
       route[route.length - 1] = `${route.at(-1) ?? ""}~${notation}`;
       continue;
     }
     route.push(event.notation);
-    activeRekkaParent = null;
+    activeStanceParent = null;
   }
   return route;
 }
 
 const FRAME_RATE = 60;
-const FRAME_SEEK_TIMEOUT_MS = 2000;
 const FRAME_STEP_QUEUE_LIMIT = 60;
 const PLAYBACK_POSITIONS_STORAGE_KEY = "labatar-recording-playback-positions";
 const MINIMUM_SAVED_POSITION_SECONDS = 5;
-const DETECTOR_CONFIG_STORAGE_KEY = "avatar-overlay-config";
 const emptyRecordingTags: RecordingTags = { match: [], lab: [], combo: false, pressure: false };
 
 type FrameStepTrigger = {
@@ -136,48 +181,17 @@ type FrameStepTrigger = {
   repeat: boolean;
 };
 
+type ExactReviewFrame = {
+  frameIndex: number;
+  data: string;
+};
+
 function frameIndexForTime(time: number) {
   return Math.max(0, Math.round(time * FRAME_RATE));
 }
 
-function seekVideoToTime(video: HTMLVideoElement, targetTime: number) {
-  if (!video.seeking && Math.abs(video.currentTime - targetTime) < 0.0001) {
-    return Promise.resolve(video.currentTime);
-  }
-
-  return new Promise<number>((resolve, reject) => {
-    let timeoutId: number | undefined;
-    const cleanup = () => {
-      video.removeEventListener("seeked", handleSeeked);
-      video.removeEventListener("error", handleError);
-      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
-    };
-    const handleSeeked = () => {
-      cleanup();
-      resolve(video.currentTime);
-    };
-    const handleError = () => {
-      cleanup();
-      reject(new Error("The video seek failed."));
-    };
-
-    video.addEventListener("seeked", handleSeeked, { once: true });
-    video.addEventListener("error", handleError, { once: true });
-    timeoutId = window.setTimeout(() => {
-      cleanup();
-      reject(new Error("The video seek timed out."));
-    }, FRAME_SEEK_TIMEOUT_MS);
-
-    try {
-      video.currentTime = targetTime;
-      if (!video.seeking && Math.abs(video.currentTime - targetTime) < 0.0001) {
-        handleSeeked();
-      }
-    } catch (error) {
-      cleanup();
-      reject(error instanceof Error ? error : new Error(String(error)));
-    }
-  });
+function lastFrameIndexForDuration(duration: number) {
+  return Math.max(0, Math.floor(Math.max(0, duration) * FRAME_RATE) - 1);
 }
 
 const calibrationGroups: Array<{
@@ -358,10 +372,18 @@ function debugRegionsFromConfig(config: DetectorConfig, width: number, height: n
 export function RecordingViewer({
   active = true,
   refreshToken = 0,
+  mode = "recordings",
 }: {
   active?: boolean;
   refreshToken?: number;
+  mode?: "recordings" | "nerd-processing";
 }) {
+  const {
+    state: obsState,
+    extractionCaptureActive,
+    startManualRecording,
+    stopManualRecording,
+  } = useObsRecording();
   const [folder, setFolder] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
   const [techCatalog, setTechCatalog] = useState<TechCatalog>(readTechCatalog);
@@ -372,6 +394,8 @@ export function RecordingViewer({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [reviewFrame, setReviewFrame] = useState<ExactReviewFrame | null>(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
   const [clipRange, setClipRange] = useState<[number, number]>([0, 0]);
   const [clipMode, setClipMode] = useState(false);
   const [exportingClip, setExportingClip] = useState(false);
@@ -381,9 +405,11 @@ export function RecordingViewer({
   const [showClips, setShowClips] = useState(true);
   const [selectedTagFilters, setSelectedTagFilters] = useState<RecordingTags>(emptyRecordingTags);
   const [renameError, setRenameError] = useState<string | null>(null);
+  const [youtubeError, setYoutubeError] = useState<string | null>(null);
   const [editingRecordingId, setEditingRecordingId] = useState<string | null>(null);
   const [editingRecordingName, setEditingRecordingName] = useState("");
   const [renamingRecordingId, setRenamingRecordingId] = useState<string | null>(null);
+  const [reprocessingNameId, setReprocessingNameId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     recording: RecordedVideo;
     mouseX: number;
@@ -398,6 +424,7 @@ export function RecordingViewer({
   const [analysisProgress, setAnalysisProgress] = useState<RecordingProcessorProgress | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [showAnalysisDebug, setShowAnalysisDebug] = useState(false);
+  const [showHitboxOverlay, setShowHitboxOverlay] = useState(true);
   const [debugFrameIndex, setDebugFrameIndex] = useState(0);
   const [videoContentBox, setVideoContentBox] = useState({
     left: 0,
@@ -414,6 +441,10 @@ export function RecordingViewer({
   const scrubbing = useRef(false);
   const restoredRecordingId = useRef<string | null>(null);
   const playbackPositions = useRef<Record<string, number>>({});
+  const frameReaderSession = useRef<string | null>(null);
+  const frameReaderRecordingId = useRef<string | null>(null);
+  const reviewRequestId = useRef(0);
+  const extractionRecording = extractionCaptureActive && obsState.recording.active;
 
   useEffect(() => {
     try {
@@ -463,19 +494,25 @@ export function RecordingViewer({
     setError(null);
     try {
       const result = await window.electronAPI.recordings.list();
+      const tabRecordings =
+        mode === "recordings"
+          ? result.recordings.filter(
+              (recording) => !recording.moveTake && !recording.id.startsWith("moves/"),
+            )
+          : result.recordings;
       setFolder(result.folder);
-      setRecordings(result.recordings);
+      setRecordings(tabRecordings);
       setSelectedId((current) =>
-        result.recordings.some((recording) => recording.id === current)
+        tabRecordings.some((recording) => recording.id === current)
           ? current
-          : (result.recordings[0]?.id ?? null),
+          : (tabRecordings[0]?.id ?? null),
       );
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     void loadRecordings();
@@ -485,6 +522,80 @@ export function RecordingViewer({
     () => recordings.find((recording) => recording.id === selectedId) ?? null,
     [recordings, selectedId],
   );
+
+  const closeFrameReader = useCallback(async () => {
+    const sessionId = frameReaderSession.current;
+    frameReaderSession.current = null;
+    frameReaderRecordingId.current = null;
+    if (!sessionId || !window.electronAPI?.recordings) return;
+    try {
+      await window.electronAPI.recordings.closeFrameReader({ sessionId });
+    } catch {
+      // Closing a reader is best-effort during recording changes and unmounts.
+    }
+  }, []);
+
+  const loadExactReviewFrame = useCallback(
+    async (frameIndex: number) => {
+      if (!selectedRecording || !window.electronAPI?.recordings) {
+        throw new Error("Exact frame review is only available in the desktop app.");
+      }
+      const requestId = ++reviewRequestId.current;
+      const openReader = async () => {
+        const reader = await window.electronAPI!.recordings.openFrameReader({
+          recordingId: selectedRecording.id,
+        });
+        frameReaderSession.current = reader.sessionId;
+        frameReaderRecordingId.current = selectedRecording.id;
+        return reader.sessionId;
+      };
+      const readFromReader = async (sessionId: string) =>
+        window.electronAPI!.recordings.readFrame({ sessionId, frameIndex });
+
+      let sessionId = frameReaderSession.current;
+      if (frameReaderRecordingId.current !== selectedRecording.id) {
+        await closeFrameReader();
+        sessionId = null;
+      }
+      if (!sessionId) sessionId = await openReader();
+
+      let decodedFrame;
+      try {
+        decodedFrame = await readFromReader(sessionId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("outside the review cache")) throw error;
+        await closeFrameReader();
+        sessionId = await openReader();
+        decodedFrame = await readFromReader(sessionId);
+      }
+      if (requestId !== reviewRequestId.current || sessionId !== frameReaderSession.current) {
+        return;
+      }
+
+      const nextTime = frameIndex / FRAME_RATE;
+      const video = videoRef.current;
+      video?.pause();
+      if (video && Math.abs(video.currentTime - nextTime) > 0.0001) {
+        video.currentTime = nextTime;
+      }
+      currentFrameIndex.current = decodedFrame.frameIndex;
+      setCurrentTime(nextTime);
+      setPlaybackError(null);
+      setReviewFrame({ frameIndex: decodedFrame.frameIndex, data: decodedFrame.data });
+    },
+    [closeFrameReader, selectedRecording],
+  );
+
+  useEffect(() => {
+    reviewRequestId.current += 1;
+    setReviewFrame(null);
+    void closeFrameReader();
+    return () => {
+      reviewRequestId.current += 1;
+      void closeFrameReader();
+    };
+  }, [closeFrameReader, selectedRecording?.id]);
 
   useEffect(() => {
     setShowAnalysisDebug(false);
@@ -536,6 +647,7 @@ export function RecordingViewer({
       setRenameError(null);
       setIsPlaying(false);
       setCurrentTime(0);
+      setReviewFrame(null);
       currentFrameIndex.current = 0;
       setDuration(0);
       setClipRange([0, 0]);
@@ -638,6 +750,21 @@ export function RecordingViewer({
     setRenameError(null);
   }, [renamingRecordingId]);
 
+  const finishRecordingRename = useCallback(
+    async (renamed: RecordedVideo) => {
+      await loadRecordings();
+      videoRef.current?.pause();
+      setIsPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+      setClipRange([0, 0]);
+      setClipMode(false);
+      restoredRecordingId.current = null;
+      setSelectedId(renamed.id);
+    },
+    [loadRecordings],
+  );
+
   const renameRecording = useCallback(async () => {
     if (!window.electronAPI?.recordings || !editingRecordingId) return;
     const requestedName = editingRecordingName.trim();
@@ -652,15 +779,7 @@ export function RecordingViewer({
         recordingId: editingRecordingId,
         name: requestedName,
       });
-      await loadRecordings();
-      videoRef.current?.pause();
-      setIsPlaying(false);
-      setCurrentTime(0);
-      setDuration(0);
-      setClipRange([0, 0]);
-      setClipMode(false);
-      restoredRecordingId.current = null;
-      setSelectedId(renamed.id);
+      await finishRecordingRename(renamed);
       setEditingRecordingId(null);
       setEditingRecordingName("");
     } catch (renameActionError) {
@@ -670,7 +789,40 @@ export function RecordingViewer({
     } finally {
       setRenamingRecordingId(null);
     }
-  }, [editingRecordingId, editingRecordingName, loadRecordings]);
+  }, [editingRecordingId, editingRecordingName, finishRecordingRename]);
+
+  const reprocessRecordingName = useCallback(
+    async (recording: RecordedVideo) => {
+      if (!window.electronAPI?.recordings || reprocessingNameId) return;
+      setContextMenu(null);
+      setRenameError(null);
+      setReprocessingNameId(recording.id);
+      try {
+        const renamed = await window.electronAPI.recordings.reprocessName({
+          recordingId: recording.id,
+        });
+        await finishRecordingRename(renamed);
+      } catch (reprocessError) {
+        setRenameError(
+          reprocessError instanceof Error ? reprocessError.message : String(reprocessError),
+        );
+      } finally {
+        setReprocessingNameId(null);
+      }
+    },
+    [finishRecordingRename, reprocessingNameId],
+  );
+
+  const openYouTubeStudio = useCallback(async (recording: RecordedVideo) => {
+    if (!window.electronAPI?.recordings) return;
+    setContextMenu(null);
+    setYoutubeError(null);
+    try {
+      await window.electronAPI.recordings.openYouTubeStudio({ recordingId: recording.id });
+    } catch (openError) {
+      setYoutubeError(openError instanceof Error ? openError.message : String(openError));
+    }
+  }, []);
 
   const updateRecordingTags = useCallback(
     async (nextTags: RecordingTags) => {
@@ -696,37 +848,77 @@ export function RecordingViewer({
     [selectedRecording],
   );
 
-  const processSelectedRecording = useCallback(async () => {
-    if (!window.electronAPI?.recordings || !selectedRecording) return;
-    setProcessingRecordingId(selectedRecording.id);
-    setAnalysisProgress(null);
-    setAnalysisError(null);
-    try {
-      const analysis = await processRecording(
-        selectedRecording.url,
-        setAnalysisProgress,
-        videoRef.current ?? undefined,
-      );
-      const analysisWithOverrides = applyManualInputStateOverrides(
-        analysis,
-        selectedRecording.analysis?.stateOverrides ?? [],
-      );
-      const updated = await window.electronAPI.recordings.saveAnalysis({
-        recordingId: selectedRecording.id,
-        analysis: analysisWithOverrides,
-      });
-      setRecordings((current) =>
-        current.map((recording) => (recording.id === updated.id ? updated : recording)),
-      );
-    } catch (processingError) {
-      setAnalysisError(
-        processingError instanceof Error ? processingError.message : String(processingError),
-      );
-    } finally {
-      setProcessingRecordingId(null);
+  const processSelectedRecording = useCallback(
+    async (useSavedCalibration = false) => {
+      if (!window.electronAPI?.recordings || !selectedRecording) return;
+      setProcessingRecordingId(selectedRecording.id);
       setAnalysisProgress(null);
-    }
-  }, [selectedRecording]);
+      setAnalysisError(null);
+      let processingFrameReaderId: string | null = null;
+      try {
+        await closeFrameReader();
+        const reader = await window.electronAPI.recordings.openFrameReader({
+          recordingId: selectedRecording.id,
+        });
+        processingFrameReaderId = reader.sessionId;
+        const frameProvider: RecordingFrameProvider = {
+          frameRate: reader.frameRate,
+          readFrame: async (frameIndex) => {
+            let encodedFrame;
+            try {
+              encodedFrame = await window.electronAPI!.recordings.readFrame({
+                sessionId: reader.sessionId,
+                frameIndex,
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              if (message.includes("past the end of the recording")) return null;
+              throw error;
+            }
+            const binary = atob(encodedFrame.data);
+            const bytes = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index += 1) {
+              bytes[index] = binary.charCodeAt(index);
+            }
+            return createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+          },
+        };
+        const analysis = await processRecording(
+          selectedRecording.url,
+          setAnalysisProgress,
+          videoRef.current ?? undefined,
+          frameProvider,
+          useSavedCalibration
+            ? selectedRecording.analysis?.processingSnapshot?.configuration
+            : undefined,
+        );
+        const analysisWithOverrides = applyManualInputStateOverrides(
+          analysis,
+          selectedRecording.analysis?.stateOverrides ?? [],
+        );
+        const updated = await window.electronAPI.recordings.saveAnalysis({
+          recordingId: selectedRecording.id,
+          analysis: analysisWithOverrides,
+        });
+        setRecordings((current) =>
+          current.map((recording) => (recording.id === updated.id ? updated : recording)),
+        );
+      } catch (processingError) {
+        setAnalysisError(
+          processingError instanceof Error ? processingError.message : String(processingError),
+        );
+      } finally {
+        if (processingFrameReaderId) {
+          await window.electronAPI.recordings.closeFrameReader({
+            sessionId: processingFrameReaderId,
+          });
+        }
+        setProcessingRecordingId(null);
+        setAnalysisProgress(null);
+      }
+    },
+    [selectedRecording],
+  );
 
   const updateInputStateOverride = useCallback(
     async (inputEventId: string, state: RecordingAnalysisState | null) => {
@@ -878,6 +1070,15 @@ export function RecordingViewer({
   const togglePlayback = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
+    if (reviewFrame) {
+      const reviewTime = reviewFrame.frameIndex / FRAME_RATE;
+      video.currentTime = reviewTime;
+      currentFrameIndex.current = reviewFrame.frameIndex;
+      setCurrentTime(reviewTime);
+      setReviewFrame(null);
+      void video.play();
+      return;
+    }
     if (video.paused) {
       if (clipMode && video.currentTime >= clipRange[1]) {
         video.currentTime = clipRange[0];
@@ -889,12 +1090,13 @@ export function RecordingViewer({
       currentFrameIndex.current = frameIndexForTime(video.currentTime);
       video.pause();
     }
-  }, [clipMode, clipRange]);
+  }, [clipMode, clipRange, reviewFrame]);
 
   const seekTo = useCallback(
     (nextTime: number) => {
       const video = videoRef.current;
       if (!video) return;
+      setReviewFrame(null);
       video.currentTime = nextTime;
       currentFrameIndex.current = frameIndexForTime(nextTime);
       setCurrentTime(nextTime);
@@ -911,11 +1113,43 @@ export function RecordingViewer({
   const debugFrame: RecordingAnalysisDiagnosticFrame | null = debugFrames[debugFrameIndex] ?? null;
   const analysisConfig = selectedRecording?.analysis?.detectorConfig ?? null;
   const [calibrationConfig, setCalibrationConfig] = useState<DetectorConfig | null>(null);
+  const [processingConfigResult, setProcessingConfigResult] =
+    useState<ProcessingConfigurationResult | null>(null);
+  const [processingConfigError, setProcessingConfigError] = useState<string | null>(null);
+  const [processingConfigNotice, setProcessingConfigNotice] = useState<string | null>(null);
+  const [calibrationSaves, setCalibrationSaves] = useState(0);
+  const [previewCurrentCalibration, setPreviewCurrentCalibration] = useState(false);
+  const applyProcessingConfigResult = useCallback((result: ProcessingConfigurationResult) => {
+    setProcessingConfigResult(result);
+    setCalibrationConfig(result.configuration?.detector ?? null);
+    setProcessingConfigError(null);
+  }, []);
   useEffect(() => {
-    const currentConfig = readDetectorConfig();
-    setCalibrationConfig(analysisConfig ? { ...currentConfig, ...analysisConfig } : currentConfig);
-  }, [selectedRecording?.id, analysisConfig]);
-  const debugConfig = calibrationConfig ?? analysisConfig;
+    let cancelled = false;
+    void loadProcessingConfiguration()
+      .then((result) => {
+        if (!cancelled) applyProcessingConfigResult(result);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled)
+          setProcessingConfigError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [applyProcessingConfigResult]);
+  const persistentConfig = processingConfigResult?.configuration;
+  const currentPreviewConfig =
+    persistentConfig && calibrationConfig
+      ? effectiveDetectorConfig(
+          { ...persistentConfig, detector: calibrationConfig },
+          selectedRecording?.analysis?.sourceWidth ?? persistentConfig.referenceSize.width,
+          selectedRecording?.analysis?.sourceHeight ?? persistentConfig.referenceSize.height,
+        )
+      : null;
+  const debugConfig = previewCurrentCalibration
+    ? currentPreviewConfig
+    : (analysisConfig ?? currentPreviewConfig);
   const debugRegions = debugConfig
     ? debugRegionsFromConfig(
         debugConfig,
@@ -929,16 +1163,77 @@ export function RecordingViewer({
     debugRegions.framebarSamples &&
     Array.isArray(debugFrame.player1States),
   );
-
-  const updateCalibration = useCallback((key: keyof DetectorConfig, value: string) => {
-    const numericValue = Number(value);
-    if (!Number.isFinite(numericValue)) return;
-    setCalibrationConfig((current) => {
-      const next = { ...(current ?? readDetectorConfig()), [key]: numericValue };
-      localStorage.setItem(DETECTOR_CONFIG_STORAGE_KEY, JSON.stringify(next));
-      return next;
+  const hitboxOverlayBoxes = useMemo<Array<RecordingAnalysisHitbox & { id: string }>>(() => {
+    if (mode !== "nerd-processing" || !selectedRecording?.analysis) return [];
+    const maximumSampleDistance = 2 / FRAME_RATE;
+    return selectedRecording.analysis.moves.flatMap((move) => {
+      if (currentTime < move.startTime - maximumSampleDistance || currentTime > move.endTime) {
+        return [];
+      }
+      return (move.hitboxTracks ?? []).flatMap((track) => {
+        const sample = track.samples.reduce<(typeof track.samples)[number] | null>(
+          (nearest, candidate) => {
+            if (!nearest) return candidate;
+            return Math.abs(candidate.time - currentTime) < Math.abs(nearest.time - currentTime)
+              ? candidate
+              : nearest;
+          },
+          null,
+        );
+        if (!sample || Math.abs(sample.time - currentTime) > maximumSampleDistance) return [];
+        return sample.boxes.map((box, boxIndex) => ({
+          ...box,
+          id: `${track.id}-${sample.frame}-${boxIndex}`,
+        }));
+      });
     });
-  }, []);
+  }, [currentTime, mode, selectedRecording]);
+
+  const saveProcessingCalibration = useCallback(
+    async (edit: Parameters<typeof updateProcessingConfiguration>[0]) => {
+      setCalibrationSaves((count) => count + 1);
+      try {
+        applyProcessingConfigResult(await updateProcessingConfiguration(edit));
+      } catch (error) {
+        setProcessingConfigError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setCalibrationSaves((count) => count - 1);
+      }
+    },
+    [applyProcessingConfigResult],
+  );
+  const updateCalibration = useCallback(
+    (key: keyof DetectorConfig, value: string) => {
+      if (!value.trim()) return;
+      const numericValue = Number(value);
+      if (!Number.isFinite(numericValue)) return;
+      setPreviewCurrentCalibration(true);
+      void saveProcessingCalibration((configuration) => ({
+        ...configuration,
+        detector: { ...configuration.detector, [key]: numericValue },
+      }));
+    },
+    [saveProcessingCalibration],
+  );
+  const runConfigurationAction = useCallback(
+    async (action: "reload" | "import" | "export") => {
+      try {
+        if (action === "export") {
+          const exportedPath = await window.electronAPI!.processingConfiguration.export();
+          if (exportedPath) setProcessingConfigNotice(`Configuration exported to ${exportedPath}`);
+        } else {
+          const result =
+            action === "import"
+              ? await importProcessingConfiguration()
+              : await reloadProcessingConfiguration();
+          if (result) applyProcessingConfigResult(result);
+        }
+      } catch (error) {
+        setProcessingConfigError(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [applyProcessingConfigResult],
+  );
 
   const updateVideoContentBox = useCallback(() => {
     const video = videoRef.current;
@@ -976,10 +1271,12 @@ export function RecordingViewer({
     const video = videoRef.current;
     if (!video) return;
     video.pause();
-    video.currentTime = debugFrame.time;
-    currentFrameIndex.current = frameIndexForTime(debugFrame.time);
-    setCurrentTime(debugFrame.time);
-  }, [debugFrame, showAnalysisDebug]);
+    void loadExactReviewFrame(frameIndexForTime(debugFrame.time)).catch((error) => {
+      setPlaybackError(
+        error instanceof Error ? `Exact frame review failed: ${error.message}` : String(error),
+      );
+    });
+  }, [debugFrame, loadExactReviewFrame, showAnalysisDebug]);
 
   const exportAnalysisDiagnostics = useCallback(() => {
     if (!selectedRecording?.analysis) return;
@@ -994,126 +1291,120 @@ export function RecordingViewer({
     URL.revokeObjectURL(url);
   }, [selectedRecording]);
 
-  const stepFrame = useCallback(async (direction: 1 | -1, trigger: FrameStepTrigger) => {
-    const video = videoRef.current;
-    if (!video || !Number.isFinite(video.duration)) return;
-    if (steppingFrame.current) {
-      if (queuedFrameSteps.current.length < FRAME_STEP_QUEUE_LIMIT) {
-        queuedFrameSteps.current.push(direction);
-        console.debug("[RecordingViewer] frame-step queued", {
-          direction,
-          key: trigger.key,
-          queueLength: queuedFrameSteps.current.length,
-        });
-      } else {
-        console.debug("[RecordingViewer] frame-step queue-full", {
-          direction,
-          key: trigger.key,
-          queueLength: queuedFrameSteps.current.length,
-        });
+  const stepFrame = useCallback(
+    async (direction: 1 | -1, trigger: FrameStepTrigger) => {
+      const video = videoRef.current;
+      if (!video || !Number.isFinite(video.duration)) return;
+      if (steppingFrame.current) {
+        if (queuedFrameSteps.current.length < FRAME_STEP_QUEUE_LIMIT) {
+          queuedFrameSteps.current.push(direction);
+          console.debug("[RecordingViewer] frame-step queued", {
+            direction,
+            key: trigger.key,
+            queueLength: queuedFrameSteps.current.length,
+          });
+        } else {
+          console.debug("[RecordingViewer] frame-step queue-full", {
+            direction,
+            key: trigger.key,
+            queueLength: queuedFrameSteps.current.length,
+          });
+        }
+        return;
       }
-      return;
-    }
-    steppingFrame.current = true;
-    const stepStartedAt = performance.now();
-    const startingTime = video.currentTime;
-    const durationFrame = frameIndexForTime(video.duration);
-    const trackedFrame = currentFrameIndex.current;
-    const startingFrame = Math.min(
-      durationFrame,
-      trackedFrame == null ? frameIndexForTime(startingTime) : trackedFrame,
-    );
-    const targetFrame = Math.min(durationFrame, Math.max(0, startingFrame + direction));
-    const targetTime = Math.min(video.duration, targetFrame / FRAME_RATE);
-    const startingQuality = video.getVideoPlaybackQuality?.();
-    console.debug("[RecordingViewer] frame-step start", {
-      direction,
-      duration: video.duration,
-      key: trigger.key,
-      repeat: trigger.repeat,
-      startingTime,
-      startingFrame,
-      targetTime,
-      targetFrame,
-      readyState: video.readyState,
-      seeking: video.seeking,
-      paused: video.paused,
-      totalVideoFrames: startingQuality?.totalVideoFrames,
-      droppedVideoFrames: startingQuality?.droppedVideoFrames,
-    });
-    video.pause();
-    try {
-      console.debug("[RecordingViewer] frame-step seek", {
-        startingTime,
-        startingFrame,
-        targetTime,
-        targetFrame,
+      steppingFrame.current = true;
+      setReviewLoading(true);
+      const stepStartedAt = performance.now();
+      const startingTime = reviewFrame ? reviewFrame.frameIndex / FRAME_RATE : video.currentTime;
+      const durationFrame = lastFrameIndexForDuration(video.duration);
+      const trackedFrame = currentFrameIndex.current;
+      const startingFrame = Math.min(
+        durationFrame,
+        trackedFrame == null ? frameIndexForTime(startingTime) : trackedFrame,
+      );
+      const targetFrame = Math.min(durationFrame, Math.max(0, startingFrame + direction));
+      const targetTime = targetFrame / FRAME_RATE;
+      const startingQuality = video.getVideoPlaybackQuality?.();
+      console.debug("[RecordingViewer] frame-step start", {
         direction,
-        seeking: video.seeking,
-        readyState: video.readyState,
-      });
-      const settledTime = await seekVideoToTime(video, targetTime);
-      const settledFrame = Math.round(settledTime * FRAME_RATE);
-      console.debug("[RecordingViewer] frame-step seek-settled", {
+        duration: video.duration,
+        key: trigger.key,
+        repeat: trigger.repeat,
         startingTime,
         startingFrame,
         targetTime,
         targetFrame,
-        settledTime,
-        settledFrame,
-        deltaFrames: targetFrame - startingFrame,
-        settledTimestampFrameDelta: settledFrame - startingFrame,
-        errorSeconds: settledTime - targetTime,
-        errorFrames: (settledTime - targetTime) * FRAME_RATE,
         readyState: video.readyState,
         seeking: video.seeking,
         paused: video.paused,
-      });
-      currentFrameIndex.current = targetFrame;
-      setCurrentTime(settledTime);
-    } catch (error) {
-      console.debug("[RecordingViewer] frame-step error-fallback", {
-        direction,
-        error: error instanceof Error ? error.message : String(error),
-        startingTime,
-        startingFrame,
-        targetTime,
-        targetFrame,
-        currentTime: video.currentTime,
-        readyState: video.readyState,
-        seeking: video.seeking,
-        paused: video.paused,
+        totalVideoFrames: startingQuality?.totalVideoFrames,
+        droppedVideoFrames: startingQuality?.droppedVideoFrames,
       });
       video.pause();
-      setCurrentTime(video.currentTime);
-    } finally {
-      steppingFrame.current = false;
-      const endingQuality = video.getVideoPlaybackQuality?.();
-      const queuedDirection = queuedFrameSteps.current.shift();
-      console.debug("[RecordingViewer] frame-step end", {
-        direction,
-        startingTime,
-        endingTime: video.currentTime,
-        deltaSeconds: video.currentTime - startingTime,
-        deltaFrames:
-          currentFrameIndex.current != null ? currentFrameIndex.current - startingFrame : undefined,
-        timestampDeltaFrames: (video.currentTime - startingTime) * FRAME_RATE,
-        elapsedMilliseconds: performance.now() - stepStartedAt,
-        readyState: video.readyState,
-        seeking: video.seeking,
-        paused: video.paused,
-        totalVideoFrames: endingQuality?.totalVideoFrames,
-        droppedVideoFrames: endingQuality?.droppedVideoFrames,
-        droppedFramesDuringStep:
-          endingQuality && startingQuality
-            ? endingQuality.droppedVideoFrames - startingQuality.droppedVideoFrames
-            : undefined,
-      });
-      if (queuedDirection !== undefined) {
-        queueMicrotask(() => void stepFrame(queuedDirection, { key: "queued", repeat: false }));
+      try {
+        console.debug("[RecordingViewer] frame-step exact-read", {
+          startingTime,
+          startingFrame,
+          targetTime,
+          targetFrame,
+          direction,
+        });
+        await loadExactReviewFrame(targetFrame);
+        currentFrameIndex.current = targetFrame;
+        setCurrentTime(targetTime);
+      } catch (error) {
+        console.debug("[RecordingViewer] frame-step error-fallback", {
+          direction,
+          error: error instanceof Error ? error.message : String(error),
+          startingTime,
+          startingFrame,
+          targetTime,
+          targetFrame,
+          currentTime: video.currentTime,
+          readyState: video.readyState,
+          seeking: video.seeking,
+          paused: video.paused,
+        });
+        video.pause();
+        setReviewFrame(null);
+        setPlaybackError(
+          error instanceof Error ? `Exact frame review failed: ${error.message}` : String(error),
+        );
+        setCurrentTime(video.currentTime);
+      } finally {
+        steppingFrame.current = false;
+        setReviewLoading(false);
+        const endingQuality = video.getVideoPlaybackQuality?.();
+        const queuedDirection = queuedFrameSteps.current.shift();
+        console.debug("[RecordingViewer] frame-step end", {
+          direction,
+          startingTime,
+          endingTime: reviewFrame ? reviewFrame.frameIndex / FRAME_RATE : video.currentTime,
+          deltaSeconds:
+            (reviewFrame ? reviewFrame.frameIndex / FRAME_RATE : video.currentTime) - startingTime,
+          deltaFrames:
+            currentFrameIndex.current != null
+              ? currentFrameIndex.current - startingFrame
+              : undefined,
+          timestampDeltaFrames: (video.currentTime - startingTime) * FRAME_RATE,
+          elapsedMilliseconds: performance.now() - stepStartedAt,
+          readyState: video.readyState,
+          seeking: video.seeking,
+          paused: video.paused,
+          totalVideoFrames: endingQuality?.totalVideoFrames,
+          droppedVideoFrames: endingQuality?.droppedVideoFrames,
+          droppedFramesDuringStep:
+            endingQuality && startingQuality
+              ? endingQuality.droppedVideoFrames - startingQuality.droppedVideoFrames
+              : undefined,
+        });
+        if (queuedDirection !== undefined) {
+          queueMicrotask(() => void stepFrame(queuedDirection, { key: "queued", repeat: false }));
+        }
       }
-    }
-  }, []);
+    },
+    [loadExactReviewFrame, reviewFrame],
+  );
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1159,6 +1450,157 @@ export function RecordingViewer({
     <Stack spacing={2} sx={{ height: "100%", minHeight: 0, overflow: "hidden" }}>
       {error && <Alert severity="error">{error}</Alert>}
       {renameError && <Alert severity="error">{renameError}</Alert>}
+      {youtubeError && <Alert severity="error">{youtubeError}</Alert>}
+      {mode === "nerd-processing" && processingConfigError && (
+        <Alert severity="error">{processingConfigError}</Alert>
+      )}
+      {mode === "nerd-processing" && (
+        <Paper variant="outlined" sx={{ p: 1.5, flexShrink: 0, textAlign: "left" }}>
+          <Stack
+            direction={{ xs: "column", sm: "row" }}
+            spacing={1.5}
+            sx={{ alignItems: { sm: "center" } }}
+          >
+            <Box sx={{ flex: 1 }}>
+              <Typography variant="subtitle1">Nerd processing</Typography>
+              <Typography variant="body2" color="text.secondary">
+                Record a move with OBS, then run the FFmpeg frame-analysis workflow against the
+                captured clip.
+              </Typography>
+            </Box>
+            <Button
+              variant={extractionRecording ? "outlined" : "contained"}
+              color={extractionRecording ? "error" : "primary"}
+              onClick={() =>
+                void (extractionRecording
+                  ? stopManualRecording()
+                  : startManualRecording("extraction"))
+              }
+              disabled={
+                obsState.status !== "connected" ||
+                (!extractionRecording && (obsState.recording.active || obsState.automation.enabled))
+              }
+            >
+              {extractionRecording
+                ? "Stop recording move for extraction"
+                : "Start recording move for extraction"}
+            </Button>
+          </Stack>
+          <Box component="details" sx={{ mt: 1, maxHeight: 280, overflow: "auto" }}>
+            <Typography component="summary" sx={{ cursor: "pointer" }}>
+              Processing configuration
+              {persistentConfig ? ` · revision ${persistentConfig.revision}` : ""}
+              {calibrationSaves > 0 ? " · saving…" : ""}
+            </Typography>
+            <Stack spacing={1} sx={{ mt: 1 }}>
+              {processingConfigResult?.warnings.map((warning) => (
+                <Alert severity="warning" key={warning}>
+                  {warning}
+                </Alert>
+              ))}
+              {processingConfigNotice && (
+                <Alert severity="success" onClose={() => setProcessingConfigNotice(null)}>
+                  {processingConfigNotice}
+                </Alert>
+              )}
+              <Typography variant="caption" sx={{ overflowWrap: "anywhere" }}>
+                {processingConfigResult?.path ?? "Loading saved calibration…"}
+              </Typography>
+              <Stack direction="row" spacing={1}>
+                {(["export", "import", "reload"] as const).map((action) => (
+                  <Button
+                    key={action}
+                    size="small"
+                    disabled={calibrationSaves > 0 || Boolean(processingRecordingId)}
+                    onClick={() => void runConfigurationAction(action)}
+                  >
+                    {action === "export"
+                      ? "Export configuration"
+                      : action === "import"
+                        ? "Import configuration"
+                        : "Reload configuration"}
+                  </Button>
+                ))}
+              </Stack>
+              {persistentConfig && (
+                <>
+                  <Typography variant="caption" color="text.secondary">
+                    Saved calibration is independent of browser storage. Each edit keeps the
+                    previous revision. Unmatched framebar colors remain unknown. Import an exported
+                    revision to restore it.
+                  </Typography>
+                  <Stack direction="row" spacing={1}>
+                    {(["width", "height"] as const).map((dimension) => (
+                      <CalibrationNumberField
+                        key={dimension}
+                        label={`Calibration reference ${dimension}`}
+                        min={1}
+                        max={32768}
+                        step={1}
+                        width={190}
+                        value={persistentConfig.referenceSize[dimension]}
+                        onCommit={(value) => {
+                          void saveProcessingCalibration((configuration) => ({
+                            ...configuration,
+                            referenceSize: { ...configuration.referenceSize, [dimension]: value },
+                          }));
+                        }}
+                      />
+                    ))}
+                    <CalibrationNumberField
+                      label="Color distance threshold"
+                      min={0.001}
+                      max={1}
+                      step={0.01}
+                      width={190}
+                      value={persistentConfig.framebar.distanceThreshold}
+                      onCommit={(value) => {
+                        void saveProcessingCalibration((configuration) => ({
+                          ...configuration,
+                          framebar: { ...configuration.framebar, distanceThreshold: value },
+                        }));
+                      }}
+                    />
+                  </Stack>
+                  {persistentConfig.framebar.colors.map((color, index) => (
+                    <Stack
+                      key={`${color.name}-${index}`}
+                      direction="row"
+                      spacing={1}
+                      sx={{ alignItems: "center" }}
+                    >
+                      <Typography variant="caption" sx={{ minWidth: 90 }}>
+                        {color.name}
+                      </Typography>
+                      {(["red", "green", "blue"] as const).map((channel) => (
+                        <CalibrationNumberField
+                          key={channel}
+                          label={channel}
+                          value={color[channel]}
+                          width={94}
+                          max={255}
+                          step={1}
+                          onCommit={(value) => {
+                            void saveProcessingCalibration((configuration) => ({
+                              ...configuration,
+                              framebar: {
+                                ...configuration.framebar,
+                                colors: configuration.framebar.colors.map((entry, colorIndex) =>
+                                  colorIndex === index ? { ...entry, [channel]: value } : entry,
+                                ),
+                              },
+                            }));
+                          }}
+                        />
+                      ))}
+                    </Stack>
+                  ))}
+                </>
+              )}
+            </Stack>
+          </Box>
+        </Paper>
+      )}
 
       <Stack
         direction={{ xs: "column", md: "row" }}
@@ -1452,7 +1894,7 @@ export function RecordingViewer({
                     <>
                       <ListItemText
                         primary={recording.name}
-                        secondary={`${formatFileSize(recording.size)} | ${formatModifiedAt(recording.modifiedAt)}`}
+                        secondary={`${recording.moveTake ? `${recording.moveTake.moveLabel} · ${recording.moveTake.outcome} · ${recording.moveTake.validation.status} | ` : ""}${formatFileSize(recording.size)} | ${formatModifiedAt(recording.modifiedAt)}`}
                         slotProps={{
                           primary: { sx: { overflowWrap: "anywhere" } },
                         }}
@@ -1470,6 +1912,24 @@ export function RecordingViewer({
                           <PencilIcon />
                         </IconButton>
                       </Tooltip>
+                      {recording.source === "automatic" && (
+                        <Tooltip title="Rebuild name from first game's replay">
+                          <span>
+                            <IconButton
+                              edge="end"
+                              size="small"
+                              aria-label={`Rebuild name for ${recording.name}`}
+                              disabled={Boolean(reprocessingNameId)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void reprocessRecordingName(recording);
+                              }}
+                            >
+                              <RefreshIcon />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      )}
                     </>
                   )}
                 </ListItemButton>
@@ -1489,6 +1949,17 @@ export function RecordingViewer({
           <MenuItem onClick={() => contextMenu && beginRename(contextMenu.recording)}>
             Rename
           </MenuItem>
+          <MenuItem onClick={() => contextMenu && void openYouTubeStudio(contextMenu.recording)}>
+            Open YouTube Studio in browser
+          </MenuItem>
+          {contextMenu?.recording.source === "automatic" && (
+            <MenuItem
+              disabled={Boolean(reprocessingNameId)}
+              onClick={() => void reprocessRecordingName(contextMenu.recording)}
+            >
+              Rebuild automatic name
+            </MenuItem>
+          )}
           <MenuItem
             sx={{ color: "error.main" }}
             onClick={() => contextMenu && requestDelete(contextMenu.recording)}
@@ -1549,28 +2020,116 @@ export function RecordingViewer({
                 <Button
                   variant="outlined"
                   size="small"
-                  onClick={() => void processSelectedRecording()}
-                  disabled={processingRecordingId === selectedRecording.id}
+                  onClick={() => void openYouTubeStudio(selectedRecording)}
                 >
-                  {processingRecordingId === selectedRecording.id
-                    ? "Processing recording..."
-                    : "Process recording"}
+                  Open YouTube Studio in browser
                 </Button>
+                {mode === "nerd-processing" && (
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={() => void processSelectedRecording()}
+                    disabled={
+                      Boolean(processingRecordingId) ||
+                      calibrationSaves > 0 ||
+                      !persistentConfig ||
+                      Boolean(processingConfigError)
+                    }
+                  >
+                    {processingRecordingId === selectedRecording.id
+                      ? "Processing recording..."
+                      : "Process current calibration"}
+                  </Button>
+                )}
+                {mode === "nerd-processing" && selectedRecording.analysis?.processingSnapshot && (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    disabled={Boolean(processingRecordingId) || calibrationSaves > 0}
+                    onClick={() => void processSelectedRecording(true)}
+                  >
+                    Reprocess saved calibration
+                  </Button>
+                )}
               </Stack>
-              {processingRecordingId === selectedRecording.id && analysisProgress && (
-                <Stack spacing={0.5}>
-                  <LinearProgress
-                    variant="determinate"
-                    value={(analysisProgress.completed / Math.max(1, analysisProgress.total)) * 100}
-                  />
-                  <Typography variant="caption" color="text.secondary">
-                    Analyzing {formatVideoTime(analysisProgress.time)} of{" "}
-                    {formatVideoTime(analysisProgress.duration)}
-                  </Typography>
-                </Stack>
+              {selectedRecording.moveTake && (
+                <Alert
+                  severity={
+                    selectedRecording.moveTake.validation.status === "verified"
+                      ? "success"
+                      : selectedRecording.moveTake.validation.status === "mismatch"
+                        ? "error"
+                        : selectedRecording.moveTake.validation.status === "ambiguous"
+                          ? "warning"
+                          : "info"
+                  }
+                >
+                  Move take: {selectedRecording.moveTake.characterLabel} ·{" "}
+                  {selectedRecording.moveTake.moveLabel} · {selectedRecording.moveTake.outcome}.{" "}
+                  {selectedRecording.moveTake.validation.message}
+                  {selectedRecording.moveTake.validation.observedInputs.length > 0
+                    ? ` Observed: ${selectedRecording.moveTake.validation.observedInputs.join(", ")}.`
+                    : ""}
+                  {selectedRecording.moveTake.storageError
+                    ? ` File organization warning: ${selectedRecording.moveTake.storageError}`
+                    : ""}
+                </Alert>
               )}
-              {analysisError && <Alert severity="error">{analysisError}</Alert>}
-              {selectedRecording.analysis && (
+              {mode === "nerd-processing" && selectedRecording.analysis && (
+                <Typography variant="caption" color="text.secondary">
+                  {selectedRecording.analysis.processingSnapshot
+                    ? `Analysis used configuration revision ${selectedRecording.analysis.processingSnapshot.configuration.revision} · ${selectedRecording.analysis.processingSnapshot.processorVersion}`
+                    : "Older analysis: the full color/template calibration was not saved. Reprocess to capture it."}
+                </Typography>
+              )}
+              {mode === "nerd-processing" && Boolean(selectedRecording.analysisHistory?.length) && (
+                <details>
+                  <summary>
+                    Previous analysis runs ({selectedRecording.analysisHistory?.length})
+                  </summary>
+                  {selectedRecording.analysisHistory?.map((run, index) => (
+                    <Typography
+                      key={`${run.processedAt}-${index}`}
+                      component="div"
+                      variant="caption"
+                      sx={{ overflowWrap: "anywhere" }}
+                    >
+                      {run.processedAt} · {run.processorVersion ?? "older processor"} · inputs{" "}
+                      {run.inputs.join(", ") || "none"} · moves{" "}
+                      {run.moves.map((move) => move.notation ?? "?").join(", ") || "none"}
+                    </Typography>
+                  ))}
+                </details>
+              )}
+              {mode === "nerd-processing" &&
+                selectedRecording.analysis?.processingSnapshot &&
+                selectedRecording.analysis.processingSnapshot.processorFingerprint !==
+                  recordingProcessorFingerprint && (
+                  <Alert severity="warning">
+                    Detector code changed since this analysis. Saved calibration can be reused, but
+                    results may differ with the current detector.
+                  </Alert>
+                )}
+              {mode === "nerd-processing" &&
+                processingRecordingId === selectedRecording.id &&
+                analysisProgress && (
+                  <Stack spacing={0.5}>
+                    <LinearProgress
+                      variant="determinate"
+                      value={
+                        (analysisProgress.completed / Math.max(1, analysisProgress.total)) * 100
+                      }
+                    />
+                    <Typography variant="caption" color="text.secondary">
+                      Analyzing {formatVideoTime(analysisProgress.time)} of{" "}
+                      {formatVideoTime(analysisProgress.duration)}
+                    </Typography>
+                  </Stack>
+                )}
+              {mode === "nerd-processing" && analysisError && (
+                <Alert severity="error">{analysisError}</Alert>
+              )}
+              {mode === "nerd-processing" && selectedRecording.analysis && (
                 <Stack spacing={0.5}>
                   <Typography variant="subtitle2">
                     Detected moves ({selectedRecording.analysis.moves.length})
@@ -1588,7 +2147,7 @@ export function RecordingViewer({
                       </Typography>
                       {parsedInputRoute.some((part) => part.includes("~")) && (
                         <Typography variant="caption" color="text.secondary">
-                          ~ indicates a followup in a configured rekka sequence.
+                          ~ indicates a followup in a configured stance sequence.
                         </Typography>
                       )}
                     </Paper>
@@ -1608,8 +2167,15 @@ export function RecordingViewer({
                       {move.onBlock == null
                         ? "?"
                         : `${move.onBlock >= 0 ? "+" : ""}${move.onBlock}`}{" "}
-                      Â· hits {move.hits?.length ?? "?"} Â· hitboxes{" "}
-                      {move.hitboxStatus === "detected" ? "available" : "not analyzed"}
+                      · on hit{" "}
+                      {move.onHit == null ? "?" : `${move.onHit >= 0 ? "+" : ""}${move.onHit}`} Â·
+                      hits {move.hits?.length ?? "?"} Â· hitboxes{" "}
+                      {move.hitboxStatus === "detected"
+                        ? "available"
+                        : move.hitboxStatus === "not-found"
+                          ? "none visible"
+                          : "not analyzed"}{" "}
+                      {move.hitboxTracks?.length ? `(${move.hitboxTracks.length} tracks)` : ""}
                     </Button>
                   ))}
                   {inputEvents.length > 0 && (
@@ -1681,6 +2247,16 @@ export function RecordingViewer({
                   >
                     <Button
                       size="small"
+                      variant={showHitboxOverlay ? "contained" : "outlined"}
+                      onClick={() => setShowHitboxOverlay((current) => !current)}
+                      disabled={
+                        !selectedRecording.analysis.moves.some((move) => move.hitboxTracks?.length)
+                      }
+                    >
+                      {showHitboxOverlay ? "Hide CV hitboxes" : "Show CV hitboxes"}
+                    </Button>
+                    <Button
+                      size="small"
                       variant={showAnalysisDebug ? "contained" : "outlined"}
                       onClick={() => setShowAnalysisDebug((current) => !current)}
                       disabled={!analysisDebugReady}
@@ -1693,7 +2269,7 @@ export function RecordingViewer({
                       </Typography>
                     )}
                   </Stack>
-                  {showAnalysisDebug && debugConfig && (
+                  {showAnalysisDebug && calibrationConfig && (
                     <Paper component="details" variant="outlined" sx={{ p: 1.5, mt: 0.5 }}>
                       <Typography component="summary" sx={{ cursor: "pointer", mb: 1 }}>
                         Calibration controls
@@ -1704,9 +2280,19 @@ export function RecordingViewer({
                         component="div"
                         sx={{ mb: 1 }}
                       >
-                        Values are saved automatically and update the region preview immediately.
-                        Reprocess the recording after tuning to apply them to detection.
+                        Press Enter or leave a field to save it to the persistent configuration.
+                        Pixel offsets use the reference resolution shown above. Process current
+                        calibration to apply them.
                       </Typography>
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            checked={previewCurrentCalibration}
+                            onChange={(_, checked) => setPreviewCurrentCalibration(checked)}
+                          />
+                        }
+                        label="Preview current calibration (otherwise show the analysis snapshot)"
+                      />
                       <Stack spacing={1.25}>
                         {calibrationGroups.map((group) => (
                           <Box key={group.title}>
@@ -1715,15 +2301,12 @@ export function RecordingViewer({
                             </Typography>
                             <Stack direction="row" spacing={1} sx={{ mt: 0.5, flexWrap: "wrap" }}>
                               {group.fields.map(({ key, label, step }) => (
-                                <TextField
+                                <CalibrationNumberField
                                   key={key}
                                   label={label}
-                                  type="number"
-                                  size="small"
-                                  value={debugConfig[key]}
-                                  onChange={(event) => updateCalibration(key, event.target.value)}
-                                  slotProps={{ htmlInput: { min: 0, step: step ?? 0.1 } }}
-                                  sx={{ width: 132 }}
+                                  value={calibrationConfig[key]}
+                                  onCommit={(value) => updateCalibration(key, String(value))}
+                                  step={step ?? 0.1}
                                 />
                               ))}
                             </Stack>
@@ -1897,7 +2480,7 @@ export function RecordingViewer({
                       setCurrentTime(clipRange[0]);
                       return;
                     }
-                    if (!scrubbing.current) {
+                    if (!scrubbing.current && !reviewFrame) {
                       if (!steppingFrame.current) {
                         currentFrameIndex.current = frameIndexForTime(nextTime);
                       }
@@ -1929,8 +2512,75 @@ export function RecordingViewer({
                     height: "100%",
                     objectFit: "contain",
                     backgroundColor: "#000",
+                    visibility: reviewFrame ? "hidden" : "visible",
                   }}
                 />
+                {reviewFrame && (
+                  <Box
+                    component="img"
+                    src={`data:image/jpeg;base64,${reviewFrame.data}`}
+                    alt={`Exact decoded frame ${reviewFrame.frameIndex}`}
+                    onClick={togglePlayback}
+                    sx={{
+                      position: "absolute",
+                      inset: 0,
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "contain",
+                      backgroundColor: "#000",
+                      cursor: "pointer",
+                    }}
+                  />
+                )}
+                {showHitboxOverlay &&
+                  hitboxOverlayBoxes.length > 0 &&
+                  videoContentBox.width > 0 && (
+                    <Box
+                      sx={{
+                        position: "absolute",
+                        left: videoContentBox.left,
+                        top: videoContentBox.top,
+                        width: videoContentBox.width,
+                        height: videoContentBox.height,
+                        pointerEvents: "none",
+                      }}
+                    >
+                      {hitboxOverlayBoxes.map((box) => {
+                        const color = hitboxOverlayColor(box.kind);
+                        return (
+                          <Box
+                            key={box.id}
+                            sx={{
+                              position: "absolute",
+                              left: `${box.x}%`,
+                              top: `${box.y}%`,
+                              width: `${box.width}%`,
+                              height: `${box.height}%`,
+                              border: `2px solid ${color}`,
+                              backgroundColor: `${color}22`,
+                              boxSizing: "border-box",
+                            }}
+                          >
+                            <Typography
+                              component="span"
+                              sx={{
+                                position: "absolute",
+                                left: 2,
+                                top: 1,
+                                px: 0.25,
+                                color,
+                                backgroundColor: "rgba(0, 0, 0, 0.72)",
+                                font: "10px monospace",
+                                lineHeight: 1.2,
+                              }}
+                            >
+                              {box.kind?.replace("overlay-", "") ?? "hitbox"}
+                            </Typography>
+                          </Box>
+                        );
+                      })}
+                    </Box>
+                  )}
                 {showAnalysisDebug &&
                   analysisDebugReady &&
                   debugFrame &&
@@ -2420,6 +3070,16 @@ export function RecordingViewer({
                       <Typography variant="caption" color="text.secondary">
                         {formatVideoTime(currentTime)} / {formatVideoTime(duration)}
                       </Typography>
+                      {reviewFrame && (
+                        <Typography variant="caption" color="primary.main">
+                          Exact decoded frame {reviewFrame.frameIndex}
+                        </Typography>
+                      )}
+                      {reviewLoading && (
+                        <Typography variant="caption" color="text.secondary">
+                          Decoding exact frame…
+                        </Typography>
+                      )}
                       <Typography
                         variant="caption"
                         color="text.secondary"

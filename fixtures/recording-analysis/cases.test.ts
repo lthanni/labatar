@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vite-plus/test";
 import fixtureManifest from "./cases.json";
 import { applyManualInputStateOverrides } from "../../src/recording-analysis-state";
-import { parseMoveNotation } from "../../src/move-notation";
+import {
+  classifyMoveInput,
+  isFlowCancellableByDefault,
+  moveNotationsMatch,
+  parseMoveNotation,
+  stanceFollowupMatches,
+} from "../../src/move-notation";
 import { buildRecordingDisplayRows, descendantClipRanges } from "../../src/recording-hierarchy";
 import {
   defaultInputDisplayGeometry,
   detectInputDisplay,
+  inputDisplayObservationsMatch,
   resolveNewestInput,
   resolveRecentInput,
   type InputDisplayObservation,
@@ -15,10 +22,15 @@ import { defaultDetectorConfig } from "../../src/detector-config";
 import { framebarColorMap, findClosestFramebarColor } from "../../src/framebar-color-map";
 import {
   calculateOnBlock,
+  calculateOnHit,
   countPostHitpauseActiveFrames,
   resolveFramebarSampleSpacing,
 } from "../../src/framebar-detector";
-import { findInputForFramebarStart } from "../../src/recording-input-association";
+import {
+  findInputForFramebarStart,
+  findInputForStartup,
+} from "../../src/recording-input-association";
+import { detectVisibleHitboxesFromPixels } from "../../src/hitbox-detector";
 import type { RecordingAnalysis } from "../../src/recording-analysis-types";
 import type { RecordedVideo } from "../../src/recording-types";
 
@@ -41,6 +53,41 @@ function fixtureRecording(id: string, clip: RecordedVideo["clip"] = null): Recor
 }
 
 describe("recording-analysis fixture contract", () => {
+  it("tolerates two pixels of input marker jitter without hiding a changed button or direction", () => {
+    const observation = (joystickX: number, buttonX?: number): InputDisplayObservation => ({
+      width: 200,
+      height: 100,
+      rows: [
+        {
+          top: 0,
+          bottom: 10,
+          markers: [
+            { color: "red", x: joystickX, y: 5, area: 20, width: 5, height: 5, fillRatio: 0.8 },
+            ...(buttonX === undefined
+              ? []
+              : [
+                  {
+                    color: "yellow" as const,
+                    x: buttonX,
+                    y: 5,
+                    area: 20,
+                    width: 5,
+                    height: 5,
+                    fillRatio: 0.8,
+                  },
+                ]),
+          ],
+        },
+      ],
+    });
+
+    expect(inputDisplayObservationsMatch(observation(99, 155), observation(99, 154))).toBe(true);
+    expect(inputDisplayObservationsMatch(observation(99, 155), observation(99, 153))).toBe(true);
+    expect(inputDisplayObservationsMatch(observation(99, 155), observation(99, 152))).toBe(false);
+    expect(inputDisplayObservationsMatch(observation(99, 155), observation(99))).toBe(false);
+    expect(inputDisplayObservationsMatch(observation(99, 155), observation(96, 155))).toBe(false);
+  });
+
   it("keeps the verified pressure case explicit", () => {
     const pressureCase = fixtureManifest.cases.find(
       (fixture) => fixture.id === "aang-gyatso-double-overhead-double-cross",
@@ -104,6 +151,44 @@ describe("recording-analysis fixture contract", () => {
       expect(parseMoveNotation(notation), notation).toMatchObject({ ok: true });
     }
     expect(parseMoveNotation("5S").ok).toBe(false);
+  });
+
+  it("only matches bare followups within a stance sequence", () => {
+    expect(parseMoveNotation("A").ok).toBe(false);
+    expect(parseMoveNotation("A", { allowDirectionless: true })).toMatchObject({
+      ok: true,
+      notation: "A",
+      isDirectionless: true,
+    });
+    expect(moveNotationsMatch("A", "A")).toBe(true);
+    expect(moveNotationsMatch("A", "6A")).toBe(false);
+    expect(moveNotationsMatch("A", "236A")).toBe(false);
+    expect(stanceFollowupMatches("A", "6A")).toBe(true);
+    expect(stanceFollowupMatches("A", "236A")).toBe(false);
+  });
+
+  it("keeps bracketed charged notation distinct from the standard input", () => {
+    expect(parseMoveNotation("5[C]")).toMatchObject({
+      ok: true,
+      notation: "5[C]",
+      button: "C",
+      isCharged: true,
+    });
+    expect(moveNotationsMatch("5[C]", "5C")).toBe(false);
+  });
+
+  it("classifies directional A/B/C inputs as normals or command normals", () => {
+    expect(classifyMoveInput("5A")).toBe("normal");
+    expect(classifyMoveInput("2C")).toBe("normal");
+    expect(classifyMoveInput("j.5B")).toBe("normal");
+    expect(classifyMoveInput("j.B")).toBe("normal");
+    expect(classifyMoveInput("6A")).toBe("command-normal");
+    expect(classifyMoveInput("j.2C")).toBe("command-normal");
+    expect(classifyMoveInput("236A")).toBe("other");
+    expect(isFlowCancellableByDefault("6A")).toBe(true);
+    expect(isFlowCancellableByDefault("j.2C")).toBe(true);
+    expect(isFlowCancellableByDefault("5A")).toBe(false);
+    expect(isFlowCancellableByDefault("236A")).toBe(false);
   });
 
   it("does not resolve an unassigned background blob as the F button", () => {
@@ -267,6 +352,38 @@ describe("recording-analysis fixture contract", () => {
     expect(findInputForFramebarStart([stale], 0.833)).toBeNull();
   });
 
+  it("anchors a new button row to startup before an earlier direction-only input", () => {
+    const direction = {
+      time: 85 / 60,
+      input: { notation: "2", direction: "2", buttons: [], confidence: 0.75 },
+    };
+    const button = { notation: "2B", direction: "2", buttons: ["B"], confidence: 0.95 };
+    const startup = 88 / 60;
+    const params = {
+      inputs: [direction],
+      framebarStartTime: startup,
+      frameRate: 60,
+      newestInput: button,
+      newestButtonFirstSeenTime: 86 / 60,
+    };
+
+    expect(
+      findInputForStartup({ ...params, currentTime: startup, newestButtonFrameCount: 3 })?.input
+        .notation,
+    ).toBe("2B");
+    expect(
+      findInputForStartup({ ...params, currentTime: startup, newestButtonFrameCount: 1 }),
+    ).toBeNull();
+    expect(
+      findInputForStartup({
+        ...params,
+        currentTime: 90 / 60,
+        newestButtonFrameCount: 0,
+        newestInput: null,
+      })?.input.notation,
+    ).toBe("2");
+  });
+
   it("uses the observed framebar palette and one sample per displayed cell", () => {
     expect(findClosestFramebarColor(60, 120, 77, framebarColorMap)?.name).toBe("startup");
     expect(findClosestFramebarColor(148, 0, 4, framebarColorMap)?.name).toBe("active");
@@ -282,6 +399,12 @@ describe("recording-analysis fixture contract", () => {
     expect(calculateOnBlock({ recovery: 10 }, { blockstun: 12 })).toBe(2);
     expect(calculateOnBlock({ recovery: 10 }, { blockstun: 12 }, 3)).toBe(-1);
     expect(calculateOnBlock({ recovery: 0 }, { blockstun: 12 })).toBeNull();
+  });
+
+  it("calculates on-hit advantage from recovery and hitstun", () => {
+    expect(calculateOnHit({ recovery: 20 }, { hitstun: 28 })).toBe(8);
+    expect(calculateOnHit({ recovery: 10 }, { hitstun: 12 }, 3)).toBe(-1);
+    expect(calculateOnHit({ recovery: 0 }, { hitstun: 12 })).toBeNull();
   });
 
   it("counts active-looking frames after hitpause as recovery for advantage", () => {
@@ -326,6 +449,65 @@ describe("recording-analysis fixture contract", () => {
     expect(hit.hitboxTrackIds).toHaveLength(1);
     expect(track.samples[0]?.boxes).toHaveLength(2);
     expect(hit.id).toBe(track.hitId);
+  });
+
+  it("detects visible colored hitbox rectangles from a decoded frame", () => {
+    const width = 100;
+    const height = 80;
+    const pixels = new Uint8ClampedArray(width * height * 4);
+    for (let index = 0; index < pixels.length; index += 4) {
+      pixels[index] = 80;
+      pixels[index + 1] = 80;
+      pixels[index + 2] = 80;
+      pixels[index + 3] = 255;
+    }
+    for (let y = 20; y < 50; y += 1) {
+      for (let x = 30; x < 75; x += 1) {
+        const index = (y * width + x) * 4;
+        pixels[index] = 220;
+        pixels[index + 1] = 100;
+        pixels[index + 2] = 100;
+      }
+    }
+
+    const boxes = detectVisibleHitboxesFromPixels(pixels, width, height);
+
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0]?.kind).toBe("overlay-red");
+    expect(boxes[0]?.x).toBeCloseTo(30, 0);
+    expect(boxes[0]?.y).toBeCloseTo(25, 0);
+    expect(boxes[0]?.width).toBeCloseTo(44, 0);
+    expect(boxes[0]?.height).toBeCloseTo(37.5, 1);
+  });
+
+  it("detects translucent outlined hitbox rectangles", () => {
+    const width = 160;
+    const height = 120;
+    const pixels = new Uint8ClampedArray(width * height * 4);
+    for (let index = 0; index < pixels.length; index += 4) {
+      pixels[index] = 55;
+      pixels[index + 1] = 75;
+      pixels[index + 2] = 85;
+      pixels[index + 3] = 255;
+    }
+    for (let y = 24; y < 96; y += 1) {
+      for (let x = 32; x < 128; x += 1) {
+        if (y > 26 && y < 93 && x > 34 && x < 125) continue;
+        const index = (y * width + x) * 4;
+        pixels[index] = 90;
+        pixels[index + 1] = 220;
+        pixels[index + 2] = 145;
+      }
+    }
+
+    const boxes = detectVisibleHitboxesFromPixels(pixels, width, height);
+
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0]?.kind).toBe("overlay-green");
+    expect(boxes[0]?.x).toBeCloseTo(20, 0);
+    expect(boxes[0]?.y).toBeCloseTo(20, 0);
+    expect(boxes[0]?.width).toBeCloseTo(60, 0);
+    expect(boxes[0]?.height).toBeCloseTo(60, 0);
   });
 
   it("applies an airborne override only from the selected input onward", () => {

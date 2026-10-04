@@ -48,3 +48,41 @@ export function findInputForFramebarStart(
 
   return candidates[0] ?? null;
 }
+
+export function findInputForStartup({
+  inputs,
+  framebarStartTime,
+  currentTime,
+  frameRate,
+  newestInput,
+  newestButtonFirstSeenTime,
+  newestButtonFrameCount,
+}: {
+  inputs: RecordingInputCandidate[];
+  framebarStartTime: number;
+  currentTime: number;
+  frameRate: number;
+  newestInput: ResolvedInput | null;
+  newestButtonFirstSeenTime: number;
+  newestButtonFrameCount: number;
+}): RecordingInputCandidate | null {
+  const freshButton: RecordingInputCandidate | null =
+    newestInput?.buttons.length &&
+    newestButtonFrameCount >= 2 &&
+    Math.abs(newestButtonFirstSeenTime - framebarStartTime) <= 3 / frameRate
+      ? { time: newestButtonFirstSeenTime, input: newestInput }
+      : null;
+  const candidate = freshButton ?? findInputForFramebarStart(inputs, framebarStartTime);
+  if (!candidate) return null;
+  if (
+    candidate.preexisting &&
+    currentTime - framebarStartTime <= INPUT_ASSOCIATION_LOOKAHEAD_SECONDS
+  )
+    return null;
+  // A direction can precede its button row. Give that row two decoded frames
+  // to appear before attaching a direction-only input to startup.
+  if (candidate.input.buttons.length === 0 && currentTime - framebarStartTime < 2 / frameRate) {
+    return null;
+  }
+  return candidate;
+}
