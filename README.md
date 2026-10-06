@@ -34,6 +34,8 @@ Automatic game-start chapters are a separate, optional setting in OBS settings. 
 
 The **Recordings** tab plays local recordings and clips. Chapter ticks on the timeline show their titles on hover and seek to the chapter when clicked. You can filter recordings and clips, add tags, rename recordings, export a selected video range as a clip, and use the recording's menu to rebuild an automatic name or add game-start chapters. Linked clips appear under their source recording, with chevrons to expand or hide nested clips. Collapsing a branch does not change the selected video; a recording's details also link back to its source or child clips.
 
+To associate an uploaded video with a recording, select it and choose **Link YouTube video**, then paste its YouTube video URL. A YouTube icon appears on the recording card; in the recording details, click the icon to open the linked video instead of YouTube Studio. You can edit or remove the link later. The link is stored in the recording's local metadata; Labatar does not upload or synchronize the video.
+
 A floating activity panel shows which recording is being saved, when game-start chapters are being added, and which clip is being created. For manual-chapter clips, it identifies the clip number and time range being encoded.
 
 ## Updates
@@ -48,24 +50,25 @@ Requirements:
 
 - Windows
 - Node.js 22 or newer
-- pnpm 12.3.4
+- Vite+ (`vp` CLI)
 
 Install dependencies and start the development app:
 
 ```powershell
-pnpm install
-pnpm run electron:dev
+vp install --frozen-lockfile
+vp run electron:dev
 ```
 
 Run checks and build the production assets:
 
 ```powershell
-pnpm exec vp check --fix
-pnpm run build
-pnpm run electron:build
+vp check
+vp test
+vp run build
+vp run electron:build
 ```
 
-The production build packages the recording-analysis workflow and a Windows NSIS installer in `release/`.
+The production build packages the recording-analysis workflow and a Windows NSIS installer in `release/`. Run `vp env doctor` if setup or dependency behavior looks wrong. Vite+ uses the project's pnpm lockfile and package-manager version internally; release CI installs with pnpm on a clean Windows runner.
 
 ## Publishing a release
 

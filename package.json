@@ -1,6 +1,6 @@
 {
   "name": "labatar",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -8,7 +8,7 @@
     "dev": "vp dev",
     "electron:dev": "concurrently -k \"vp dev --port 5173 --strictPort\" \"wait-on http://localhost:5173 && node electron/dev.cjs\"",
     "build": "tsc && vp build",
-    "electron:build": "pnpm run build && electron-builder --publish never",
+    "electron:build": "vp run build && electron-builder --publish never",
     "preview": "vp preview",
     "prepare": "vp config"
   },

@@ -113,6 +113,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     reprocessName: (request) => ipcRenderer.invoke("recordings:reprocess-name", request),
     addGameChapters: (request) => ipcRenderer.invoke("recordings:add-game-chapters", request),
     openYouTubeStudio: (request) => ipcRenderer.invoke("recordings:open-youtube-studio", request),
+    setYouTubeLink: (request) => ipcRenderer.invoke("recordings:set-youtube-link", request),
+    openYouTubeVideo: (request) => ipcRenderer.invoke("recordings:open-youtube-video", request),
     setTags: (request) => ipcRenderer.invoke("recordings:set-tags", request),
     saveAnalysis: (request) => ipcRenderer.invoke("recordings:save-analysis", request),
     setMoveEvidence: (request) => ipcRenderer.invoke("recordings:set-move-evidence", request),

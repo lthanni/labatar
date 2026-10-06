@@ -21,6 +21,7 @@ const { MatchLogWatcher } = require("./match-watcher.cjs");
 const { createUnnamedRecordChapter } = require("./record-chapter.cjs");
 const { addGameChaptersToMp4, probeChapters } = require("./game-chapters.cjs");
 const { createMissingManualChapterClips } = require("./manual-chapter-clips.cjs");
+const { normalizeYouTubeVideoUrl, readYouTubeVideoUrl } = require("./recording-youtube.cjs");
 const {
   takePendingReplayMatch,
   replayMatchesGame,
@@ -3868,6 +3869,35 @@ async function setRecordingTags(request = {}) {
   return getRecordedVideoForPath(currentPath);
 }
 
+async function setRecordingYouTubeLink(request = {}) {
+  const recordingId = String(request.recordingId ?? "");
+  const currentPath = resolveRecordingPath(recordingId);
+  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
+  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+
+  const youtubeUrl = request.url === null ? null : normalizeYouTubeVideoUrl(request.url);
+  const manifestPath = recordingManifestPathForVideo(currentPath);
+  let manifest;
+  try {
+    manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw new Error("The recording metadata could not be read.");
+    }
+    manifest = {
+      schemaVersion: 1,
+      outputPath: currentPath,
+      metadata: null,
+      games: [],
+      replays: [],
+    };
+  }
+  if (youtubeUrl) manifest.youtubeUrl = youtubeUrl;
+  else delete manifest.youtubeUrl;
+  await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  return getRecordedVideoForPath(currentPath);
+}
+
 async function saveRecordingAnalysis(request = {}) {
   const recordingId = String(request.recordingId ?? "");
   const currentPath = resolveRecordingPath(recordingId);
@@ -4089,6 +4119,7 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
       tags: normalizeRecordingTags(manifest?.tags, manifest?.metadata),
       replayPath: typeof manifest?.replayPath === "string" ? manifest.replayPath : null,
       replayFileName: typeof manifest?.replayFileName === "string" ? manifest.replayFileName : null,
+      youtubeUrl: readYouTubeVideoUrl(manifest?.youtubeUrl),
       moveTake,
       clip:
         typeof clip?.sourceRecordingId === "string" &&
@@ -4121,6 +4152,7 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
       tags: { match: [], lab: [], combo: false, pressure: false },
       replayPath: null,
       replayFileName: null,
+      youtubeUrl: null,
       moveTake: null,
       clip: null,
     };
@@ -4292,6 +4324,17 @@ ipcMain.handle("recordings:open-youtube-studio", async (_, request) => {
   if (!stat?.isFile()) throw new Error("The recording no longer exists.");
   await shell.openExternal("https://studio.youtube.com/");
   shell.showItemInFolder(filePath);
+});
+ipcMain.handle("recordings:set-youtube-link", async (_, request) =>
+  setRecordingYouTubeLink(request),
+);
+ipcMain.handle("recordings:open-youtube-video", async (_, request) => {
+  const filePath = resolveRecordingPath(String(request?.recordingId ?? ""));
+  const stat = await fs.promises.stat(filePath).catch(() => null);
+  if (!stat?.isFile()) throw new Error("The recording no longer exists.");
+  const { youtubeUrl } = await readRecordingManifest(filePath, "none");
+  if (!youtubeUrl) throw new Error("This recording has no linked YouTube video.");
+  await shell.openExternal(youtubeUrl);
 });
 ipcMain.handle("recordings:set-tags", async (_, request) => setRecordingTags(request));
 ipcMain.handle("recordings:save-analysis", async (_, request) => saveRecordingAnalysis(request));

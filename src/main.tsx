@@ -185,6 +185,11 @@ declare global {
           recordingId: string;
         }) => Promise<{ added: number; skipped: string[]; backupPath: string | null }>;
         openYouTubeStudio: (request: { recordingId: string }) => Promise<void>;
+        setYouTubeLink: (request: {
+          recordingId: string;
+          url: string | null;
+        }) => Promise<RecordedVideo>;
+        openYouTubeVideo: (request: { recordingId: string }) => Promise<void>;
         setTags: (request: { recordingId: string; tags: RecordingTags }) => Promise<RecordedVideo>;
         saveAnalysis: (request: {
           recordingId: string;

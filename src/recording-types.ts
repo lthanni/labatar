@@ -73,6 +73,7 @@ export type RecordedVideo = {
   }>;
   replayPath: string | null;
   replayFileName: string | null;
+  youtubeUrl?: string | null;
   moveTake?: RecordingMoveTake | null;
   clip: RecordingClipMetadata | null;
   capture?: RecordingCaptureMetadata | null;

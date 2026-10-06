@@ -33,6 +33,7 @@ import {
 } from "@mui/material";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import YouTubeIcon from "@mui/icons-material/YouTube";
 import type { RecordedVideo, RecordingTagCategory, RecordingTags } from "./recording-types";
 import { timelineChapterMarkers, type RecordingChapter } from "./recording-chapters";
 import type {
@@ -409,6 +410,10 @@ export function RecordingViewer({
   const [selectedTagFilters, setSelectedTagFilters] = useState<RecordingTags>(emptyRecordingTags);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [youtubeError, setYoutubeError] = useState<string | null>(null);
+  const [youtubeLinkTarget, setYoutubeLinkTarget] = useState<RecordedVideo | null>(null);
+  const [youtubeUrlDraft, setYoutubeUrlDraft] = useState("");
+  const [youtubeLinkError, setYoutubeLinkError] = useState<string | null>(null);
+  const [savingYouTubeLink, setSavingYouTubeLink] = useState(false);
   const [editingRecordingId, setEditingRecordingId] = useState<string | null>(null);
   const [editingRecordingName, setEditingRecordingName] = useState("");
   const [renamingRecordingId, setRenamingRecordingId] = useState<string | null>(null);
@@ -1011,6 +1016,48 @@ export function RecordingViewer({
       setYoutubeError(openError instanceof Error ? openError.message : String(openError));
     }
   }, []);
+
+  const openYouTubeVideo = useCallback(async (recording: RecordedVideo) => {
+    if (!window.electronAPI?.recordings) return;
+    setContextMenu(null);
+    setYoutubeError(null);
+    try {
+      await window.electronAPI.recordings.openYouTubeVideo({ recordingId: recording.id });
+    } catch (openError) {
+      setYoutubeError(openError instanceof Error ? openError.message : String(openError));
+    }
+  }, []);
+
+  const beginYouTubeLink = useCallback((recording: RecordedVideo) => {
+    setContextMenu(null);
+    setYoutubeLinkTarget(recording);
+    setYoutubeUrlDraft(recording.youtubeUrl ?? "");
+    setYoutubeLinkError(null);
+  }, []);
+
+  const saveYouTubeLink = useCallback(
+    async (url: string | null) => {
+      if (!window.electronAPI?.recordings || !youtubeLinkTarget || savingYouTubeLink) return;
+      setSavingYouTubeLink(true);
+      setYoutubeLinkError(null);
+      try {
+        const updated = await window.electronAPI.recordings.setYouTubeLink({
+          recordingId: youtubeLinkTarget.id,
+          url,
+        });
+        setRecordings((current) =>
+          current.map((recording) => (recording.id === updated.id ? updated : recording)),
+        );
+        setYoutubeLinkTarget(null);
+        setYoutubeUrlDraft("");
+      } catch (saveError) {
+        setYoutubeLinkError(saveError instanceof Error ? saveError.message : String(saveError));
+      } finally {
+        setSavingYouTubeLink(false);
+      }
+    },
+    [savingYouTubeLink, youtubeLinkTarget],
+  );
 
   const updateRecordingTags = useCallback(
     async (nextTags: RecordingTags) => {
@@ -2106,6 +2153,16 @@ export function RecordingViewer({
                         slotProps={{ primary: { sx: { overflowWrap: "anywhere" } } }}
                       />
                     )}
+                    {recording.youtubeUrl && editingRecordingId !== recording.id && (
+                      <Tooltip title="YouTube video linked">
+                        <YouTubeIcon
+                          color="error"
+                          fontSize="small"
+                          titleAccess={`YouTube video linked to ${recording.name}`}
+                          sx={{ alignSelf: "center", flexShrink: 0, ml: 0.5 }}
+                        />
+                      </Tooltip>
+                    )}
                   </ListItemButton>
                   {expandableRecordingIds.has(recording.id) && (
                     <Tooltip
@@ -2151,8 +2208,17 @@ export function RecordingViewer({
           <MenuItem onClick={() => contextMenu && beginRename(contextMenu.recording)}>
             Rename
           </MenuItem>
-          <MenuItem onClick={() => contextMenu && void openYouTubeStudio(contextMenu.recording)}>
-            Open YouTube Studio in browser
+          {contextMenu?.recording.youtubeUrl ? (
+            <MenuItem onClick={() => contextMenu && void openYouTubeVideo(contextMenu.recording)}>
+              Open linked YouTube video
+            </MenuItem>
+          ) : (
+            <MenuItem onClick={() => contextMenu && void openYouTubeStudio(contextMenu.recording)}>
+              Open YouTube Studio in browser
+            </MenuItem>
+          )}
+          <MenuItem onClick={() => contextMenu && beginYouTubeLink(contextMenu.recording)}>
+            {contextMenu?.recording.youtubeUrl ? "Edit YouTube link" : "Link YouTube video"}
           </MenuItem>
           {contextMenu?.recording.source === "automatic" && (
             <MenuItem
@@ -2192,6 +2258,64 @@ export function RecordingViewer({
             Delete
           </MenuItem>
         </Menu>
+
+        <Dialog
+          open={Boolean(youtubeLinkTarget)}
+          onClose={() => {
+            if (!savingYouTubeLink) setYoutubeLinkTarget(null);
+          }}
+          maxWidth="sm"
+          fullWidth
+        >
+          <DialogTitle>
+            {youtubeLinkTarget?.youtubeUrl ? "Edit YouTube link" : "Link YouTube video"}
+          </DialogTitle>
+          <DialogContent>
+            <Stack spacing={1.5} sx={{ pt: 1 }}>
+              <Typography variant="body2" color="text.secondary">
+                Paste a YouTube video link. It is saved with this recording's local metadata.
+              </Typography>
+              <TextField
+                autoFocus
+                fullWidth
+                type="url"
+                label="YouTube video URL"
+                value={youtubeUrlDraft}
+                disabled={savingYouTubeLink}
+                onChange={(event) => setYoutubeUrlDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && youtubeUrlDraft.trim()) {
+                    event.preventDefault();
+                    void saveYouTubeLink(youtubeUrlDraft);
+                  }
+                }}
+              />
+              {youtubeLinkError && <Alert severity="error">{youtubeLinkError}</Alert>}
+            </Stack>
+          </DialogContent>
+          <DialogActions>
+            {youtubeLinkTarget?.youtubeUrl && (
+              <Button
+                color="error"
+                disabled={savingYouTubeLink}
+                onClick={() => void saveYouTubeLink(null)}
+              >
+                Remove link
+              </Button>
+            )}
+            <Box sx={{ flex: 1 }} />
+            <Button onClick={() => setYoutubeLinkTarget(null)} disabled={savingYouTubeLink}>
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              disabled={savingYouTubeLink || !youtubeUrlDraft.trim()}
+              onClick={() => void saveYouTubeLink(youtubeUrlDraft)}
+            >
+              {savingYouTubeLink ? "Saving..." : "Save link"}
+            </Button>
+          </DialogActions>
+        </Dialog>
 
         <Dialog open={Boolean(deleteTarget)} onClose={cancelDelete}>
           <DialogTitle>Delete recording?</DialogTitle>
@@ -2242,12 +2366,28 @@ export function RecordingViewer({
                 <Typography variant="subtitle1" sx={{ flex: 1, overflowWrap: "anywhere" }}>
                   {selectedRecording.name}
                 </Typography>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => void openYouTubeStudio(selectedRecording)}
-                >
-                  Open YouTube Studio in browser
+                {selectedRecording.youtubeUrl ? (
+                  <Tooltip title="Open linked YouTube video">
+                    <IconButton
+                      size="small"
+                      color="error"
+                      aria-label={`Open YouTube video for ${selectedRecording.name}`}
+                      onClick={() => void openYouTubeVideo(selectedRecording)}
+                    >
+                      <YouTubeIcon />
+                    </IconButton>
+                  </Tooltip>
+                ) : (
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={() => void openYouTubeStudio(selectedRecording)}
+                  >
+                    Open YouTube Studio in browser
+                  </Button>
+                )}
+                <Button size="small" onClick={() => beginYouTubeLink(selectedRecording)}>
+                  {selectedRecording.youtubeUrl ? "Edit YouTube link" : "Link YouTube video"}
                 </Button>
                 {mode === "nerd-processing" && (
                   <Button

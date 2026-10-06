@@ -26,6 +26,20 @@ release. Add a tool name to select part of the graph. For example, run
 
 <!--VITE PLUS END-->
 
+## Dependency and build safety
+
+- Inspect `package.json` scripts before invoking them with `vp run`; a script can call
+  `pnpm` internally even when the outer command uses `vp`.
+- Use `vp install --frozen-lockfile` for dependency repair. Before running an
+  install, verify that `node_modules` resolves inside this repository and that
+  the current account can modify it. If the checkout is owned by another
+  account, request the required permission first; do not retry an access-denied
+  install as the sandbox account.
+- Before an Electron build, check that `node_modules/.bin/tsc` and
+  `node_modules/electron/dist/electron.exe` exist. If a package-manager command
+  fails partway through, repair the install before running any more builds.
+- Run `vp env doctor` when dependency or runtime behavior is unexpected.
+
 ## Assumption checking
 
 Before changing code:
