@@ -50,6 +50,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     addChapter: () => ipcRenderer.invoke("capture:add-chapter"),
     setAutoGameChapters: (enabled) =>
       ipcRenderer.invoke("capture:set-auto-game-chapters", { enabled }),
+    setAutoClipManualChapters: (enabled) =>
+      ipcRenderer.invoke("capture:set-auto-clip-manual-chapters", { enabled }),
     onState: (listener) => {
       const handler = (_, state) => listener(state);
       ipcRenderer.on("capture:state", handler);
@@ -89,6 +91,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
   },
   recordings: {
+    getWorkState: () => ipcRenderer.invoke("recordings:get-work-state"),
+    onWorkState: (listener) => {
+      const handler = (_, work) => listener(work);
+      ipcRenderer.on("recordings:work-state", handler);
+      return () => ipcRenderer.removeListener("recordings:work-state", handler);
+    },
     onChanged: (listener) => {
       const handler = () => listener();
       ipcRenderer.on("recordings:changed", handler);

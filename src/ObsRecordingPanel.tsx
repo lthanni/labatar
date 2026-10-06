@@ -21,6 +21,7 @@ type CaptureState = {
   chapterLastAddedAt: string | null;
   chapterError: string | null;
   autoGameChapters: boolean;
+  autoClipManualChapters: boolean;
 };
 
 export function ObsRecordingPanel() {
@@ -73,6 +74,8 @@ export function ObsRecordingPanel() {
   const [chapterBusy, setChapterBusy] = useState(false);
   const [gameChapterBusy, setGameChapterBusy] = useState(false);
   const [gameChapterError, setGameChapterError] = useState<string | null>(null);
+  const [autoClipBusy, setAutoClipBusy] = useState(false);
+  const [autoClipError, setAutoClipError] = useState<string | null>(null);
   const [obsLaunchBusy, setObsLaunchBusy] = useState(false);
   const [obsLaunchNotice, setObsLaunchNotice] = useState<string | null>(null);
   const [obsLaunchError, setObsLaunchError] = useState<string | null>(null);
@@ -147,6 +150,19 @@ export function ObsRecordingPanel() {
       );
     } finally {
       setGameChapterBusy(false);
+    }
+  };
+
+  const setAutoClipManualChapters = async (enabled: boolean) => {
+    if (!window.electronAPI?.capture) return;
+    setAutoClipBusy(true);
+    setAutoClipError(null);
+    try {
+      setCaptureState(await window.electronAPI.capture.setAutoClipManualChapters(enabled));
+    } catch (settingError) {
+      setAutoClipError(settingError instanceof Error ? settingError.message : String(settingError));
+    } finally {
+      setAutoClipBusy(false);
     }
   };
 
@@ -412,6 +428,27 @@ export function ObsRecordingPanel() {
             {gameChapterError && (
               <Alert severity="error" sx={{ mt: 1 }}>
                 {gameChapterError}
+              </Alert>
+            )}
+            <FormControlLabel
+              sx={{ mt: 1 }}
+              control={
+                <Checkbox
+                  checked={captureState?.autoClipManualChapters ?? true}
+                  disabled={!captureState || autoClipBusy}
+                  onChange={(_, checked) => void setAutoClipManualChapters(checked)}
+                />
+              }
+              label="Auto-clip 30 seconds before manual chapters"
+            />
+            <Typography variant="caption" color="text.secondary" component="div">
+              After a recording stops, create clips for its F10 chapters. Turning this off does not
+              disable F10 chapters or the manual clip action. Changes apply to recordings stopped
+              after the switch is changed.
+            </Typography>
+            {autoClipError && (
+              <Alert severity="error" sx={{ mt: 1 }}>
+                {autoClipError}
               </Alert>
             )}
           </Box>

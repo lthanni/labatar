@@ -1,8 +1,8 @@
 # Labatar
 
-Labatar is an unofficial Windows companion app for reviewing Avatar Legends: The Fighting Game replay files. It reads replay files for analysis and sharing; it does not modify the game or inject into gameplay.
+Labatar is an unofficial Windows companion app for reviewing Avatar Legends: The Fighting Game replays, recording matches with OBS, and making clips. It reads local game files and controls OBS through its WebSocket server; it does not modify the game or inject into gameplay.
 
-![Labatar match history interface](image.png)
+![Labatar match history interface in an earlier version](image.png)
 
 ## Download
 
@@ -19,6 +19,30 @@ Run the `.exe` installer and launch Labatar from the Start menu. Windows may sho
 4. Use the matchup cards, support checkboxes, opponent filter, and date range to filter the analysis and replay table.
 
 The app scans `.dlr` files recursively, ignores duplicate file contents, and supports right-click actions for opening a replay or set in File Explorer and exporting replays as a ZIP.
+
+Match history also shows set results, ranked MMR changes, activity and win-rate trends, and matchup breakdowns. When a set has a linked recording, you can open it directly from the set row.
+
+## Record with OBS
+
+OBS Studio must be running with its WebSocket server enabled (**Tools > WebSocket Server Settings**). The default port is `4455`. In Labatar, open the gear-shaped **OBS settings**, enter the matching port and password, and connect. If OBS is not running, **attempt to open OBS** can try to launch it. **Apply Labatar OBS setup** prepares the Labatar recording profile and scenes; review your OBS setup before using it because it manages the Labatar scene collection.
+
+- **Start automatic recording** monitors game logs and starts and stops OBS recordings for matches it can identify. Labatar can keep one recording across games in a recognized lobby, link matching replays, and name a set using your history against that opponent. Matches without enough reliable identity information may not be recorded automatically.
+- **Start recording** begins a manual recording immediately; stop it in Labatar when finished. The configurable global capture shortcut defaults to **F9**.
+- Press **F10** during an active recording to add an unnamed chapter directly to the Hybrid MP4. Labatar automatically makes a clip of up to 30 seconds before each manual chapter after the recording finishes. The Recordings tab also offers **Create 30-second clips from manual chapters** for older recordings or retries.
+
+Automatic game-start chapters are a separate, optional setting in OBS settings. Labatar adds them after replay linking, preserving F10 chapters. This can require temporary free space roughly equal to the MP4 size, and games without trustworthy timing are skipped.
+
+## Review recordings and clips
+
+The **Recordings** tab plays local recordings and clips. Chapter ticks on the timeline show their titles on hover and seek to the chapter when clicked. You can filter recordings and clips, add tags, rename recordings, export a selected video range as a clip, and use the recording's menu to rebuild an automatic name or add game-start chapters. Linked clips appear under their source recording; a recording's details also link back to its source or child clips.
+
+### In the current source, not yet in a tagged installer
+
+The following changes are committed after the latest local release tag and will need a new release before they appear in an installer:
+
+- **Auto-clip 30 seconds before manual chapters** is now a saved on/off setting in OBS settings. It defaults to on; turning it off does not disable F10 chapters or the manual clip action.
+- A floating activity panel identifies the recording being saved and shows game-chapter processing or clip creation, including which manual-chapter clip is being encoded.
+- Recordings with nested clips have expand/collapse controls in the selector. Collapsing a branch hides its clips without changing the selected video.
 
 ## Updates
 

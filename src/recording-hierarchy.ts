@@ -56,6 +56,23 @@ export function buildRecordingDisplayRows(
   return grouped;
 }
 
+export function collapseRecordingDisplayRows(
+  rows: RecordingDisplayRow[],
+  collapsedIds: ReadonlySet<string>,
+): RecordingDisplayRow[] {
+  const visible: RecordingDisplayRow[] = [];
+  let hiddenBelowDepth: number | null = null;
+  for (const row of rows) {
+    if (hiddenBelowDepth !== null) {
+      if (row.depth > hiddenBelowDepth) continue;
+      hiddenBelowDepth = null;
+    }
+    visible.push(row);
+    if (collapsedIds.has(row.recording.id)) hiddenBelowDepth = row.depth;
+  }
+  return visible;
+}
+
 export function descendantClipRanges(
   recordings: RecordedVideo[],
   selectedRecordingId: string,

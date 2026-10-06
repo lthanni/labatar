@@ -26,24 +26,34 @@ function planManualChapterClips(chapters, durationMs, clipLengthMs = 30_000) {
     }));
 }
 
-async function createMissingManualChapterClips(chapters, durationMs, existingStarts, exportClip) {
+async function createMissingManualChapterClips(
+  chapters,
+  durationMs,
+  existingStarts,
+  exportClip,
+  onProgress = () => {},
+) {
   const planned = planManualChapterClips(chapters, durationMs);
   const seenStarts = new Set(existingStarts);
   const result = { total: planned.length, created: 0, alreadyExisting: 0, failures: [] };
-  for (const range of planned) {
+  for (const [index, range] of planned.entries()) {
     if (seenStarts.has(range.chapterStartMs)) {
       result.alreadyExisting += 1;
+      onProgress({ index: index + 1, total: planned.length, range, phase: "existing" });
       continue;
     }
+    onProgress({ index: index + 1, total: planned.length, range, phase: "creating" });
     try {
       await exportClip(range);
       seenStarts.add(range.chapterStartMs);
       result.created += 1;
+      onProgress({ index: index + 1, total: planned.length, range, phase: "created" });
     } catch (error) {
       result.failures.push({
         chapterStartMs: range.chapterStartMs,
         error: error instanceof Error ? error.message : String(error),
       });
+      onProgress({ index: index + 1, total: planned.length, range, phase: "failed" });
     }
   }
   return result;

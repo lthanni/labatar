@@ -8,7 +8,11 @@ import {
   parseMoveNotation,
   stanceFollowupMatches,
 } from "../../src/move-notation";
-import { buildRecordingDisplayRows, descendantClipRanges } from "../../src/recording-hierarchy";
+import {
+  buildRecordingDisplayRows,
+  collapseRecordingDisplayRows,
+  descendantClipRanges,
+} from "../../src/recording-hierarchy";
 import {
   defaultInputDisplayGeometry,
   detectInputDisplay,
@@ -581,6 +585,7 @@ describe("recording-analysis fixture contract", () => {
 
   it("renders nested clips and resolves their ranges relative to the selected video", () => {
     const root = fixtureRecording("root");
+    const otherRoot = fixtureRecording("other-root");
     const parent = fixtureRecording("parent", {
       sourceRecordingId: root.id,
       sourceRecordingName: root.name,
@@ -602,6 +607,24 @@ describe("recording-analysis fixture contract", () => {
       [parent.id, 1],
       [child.id, 2],
     ]);
+    expect(
+      collapseRecordingDisplayRows(rows, new Set([parent.id])).map(({ recording }) => recording.id),
+    ).toEqual([root.id, parent.id]);
+    expect(
+      collapseRecordingDisplayRows(rows, new Set([root.id])).map(({ recording }) => recording.id),
+    ).toEqual([root.id]);
+    expect(
+      collapseRecordingDisplayRows(
+        buildRecordingDisplayRows([child, parent, root, otherRoot], true, true),
+        new Set([root.id]),
+      ).map(({ recording }) => recording.id),
+    ).toEqual([root.id, otherRoot.id]);
+    expect(
+      collapseRecordingDisplayRows(
+        buildRecordingDisplayRows([child, parent, root], false, true),
+        new Set([parent.id]),
+      ).map(({ recording }) => recording.id),
+    ).toEqual([child.id, parent.id]);
     expect(descendantClipRanges([root, parent, child], parent.id, 25)).toEqual([[3.69, 4.91]]);
   });
 });

@@ -80,6 +80,7 @@ declare global {
         toggle: () => Promise<{ outputPath?: string | null }>;
         addChapter: () => Promise<{ at: string }>;
         setAutoGameChapters: (enabled: boolean) => Promise<CaptureState>;
+        setAutoClipManualChapters: (enabled: boolean) => Promise<CaptureState>;
         onState: (listener: (state: CaptureState) => void) => () => void;
       };
       obs: {
@@ -148,6 +149,8 @@ declare global {
         ) => () => void;
       };
       recordings: {
+        getWorkState: () => Promise<RecordingWorkItem[]>;
+        onWorkState: (listener: (work: RecordingWorkItem[]) => void) => () => void;
         onChanged: (listener: () => void) => () => void;
         list: (request?: { analysisScope?: "none" | "move-takes" | "all" }) => Promise<{
           folder: string;
@@ -235,6 +238,16 @@ type CaptureState = {
   chapterLastAddedAt: string | null;
   chapterError: string | null;
   autoGameChapters: boolean;
+  autoClipManualChapters: boolean;
+};
+
+type RecordingWorkItem = {
+  id: string;
+  title: string;
+  fileName: string;
+  detail: string;
+  completed?: number;
+  total?: number;
 };
 
 type UpdateStatus = {
@@ -741,6 +754,7 @@ function App() {
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [recordingsRefreshToken, setRecordingsRefreshToken] = useState(0);
+  const [recordingWork, setRecordingWork] = useState<RecordingWorkItem[]>([]);
   const [obsSettingsOpen, setObsSettingsOpen] = useState(false);
   const recordingsTabIndex = 1;
   const captureTabIndex = 2;
@@ -791,6 +805,28 @@ function App() {
   }, [obsState.recording.active, refreshRecordings]);
 
   useEffect(() => window.electronAPI?.recordings.onChanged(refreshRecordings), [refreshRecordings]);
+  useEffect(() => {
+    const recordings = window.electronAPI?.recordings;
+    if (!recordings) return;
+    let active = true;
+    let receivedEvent = false;
+    const unsubscribe = recordings.onWorkState((work) => {
+      if (active) {
+        receivedEvent = true;
+        setRecordingWork(work);
+      }
+    });
+    void recordings
+      .getWorkState()
+      .then((work) => {
+        if (active && !receivedEvent) setRecordingWork(work);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     const showRecordings = () => {
@@ -834,6 +870,37 @@ function App() {
           )}
         </Stack>
       </Stack>
+      {recordingWork.length > 0 && (
+        <Stack
+          spacing={1}
+          aria-live="polite"
+          sx={{
+            position: "fixed",
+            right: 16,
+            bottom: 16,
+            width: "min(480px, calc(100vw - 32px))",
+            maxHeight: "45vh",
+            overflowY: "auto",
+            zIndex: (theme) => theme.zIndex.snackbar,
+          }}
+        >
+          {recordingWork.map((work) => (
+            <Alert key={work.id} severity="info" icon={false} sx={{ py: 0.5 }}>
+              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                {work.title}: {work.fileName}
+              </Typography>
+              <Typography variant="caption" component="div">
+                {work.detail}
+              </Typography>
+              <LinearProgress
+                variant={work.total ? "determinate" : "indeterminate"}
+                value={work.total ? (100 * (work.completed ?? 0)) / work.total : undefined}
+                sx={{ mt: 0.75 }}
+              />
+            </Alert>
+          ))}
+        </Stack>
+      )}
       <Dialog
         open={obsSettingsOpen}
         onClose={() => setObsSettingsOpen(false)}

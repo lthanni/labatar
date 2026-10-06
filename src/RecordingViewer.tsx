@@ -31,6 +31,8 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import type { RecordedVideo, RecordingTagCategory, RecordingTags } from "./recording-types";
 import { timelineChapterMarkers, type RecordingChapter } from "./recording-chapters";
 import type {
@@ -71,7 +73,11 @@ import {
   stanceFollowupMatches,
 } from "./move-notation";
 import { inputButtonDisplayColors, inputButtonSlotRatios } from "./input-display-config";
-import { buildRecordingDisplayRows, descendantClipRanges } from "./recording-hierarchy";
+import {
+  buildRecordingDisplayRows,
+  collapseRecordingDisplayRows,
+  descendantClipRanges,
+} from "./recording-hierarchy";
 import { useObsRecording } from "./ObsRecordingContext";
 import { CalibrationNumberField } from "./CalibrationNumberField";
 
@@ -399,6 +405,7 @@ export function RecordingViewer({
   const [clipExportError, setClipExportError] = useState<string | null>(null);
   const [showFullRecordings, setShowFullRecordings] = useState(true);
   const [showClips, setShowClips] = useState(true);
+  const [collapsedRecordingIds, setCollapsedRecordingIds] = useState<Set<string>>(() => new Set());
   const [selectedTagFilters, setSelectedTagFilters] = useState<RecordingTags>(emptyRecordingTags);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [youtubeError, setYoutubeError] = useState<string | null>(null);
@@ -700,13 +707,48 @@ export function RecordingViewer({
     [selectedTagFilters, visibleRecordings],
   );
 
-  const displayedRecordings = useMemo(
+  const groupedRecordingRows = useMemo(
     () => buildRecordingDisplayRows(tagFilteredRecordings, showFullRecordings, showClips),
     [showClips, showFullRecordings, tagFilteredRecordings],
   );
+  const expandableRecordingIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (let index = 0; index < groupedRecordingRows.length - 1; index += 1) {
+      if (groupedRecordingRows[index + 1].depth > groupedRecordingRows[index].depth) {
+        ids.add(groupedRecordingRows[index].recording.id);
+      }
+    }
+    return ids;
+  }, [groupedRecordingRows]);
+  const displayedRecordings = useMemo(
+    () => collapseRecordingDisplayRows(groupedRecordingRows, collapsedRecordingIds),
+    [groupedRecordingRows, collapsedRecordingIds],
+  );
+
+  const toggleRecordingExpanded = useCallback((recordingId: string) => {
+    setCollapsedRecordingIds((current) => {
+      const next = new Set(current);
+      if (next.has(recordingId)) next.delete(recordingId);
+      else next.add(recordingId);
+      return next;
+    });
+  }, []);
 
   const selectRecording = useCallback(
     (recordingId: string) => {
+      // A clip can also be opened from its source's detail pane. Reveal its row if needed.
+      const byId = new Map(recordings.map((recording) => [recording.id, recording]));
+      setCollapsedRecordingIds((current) => {
+        const next = new Set(current);
+        const seen = new Set<string>([recordingId]);
+        let parentId = byId.get(recordingId)?.clip?.sourceRecordingId;
+        while (parentId && !seen.has(parentId)) {
+          next.delete(parentId);
+          seen.add(parentId);
+          parentId = byId.get(parentId)?.clip?.sourceRecordingId;
+        }
+        return next.size === current.size ? current : next;
+      });
       if (selectedRecording && videoRef.current) {
         savePlaybackPosition(selectedRecording.id, videoRef.current.currentTime);
       }
@@ -725,7 +767,7 @@ export function RecordingViewer({
       focusPlayerAfterSelection.current = true;
       setSelectedId(recordingId);
     },
-    [savePlaybackPosition, selectedRecording],
+    [recordings, savePlaybackPosition, selectedRecording],
   );
 
   useEffect(() => {
@@ -798,6 +840,13 @@ export function RecordingViewer({
       });
       await loadRecordings();
       setClipMode(false);
+      // The freshly exported clip is nested under the current recording.
+      setCollapsedRecordingIds((current) => {
+        if (!current.has(selectedRecording.id)) return current;
+        const next = new Set(current);
+        next.delete(selectedRecording.id);
+        return next;
+      });
       setSelectedId(exported.id);
       setClipExportNotice(`Clip exported: ${exported.name}`);
     } catch (exportError) {
@@ -1910,147 +1959,182 @@ export function RecordingViewer({
           ) : (
             <List dense disablePadding sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
               {displayedRecordings.map(({ recording, depth }) => (
-                <ListItemButton
+                <Box
+                  component="li"
                   key={recording.id}
-                  component="div"
-                  role={editingRecordingId === recording.id ? undefined : "button"}
-                  tabIndex={editingRecordingId === recording.id ? -1 : 0}
-                  selected={recording.id === selectedId}
-                  draggable={editingRecordingId !== recording.id}
-                  onClick={() => {
-                    if (editingRecordingId !== recording.id) selectRecording(recording.id);
-                  }}
-                  onKeyDown={(event) => {
-                    if (editingRecordingId === recording.id || event.target !== event.currentTarget)
-                      return;
-                    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                  sx={{ position: "relative", listStyle: "none" }}
+                >
+                  <ListItemButton
+                    component="div"
+                    role={editingRecordingId === recording.id ? undefined : "button"}
+                    tabIndex={editingRecordingId === recording.id ? -1 : 0}
+                    selected={recording.id === selectedId}
+                    draggable={editingRecordingId !== recording.id}
+                    onClick={() => {
+                      if (editingRecordingId !== recording.id) selectRecording(recording.id);
+                    }}
+                    onKeyDown={(event) => {
+                      if (
+                        editingRecordingId === recording.id ||
+                        event.target !== event.currentTarget
+                      )
+                        return;
+                      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                        event.preventDefault();
+                        const bounds = event.currentTarget.getBoundingClientRect();
+                        setContextMenu({
+                          recording,
+                          mouseX: bounds.left + 16,
+                          mouseY: bounds.top + 16,
+                        });
+                        return;
+                      }
+                      if (event.key !== "Enter" && event.key !== " ") return;
                       event.preventDefault();
-                      const bounds = event.currentTarget.getBoundingClientRect();
+                      selectRecording(recording.id);
+                    }}
+                    onDragStart={(event) => {
+                      if (editingRecordingId === recording.id || !window.electronAPI?.recordings) {
+                        event.preventDefault();
+                        return;
+                      }
+                      event.preventDefault();
+                      window.electronAPI.recordings.startDrag({ recordingId: recording.id });
+                    }}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
                       setContextMenu({
                         recording,
-                        mouseX: bounds.left + 16,
-                        mouseY: bounds.top + 16,
+                        mouseX: event.clientX + 2,
+                        mouseY: event.clientY - 6,
                       });
-                      return;
-                    }
-                    if (event.key !== "Enter" && event.key !== " ") return;
-                    event.preventDefault();
-                    selectRecording(recording.id);
-                  }}
-                  onDragStart={(event) => {
-                    if (editingRecordingId === recording.id || !window.electronAPI?.recordings) {
-                      event.preventDefault();
-                      return;
-                    }
-                    event.preventDefault();
-                    window.electronAPI.recordings.startDrag({ recordingId: recording.id });
-                  }}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    setContextMenu({
-                      recording,
-                      mouseX: event.clientX + 2,
-                      mouseY: event.clientY - 6,
-                    });
-                  }}
-                  sx={{
-                    alignItems: "flex-start",
-                    pl: 2 + depth * 2.5,
-                    cursor: editingRecordingId === recording.id ? "default" : "grab",
-                    "&:active": {
-                      cursor: editingRecordingId === recording.id ? "default" : "grabbing",
-                    },
-                    ...(depth > 0
-                      ? {
-                          position: "relative",
-                          "&::before": {
-                            content: '""',
-                            position: "absolute",
-                            left: 20 + (depth - 1) * 20,
-                            top: 0,
-                            bottom: 0,
-                            borderLeft: 1,
-                            borderColor: "divider",
-                          },
-                          "&::after": {
-                            content: '""',
-                            position: "absolute",
-                            left: 20 + (depth - 1) * 20,
-                            top: "50%",
-                            width: 12,
-                            borderTop: 1,
-                            borderColor: "divider",
-                          },
-                        }
-                      : {}),
-                  }}
-                  title={
-                    editingRecordingId === recording.id
-                      ? undefined
-                      : "Click to select · Right-click for actions · Drag to share"
-                  }
-                >
-                  {editingRecordingId === recording.id ? (
-                    <Stack direction="row" spacing={0.5} sx={{ flex: 1, minWidth: 0 }}>
-                      <TextField
-                        autoFocus
-                        fullWidth
-                        size="small"
-                        value={editingRecordingName}
-                        disabled={renamingRecordingId === recording.id}
-                        aria-label={`New name for ${recording.name}`}
-                        onChange={(event) => setEditingRecordingName(event.target.value)}
-                        onClick={(event) => event.stopPropagation()}
-                        onKeyDown={(event) => {
-                          event.stopPropagation();
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            void renameRecording();
-                          } else if (event.key === "Escape") {
-                            event.preventDefault();
-                            cancelRename();
+                    }}
+                    sx={{
+                      alignItems: "flex-start",
+                      pl: (showFullRecordings && showClips ? 5 : 2) + depth * 2.5,
+                      cursor: editingRecordingId === recording.id ? "default" : "grab",
+                      "&:active": {
+                        cursor: editingRecordingId === recording.id ? "default" : "grabbing",
+                      },
+                      ...(depth > 0
+                        ? {
+                            position: "relative",
+                            "&::before": {
+                              content: '""',
+                              position: "absolute",
+                              left: 20 + (depth - 1) * 20,
+                              top: 0,
+                              bottom: 0,
+                              borderLeft: 1,
+                              borderColor: "divider",
+                            },
+                            "&::after": {
+                              content: '""',
+                              position: "absolute",
+                              left: 20 + (depth - 1) * 20,
+                              top: "50%",
+                              width: 12,
+                              borderTop: 1,
+                              borderColor: "divider",
+                            },
                           }
-                        }}
-                      />
-                      <Tooltip title="Save name">
-                        <span>
-                          <IconButton
-                            size="small"
-                            aria-label="Save recording name"
-                            disabled={renamingRecordingId === recording.id}
-                            onClick={(event) => {
-                              event.stopPropagation();
+                        : {}),
+                    }}
+                    title={
+                      editingRecordingId === recording.id
+                        ? undefined
+                        : "Click to select · Right-click for actions · Drag to share"
+                    }
+                  >
+                    {editingRecordingId === recording.id ? (
+                      <Stack direction="row" spacing={0.5} sx={{ flex: 1, minWidth: 0 }}>
+                        <TextField
+                          autoFocus
+                          fullWidth
+                          size="small"
+                          value={editingRecordingName}
+                          disabled={renamingRecordingId === recording.id}
+                          aria-label={`New name for ${recording.name}`}
+                          onChange={(event) => setEditingRecordingName(event.target.value)}
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDown={(event) => {
+                            event.stopPropagation();
+                            if (event.key === "Enter") {
+                              event.preventDefault();
                               void renameRecording();
-                            }}
-                          >
-                            <CheckIcon />
-                          </IconButton>
-                        </span>
-                      </Tooltip>
-                      <Tooltip title="Cancel rename">
-                        <span>
-                          <IconButton
-                            size="small"
-                            aria-label="Cancel rename"
-                            disabled={renamingRecordingId === recording.id}
-                            onClick={(event) => {
-                              event.stopPropagation();
+                            } else if (event.key === "Escape") {
+                              event.preventDefault();
                               cancelRename();
-                            }}
-                          >
-                            <CloseIcon />
-                          </IconButton>
-                        </span>
-                      </Tooltip>
-                    </Stack>
-                  ) : (
-                    <ListItemText
-                      primary={recording.name}
-                      secondary={`${recording.moveTake ? `${recording.moveTake.moveLabel} · ${recording.moveTake.outcome} · ${recording.moveTake.validation.status} | ` : ""}${formatFileSize(recording.size)} | ${formatModifiedAt(recording.modifiedAt)}`}
-                      slotProps={{ primary: { sx: { overflowWrap: "anywhere" } } }}
-                    />
+                            }
+                          }}
+                        />
+                        <Tooltip title="Save name">
+                          <span>
+                            <IconButton
+                              size="small"
+                              aria-label="Save recording name"
+                              disabled={renamingRecordingId === recording.id}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void renameRecording();
+                              }}
+                            >
+                              <CheckIcon />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                        <Tooltip title="Cancel rename">
+                          <span>
+                            <IconButton
+                              size="small"
+                              aria-label="Cancel rename"
+                              disabled={renamingRecordingId === recording.id}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                cancelRename();
+                              }}
+                            >
+                              <CloseIcon />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      </Stack>
+                    ) : (
+                      <ListItemText
+                        primary={recording.name}
+                        secondary={`${recording.moveTake ? `${recording.moveTake.moveLabel} · ${recording.moveTake.outcome} · ${recording.moveTake.validation.status} | ` : ""}${formatFileSize(recording.size)} | ${formatModifiedAt(recording.modifiedAt)}`}
+                        slotProps={{ primary: { sx: { overflowWrap: "anywhere" } } }}
+                      />
+                    )}
+                  </ListItemButton>
+                  {expandableRecordingIds.has(recording.id) && (
+                    <Tooltip
+                      title={`${collapsedRecordingIds.has(recording.id) ? "Expand" : "Collapse"} clips for ${recording.name}`}
+                    >
+                      <IconButton
+                        size="small"
+                        aria-label={`${collapsedRecordingIds.has(recording.id) ? "Expand" : "Collapse"} clips for ${recording.name}`}
+                        aria-expanded={!collapsedRecordingIds.has(recording.id)}
+                        onClick={() => toggleRecordingExpanded(recording.id)}
+                        sx={{
+                          position: "absolute",
+                          left: 12 + depth * 20,
+                          top: "50%",
+                          transform: "translateY(-50%)",
+                          width: 26,
+                          height: 26,
+                          zIndex: 1,
+                        }}
+                      >
+                        {collapsedRecordingIds.has(recording.id) ? (
+                          <ChevronRightIcon fontSize="small" />
+                        ) : (
+                          <ExpandMoreIcon fontSize="small" />
+                        )}
+                      </IconButton>
+                    </Tooltip>
                   )}
-                </ListItemButton>
+                </Box>
               ))}
             </List>
           )}

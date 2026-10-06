@@ -84,4 +84,25 @@ describe("manual chapter clip planning", () => {
     expect(retry).toEqual({ total: 3, created: 1, alreadyExisting: 2, failures: [] });
     expect(exported).toEqual([75_000, 45_000]);
   });
+
+  it("reports which clip is being encoded and advances past existing chapters", async () => {
+    const progress: Array<{ index: number; total: number; phase: string }> = [];
+    await createMissingManualChapterClips(
+      [
+        { startMs: 15_000, title: "Unnamed 1" },
+        { startMs: 45_000, title: "Unnamed 2" },
+      ],
+      60_000,
+      new Set([15_000]),
+      async () => undefined,
+      ({ index, total, phase }: { index: number; total: number; phase: string }) => {
+        progress.push({ index, total, phase });
+      },
+    );
+    expect(progress).toEqual([
+      { index: 1, total: 2, phase: "existing" },
+      { index: 2, total: 2, phase: "creating" },
+      { index: 2, total: 2, phase: "created" },
+    ]);
+  });
 });

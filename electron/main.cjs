@@ -157,6 +157,7 @@ let captureState = {
   chapterLastAddedAt: null,
   chapterError: null,
   autoGameChapters: false,
+  autoClipManualChapters: true,
 };
 let armedMoveCapture = null;
 
@@ -220,6 +221,19 @@ let pendingAutoRecordings = [];
 const replayAttachmentsInProgress = new Map();
 const gameChapterJobs = new Set();
 const manualChapterClipJobs = new Map();
+const recordingWork = new Map();
+function sendRecordingWork() {
+  if (canSendToRenderer()) {
+    mainWindow.webContents.send("recordings:work-state", [...recordingWork.values()]);
+  }
+}
+function setRecordingWork(id, patch) {
+  recordingWork.set(id, { ...recordingWork.get(id), id, ...patch });
+  sendRecordingWork();
+}
+function clearRecordingWork(id) {
+  if (recordingWork.delete(id)) sendRecordingWork();
+}
 const pendingReplayTimeoutMs = 120_000;
 let recordingDiagnosticQueue = Promise.resolve();
 let obsState = {
@@ -795,9 +809,11 @@ function finalizeObsRecording(outputPath, reason) {
   void pending.then(
     () => {
       if (finalizingObsRecording === pending) finalizingObsRecording = null;
+      if (!requestedObsStopReason) clearRecordingWork("obs-save");
     },
     () => {
       if (finalizingObsRecording === pending) finalizingObsRecording = null;
+      if (!requestedObsStopReason) clearRecordingWork("obs-save");
     },
   );
   return pending;
@@ -806,6 +822,11 @@ function finalizeObsRecording(outputPath, reason) {
 async function finalizeObsRecordingOnce(outputPath, reason) {
   const recording = activeObsRecording;
   activeObsRecording = null;
+  setRecordingWork("obs-save", {
+    title: "Saving recording",
+    fileName: path.basename(outputPath || recording.outputPath || "OBS recording"),
+    detail: "Naming the MP4 and saving its metadata",
+  });
   if (recording.source === "automatic") {
     let setNumber = null;
     if (recording.lobbyId) {
@@ -929,6 +950,12 @@ async function finalizeObsRecordingOnce(outputPath, reason) {
     manifestPath,
     manifestError,
   };
+  setRecordingWork("obs-save", {
+    fileName: path.basename(lastFinalizedObsRecording.outputPath || "OBS recording"),
+    detail: manifestError
+      ? `Metadata could not be saved: ${manifestError}`
+      : "Finalizing recording",
+  });
   if (recording.outputPath && path.extname(recording.outputPath).toLowerCase() === ".mp4") {
     queueFinalizedChapterJobs(recording);
   }
@@ -1294,6 +1321,13 @@ async function stopObsRecording(reason = "labatar") {
     throw new Error("OBS is not recording.");
   }
   lastFinalizedObsRecording = null;
+  setRecordingWork("obs-save", {
+    title: "Saving recording",
+    fileName: path.basename(
+      activeObsRecording?.outputPath || current.recordStatus.outputPath || "OBS recording",
+    ),
+    detail: "Waiting for OBS to finish the MP4",
+  });
   logRecordingDiagnostic("obs-stop-record-request", {
     reason,
     durationMs: Date.now() - startedAt,
@@ -1318,6 +1352,14 @@ async function stopObsRecording(reason = "labatar") {
     return finalized;
   } finally {
     requestedObsStopReason = null;
+    // OBS can report STOPPED before StopRecord resolves; keep the indicator until both finish.
+    if (finalizingObsRecording) {
+      void finalizingObsRecording
+        .finally(() => clearRecordingWork("obs-save"))
+        .catch(() => undefined);
+    } else {
+      clearRecordingWork("obs-save");
+    }
   }
 }
 
@@ -2244,7 +2286,11 @@ function getCaptureSettings() {
   const saved = readSettings().capture ?? {};
   const hotkey =
     typeof saved.hotkey === "string" && saved.hotkey.trim() ? saved.hotkey.trim() : "F9";
-  return { hotkey, autoGameChapters: saved.autoGameChapters === true };
+  return {
+    hotkey,
+    autoGameChapters: saved.autoGameChapters === true,
+    autoClipManualChapters: saved.autoClipManualChapters !== false,
+  };
 }
 
 function publicCaptureState() {
@@ -2549,6 +2595,12 @@ ipcMain.handle("capture:set-auto-game-chapters", (_, request) => {
   if (typeof request?.enabled !== "boolean") throw new Error("Invalid game chapter setting.");
   saveCaptureSettings({ autoGameChapters: request.enabled });
   setCaptureState({ autoGameChapters: request.enabled });
+  return publicCaptureState();
+});
+ipcMain.handle("capture:set-auto-clip-manual-chapters", (_, request) => {
+  if (typeof request?.enabled !== "boolean") throw new Error("Invalid automatic clip setting.");
+  saveCaptureSettings({ autoClipManualChapters: request.enabled });
+  setCaptureState({ autoClipManualChapters: request.enabled });
   return publicCaptureState();
 });
 
@@ -3084,6 +3136,8 @@ async function processGameChapters(videoPath) {
 }
 
 function queueFinalizedChapterJobs(recording) {
+  // Snapshot this choice at stop, before replay linking can delay clip creation.
+  const { autoClipManualChapters } = getCaptureSettings();
   const attempt = async () => {
     if (
       pendingAutoRecordings.some((pending) => pending.recording === recording) ||
@@ -3099,6 +3153,12 @@ function queueFinalizedChapterJobs(recording) {
       recording.manifestPath &&
       getCaptureSettings().autoGameChapters
     ) {
+      const workId = `game-chapters:${recording.sessionId}`;
+      setRecordingWork(workId, {
+        title: "Adding game-start chapters",
+        fileName: path.basename(recording.outputPath),
+        detail: "Updating MP4 chapters",
+      });
       try {
         const result = await processGameChapters(recording.outputPath);
         logRecordingDiagnostic("automatic-game-chapters-added", {
@@ -3112,8 +3172,11 @@ function queueFinalizedChapterJobs(recording) {
           outputPath: recording.outputPath,
           error: obsErrorMessage(error),
         });
+      } finally {
+        clearRecordingWork(workId);
       }
     }
+    if (!autoClipManualChapters) return;
     try {
       const result = await processManualChapterClips(recording.outputPath);
       logRecordingDiagnostic("automatic-manual-chapter-clips-complete", {
@@ -3559,6 +3622,12 @@ async function processManualChapterClips(videoPath) {
   ) {
     throw new Error("Stop the recording before creating F10 clips.");
   }
+  const workId = `manual-clips:${videoPath}`;
+  setRecordingWork(workId, {
+    title: "Creating clips from manual chapters",
+    fileName: path.basename(videoPath),
+    detail: "Finding manual chapters and existing clips",
+  });
   const job = (async () => {
     const sourceStat = await fs.promises.stat(videoPath).catch(() => null);
     if (!sourceStat?.isFile()) throw new Error("The source recording no longer exists.");
@@ -3583,11 +3652,26 @@ async function processManualChapterClips(videoPath) {
         existingStarts.add(manifest.clip.manualChapterStartMs);
       }
     }
-    return createMissingManualChapterClips(chapters, durationMs, existingStarts, (range) =>
-      exportRecordingClip(
-        { recordingId: sourceId, startTime: range.startTime, endTime: range.endTime },
-        { manualChapterStartMs: range.chapterStartMs },
-      ),
+    return createMissingManualChapterClips(
+      chapters,
+      durationMs,
+      existingStarts,
+      (range) =>
+        exportRecordingClip(
+          { recordingId: sourceId, startTime: range.startTime, endTime: range.endTime },
+          { manualChapterStartMs: range.chapterStartMs },
+        ),
+      ({ index, total, range, phase }) => {
+        const time = `${clipTimeForFilename(range.startTime)}–${clipTimeForFilename(range.endTime)}`;
+        setRecordingWork(workId, {
+          detail:
+            phase === "creating"
+              ? `Encoding clip ${index} of ${total} (${time})`
+              : `${index} of ${total} checked (${time}; ${phase})`,
+          completed: phase === "creating" ? index - 1 : index,
+          total,
+        });
+      },
     );
   })();
   manualChapterClipJobs.set(videoPath, job);
@@ -3595,6 +3679,7 @@ async function processManualChapterClips(videoPath) {
     return await job;
   } finally {
     if (manualChapterClipJobs.get(videoPath) === job) manualChapterClipJobs.delete(videoPath);
+    clearRecordingWork(workId);
   }
 }
 
@@ -4169,7 +4254,26 @@ ipcMain.handle("recordings:frame-reader-close", (_, request) =>
   closeRecordingFrameReader(String(request?.sessionId ?? "")),
 );
 
-ipcMain.handle("recordings:export-clip", async (_, request) => exportRecordingClip(request));
+ipcMain.handle("recordings:get-work-state", () => [...recordingWork.values()]);
+ipcMain.handle("recordings:export-clip", async (_, request) => {
+  const workId = `clip-export:${randomUUID()}`;
+  let fileName = "Recording";
+  try {
+    fileName = path.basename(resolveRecordingPath(String(request?.recordingId ?? "")));
+  } catch {
+    // The export call will report an invalid recording ID.
+  }
+  setRecordingWork(workId, {
+    title: "Creating clip",
+    fileName,
+    detail: `${clipTimeForFilename(Number(request?.startTime) || 0)}–${clipTimeForFilename(Number(request?.endTime) || 0)}`,
+  });
+  try {
+    return await exportRecordingClip(request);
+  } finally {
+    clearRecordingWork(workId);
+  }
+});
 ipcMain.handle("recordings:create-f10-clips", async (_, request) => {
   const videoPath = resolveRecordingPath(String(request?.recordingId ?? ""));
   return processManualChapterClips(videoPath);
@@ -4572,6 +4676,7 @@ void app.whenReady().then(() => {
   setCaptureState({
     hotkey: captureSettings.hotkey,
     autoGameChapters: captureSettings.autoGameChapters,
+    autoClipManualChapters: captureSettings.autoClipManualChapters,
   });
   try {
     registerCaptureShortcut(captureSettings.hotkey);
