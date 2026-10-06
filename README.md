@@ -2,8 +2,6 @@
 
 Labatar is an unofficial Windows companion app for reviewing Avatar Legends: The Fighting Game replays, recording matches with OBS, and making clips. It reads local game files and controls OBS through its WebSocket server; it does not modify the game or inject into gameplay.
 
-![Labatar match history interface in an earlier version](image.png)
-
 ## Download
 
 Download the latest Windows installer from the [GitHub Releases page](https://github.com/lthanni/labatar/releases/latest).
@@ -28,21 +26,15 @@ OBS Studio must be running with its WebSocket server enabled (**Tools > WebSocke
 
 - **Start automatic recording** monitors game logs and starts and stops OBS recordings for matches it can identify. Labatar can keep one recording across games in a recognized lobby, link matching replays, and name a set using your history against that opponent. Matches without enough reliable identity information may not be recorded automatically.
 - **Start recording** begins a manual recording immediately; stop it in Labatar when finished. The configurable global capture shortcut defaults to **F9**.
-- Press **F10** during an active recording to add an unnamed chapter directly to the Hybrid MP4. Labatar automatically makes a clip of up to 30 seconds before each manual chapter after the recording finishes. The Recordings tab also offers **Create 30-second clips from manual chapters** for older recordings or retries.
+- Press **F10** during an active recording to add an unnamed chapter directly to the Hybrid MP4. With **Auto-clip 30 seconds before manual chapters** enabled (the default), Labatar makes a clip of up to 30 seconds before each marker after the recording finishes. You can turn auto-clipping off without disabling F10 chapters. The Recordings tab also offers **Create 30-second clips from manual chapters** for older recordings or retries.
 
 Automatic game-start chapters are a separate, optional setting in OBS settings. Labatar adds them after replay linking, preserving F10 chapters. This can require temporary free space roughly equal to the MP4 size, and games without trustworthy timing are skipped.
 
 ## Review recordings and clips
 
-The **Recordings** tab plays local recordings and clips. Chapter ticks on the timeline show their titles on hover and seek to the chapter when clicked. You can filter recordings and clips, add tags, rename recordings, export a selected video range as a clip, and use the recording's menu to rebuild an automatic name or add game-start chapters. Linked clips appear under their source recording; a recording's details also link back to its source or child clips.
+The **Recordings** tab plays local recordings and clips. Chapter ticks on the timeline show their titles on hover and seek to the chapter when clicked. You can filter recordings and clips, add tags, rename recordings, export a selected video range as a clip, and use the recording's menu to rebuild an automatic name or add game-start chapters. Linked clips appear under their source recording, with chevrons to expand or hide nested clips. Collapsing a branch does not change the selected video; a recording's details also link back to its source or child clips.
 
-### In the current source, not yet in a tagged installer
-
-The following changes are committed after the latest local release tag and will need a new release before they appear in an installer:
-
-- **Auto-clip 30 seconds before manual chapters** is now a saved on/off setting in OBS settings. It defaults to on; turning it off does not disable F10 chapters or the manual clip action.
-- A floating activity panel identifies the recording being saved and shows game-chapter processing or clip creation, including which manual-chapter clip is being encoded.
-- Recordings with nested clips have expand/collapse controls in the selector. Collapsing a branch hides its clips without changing the selected video.
+A floating activity panel shows which recording is being saved, when game-start chapters are being added, and which clip is being created. For manual-chapter clips, it identifies the clip number and time range being encoded.
 
 ## Updates
 
