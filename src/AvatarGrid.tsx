@@ -2,6 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import type { ColDef, ICellRendererParams, ValueGetterParams } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { AnalyticsSection, type AnalysisSummary } from "./AnalyticsSection";
+import { buildRecordingReplayIndex, recordingIdForSet } from "./recording-replay-links";
+import type { RecordedVideo } from "./recording-types";
+import { techSelectedRecordingStorageKey, techSelectRecordingEvent } from "./tech-types";
 import {
   Alert,
   LinearProgress,
@@ -331,14 +334,23 @@ function makeSessionsAsync(
   games: ReplayRow[],
   poi: string | null,
   onProgress: (completed: number, total: number) => void,
+  isCancelled: () => boolean,
 ): Promise<SessionRow[]> {
   return new Promise((resolve) => {
     window.setTimeout(() => {
+      if (isCancelled()) {
+        resolve([]);
+        return;
+      }
       const sortedGames = sortGamesChronologically(games);
       const sessions: ReplayRow[][] = [];
       let index = 0;
 
       const processBatch = () => {
+        if (isCancelled()) {
+          resolve([]);
+          return;
+        }
         const end = Math.min(index + 250, sortedGames.length);
         for (; index < end; index += 1) {
           const game = sortedGames[index];
@@ -439,6 +451,9 @@ function projectSession(session: SessionRow, games: ReplayRow[], poi: string | n
 
 export function AvatarGrid({
   rowData,
+  replayFolder,
+  active,
+  recordingsRefreshToken,
   playerOfInterest,
   dateFrom,
   dateTo,
@@ -446,6 +461,9 @@ export function AvatarGrid({
   onSummaryChange,
 }: {
   rowData: ReplayRow[];
+  replayFolder: string | null;
+  active: boolean;
+  recordingsRefreshToken: number;
   playerOfInterest: string | null;
   dateFrom: string;
   dateTo: string;
@@ -465,21 +483,52 @@ export function AvatarGrid({
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [exportMessage, setExportMessage] = useState<ExportMessage | null>(null);
   const [selectedMatchupGameIds, setSelectedMatchupGameIds] = useState<string[] | null>(null);
+  const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
   useEffect(() => {
-    let active = true;
+    if (!active || !replayFolder || !window.electronAPI?.recordings) return;
+    let cancelled = false;
+    void window.electronAPI.recordings
+      .list()
+      .then(({ recordings: nextRecordings }) => {
+        if (!cancelled) setRecordings(nextRecordings);
+      })
+      .catch(() => {
+        if (!cancelled) setRecordings([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active, replayFolder, recordingsRefreshToken]);
+  const recordingReplayIndex = useMemo(() => buildRecordingReplayIndex(recordings), [recordings]);
+  const openRecording = (recordingId: string) => {
+    localStorage.setItem(techSelectedRecordingStorageKey, recordingId);
+    window.dispatchEvent(new CustomEvent(techSelectRecordingEvent, { detail: recordingId }));
+  };
+  useEffect(() => {
+    if (!active) {
+      setSessionRows([]);
+      setIsPreparingSessions(false);
+      return;
+    }
+    let running = true;
     setIsPreparingSessions(true);
     setSessionProgress({ completed: 0, total: rowData.length });
-    void makeSessionsAsync(rowData, playerOfInterest, (completed, total) => {
-      if (active) setSessionProgress({ completed, total });
-    }).then((nextSessions) => {
-      if (!active) return;
+    void makeSessionsAsync(
+      rowData,
+      playerOfInterest,
+      (completed, total) => {
+        if (running) setSessionProgress({ completed, total });
+      },
+      () => !running,
+    ).then((nextSessions) => {
+      if (!running) return;
       setSessionRows(nextSessions);
       setIsPreparingSessions(false);
     });
     return () => {
-      active = false;
+      running = false;
     };
-  }, [rowData, playerOfInterest]);
+  }, [active, rowData, playerOfInterest]);
   useEffect(() => {
     setSelectedMatchupGameIds(null);
   }, [playerOfInterest, rowData]);
@@ -580,26 +629,43 @@ export function AvatarGrid({
     () => [
       {
         headerName: "",
-        width: 76,
+        width: 190,
         sortable: false,
         filter: false,
         cellRenderer: (params: ICellRendererParams<DisplayRow>) => {
           const data = params.data;
           if (!data || data.kind !== "session") return null;
+          const recordingId = recordingIdForSet(
+            data.games.map((game) => game.id),
+            replayFolder,
+            recordingReplayIndex,
+          );
           return (
-            <button
-              type="button"
-              onClick={() =>
-                setExpandedSessions((current) => {
-                  const next = new Set(current);
-                  if (next.has(data.id)) next.delete(data.id);
-                  else next.add(data.id);
-                  return next;
-                })
-              }
-            >
-              {expandedSessions.has(data.id) ? "- Hide" : "+ Show"}
-            </button>
+            <Stack direction="row" spacing={0.5} sx={{ height: "100%", alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={() =>
+                  setExpandedSessions((current) => {
+                    const next = new Set(current);
+                    if (next.has(data.id)) next.delete(data.id);
+                    else next.add(data.id);
+                    return next;
+                  })
+                }
+              >
+                {expandedSessions.has(data.id) ? "- Hide" : "+ Show"}
+              </button>
+              {recordingId && (
+                <button
+                  type="button"
+                  aria-label={`Open recording for set against ${data.opponent}`}
+                  title="Open set recording"
+                  onClick={() => openRecording(recordingId)}
+                >
+                  Recording
+                </button>
+              )}
+            </Stack>
           );
         },
       },
@@ -676,7 +742,7 @@ export function AvatarGrid({
         flex: 1,
       },
     ],
-    [expandedSessions, playerOfInterest],
+    [expandedSessions, playerOfInterest, recordingReplayIndex, replayFolder],
   );
   return (
     <>

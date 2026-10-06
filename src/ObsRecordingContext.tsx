@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Button, Chip, IconButton, Stack, Tooltip } from "@mui/material";
+import SettingsIcon from "@mui/icons-material/Settings";
+import { Button, Chip, IconButton, Stack, Tooltip, Typography } from "@mui/material";
 import type { ObsSettings, ObsState } from "./obs-types";
 import type { MoveCaptureState, MoveTakeOutcome } from "./move-capture-types";
 
@@ -56,6 +57,18 @@ const labatarSceneNames = [
   "Labatar - Game + Mic",
 ];
 
+const automationStatusLabels: Record<string, string> = {
+  starting: "starting",
+  "waiting-for-log": "waiting for game log",
+  watching: "watching game log",
+  "in-match": "match detected",
+  "in-set": "in set",
+  "in-set-recovered": "set recovered",
+  "waiting-for-replay": "waiting for replay",
+  "waiting-for-obs": "waiting for OBS",
+  error: "error",
+};
+
 type RecordingStartPurpose = "manual" | "extraction";
 const inactiveMoveCapture: MoveCaptureState = { armed: null, active: null };
 
@@ -70,13 +83,14 @@ type ObsRecordingContextValue = {
   moveCapture: MoveCaptureState;
   notice: string | null;
   error: string | null;
+  connectFailed: boolean;
   savedPasswordMask: string;
   labatarSceneNames: string[];
   updateSetting: <K extends keyof ObsSettings>(key: K, value: ObsSettings[K]) => void;
   setPassword: (password: string) => void;
   setPasswordFocused: (focused: boolean) => void;
   setRememberPassword: (remember: boolean) => void;
-  connect: () => Promise<void>;
+  connect: () => Promise<boolean>;
   clearPassword: () => Promise<void>;
   disconnect: () => Promise<void>;
   startManualRecording: (purpose?: RecordingStartPurpose) => Promise<void>;
@@ -112,6 +126,7 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
   const [moveCapture, setMoveCapture] = useState<MoveCaptureState>(inactiveMoveCapture);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [connectFailed, setConnectFailed] = useState(false);
 
   useEffect(() => {
     if (!window.electronAPI?.obs) return;
@@ -157,10 +172,11 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
   );
 
   const connect = useCallback(async () => {
-    if (!window.electronAPI?.obs) return;
+    if (!window.electronAPI?.obs) return false;
     setBusy(true);
     setError(null);
     setNotice(null);
+    setConnectFailed(false);
     try {
       await window.electronAPI.obs.connect({
         host: settings.host,
@@ -173,8 +189,11 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
         passwordSaved: rememberPassword && (current.passwordSaved || Boolean(password)),
       }));
       setNotice("Connected to OBS.");
+      return true;
     } catch (connectError) {
       setError(displayError(connectError));
+      setConnectFailed(true);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -377,6 +396,7 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
       moveCapture,
       notice,
       error,
+      connectFailed,
       savedPasswordMask,
       labatarSceneNames,
       updateSetting,
@@ -398,6 +418,7 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
       busy,
       clearPassword,
       connect,
+      connectFailed,
       disconnect,
       error,
       extractionCaptureActive,
@@ -443,6 +464,18 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
   const connected = state.status === "connected";
   const recording = state.recording.active;
   const manualRecording = recording && state.recording.source === "manual";
+  const automaticallyRecording = recording && state.recording.source === "automatic";
+  const automationStatus = state.automation.status;
+  const currentMatch = state.automation.currentMatch;
+  const matchMode = currentMatch?.mode;
+  const automationHasError = automationStatus === "error" || Boolean(state.automation.error);
+  const automationIndicatorColor = automationHasError
+    ? "error"
+    : automaticallyRecording
+      ? "success"
+      : !connected || automationStatus.startsWith("waiting-") || automationStatus === "in-match"
+        ? "warning"
+        : "info";
 
   return (
     <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: "stretch" }}>
@@ -450,7 +483,15 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
         <Button
           size="small"
           variant={connected ? "outlined" : "contained"}
-          onClick={() => void (connected ? disconnect() : connect())}
+          onClick={() => {
+            if (connected) {
+              void disconnect();
+            } else {
+              void connect().then((succeeded) => {
+                if (!succeeded) onOpenSettings();
+              });
+            }
+          }}
           disabled={busy || recording || state.status === "connecting"}
         >
           {state.status === "connecting"
@@ -461,47 +502,137 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
         </Button>
         <Tooltip title="OBS settings">
           <IconButton size="small" aria-label="OBS settings" onClick={onOpenSettings}>
-            <span aria-hidden="true" style={{ fontSize: 20, lineHeight: 1 }}>
-              ⚙
-            </span>
+            <SettingsIcon fontSize="small" />
           </IconButton>
         </Tooltip>
       </Stack>
       {state.automation.enabled ? (
-        <Button
-          size="small"
-          variant="outlined"
-          color="error"
-          onClick={() => void toggleAutomaticRecording(false)}
-          disabled={!connected || busy || manualRecording}
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}
         >
-          Stop automatic recording
-        </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            color="error"
+            onClick={() => void toggleAutomaticRecording(false)}
+            disabled={!connected || busy || manualRecording}
+          >
+            Stop automatic recording
+          </Button>
+          <Tooltip
+            arrow
+            title={
+              <Stack spacing={0.25}>
+                <Typography variant="body2">State: {automationStatus}</Typography>
+                <Typography variant="body2">
+                  OBS:{" "}
+                  {automaticallyRecording
+                    ? "recording automatically"
+                    : "not recording automatically"}
+                </Typography>
+                {state.automation.lobbyId && (
+                  <Typography variant="body2">Lobby: {state.automation.lobbyId}</Typography>
+                )}
+                {currentMatch && (
+                  <Typography variant="body2">Match: {currentMatch.matchId}</Typography>
+                )}
+                {matchMode && (
+                  <Typography variant="body2">
+                    Mode: {matchMode === "ranked" ? "Ranked" : "Casual"}
+                  </Typography>
+                )}
+                {currentMatch?.player1 && (
+                  <Typography variant="body2">
+                    P1 character: {currentMatch.player1.character || "unknown"} · Steam ID:{" "}
+                    {currentMatch.player1.steamId || "unknown"}
+                  </Typography>
+                )}
+                {currentMatch?.player2 && (
+                  <Typography variant="body2">
+                    P2 character: {currentMatch.player2.character || "unknown"} · Steam ID:{" "}
+                    {currentMatch.player2.steamId || "unknown"}
+                  </Typography>
+                )}
+                {currentMatch && (
+                  <Typography variant="body2">
+                    Player display names are not resolved from this live match data.
+                  </Typography>
+                )}
+                {state.automation.pendingRecordings > 0 && (
+                  <Typography variant="body2">
+                    Replays pending: {state.automation.pendingRecordings}
+                  </Typography>
+                )}
+                {state.automation.error && (
+                  <Typography variant="body2">Error: {state.automation.error}</Typography>
+                )}
+              </Stack>
+            }
+          >
+            <Chip
+              size="small"
+              role="status"
+              aria-live="polite"
+              color={automationIndicatorColor}
+              variant={automaticallyRecording || automationHasError ? "filled" : "outlined"}
+              label={[
+                `Auto: ${automationStatusLabels[automationStatus] ?? automationStatus}`,
+                matchMode,
+                automaticallyRecording && "REC",
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            />
+          </Tooltip>
+        </Stack>
       ) : (
-        <Button
-          size="small"
-          variant="contained"
-          onClick={() => void toggleAutomaticRecording(true)}
-          disabled={!connected || busy || recording}
+        <Tooltip
+          title="Monitors game logs and lets Labatar start and stop OBS recordings automatically when matches begin and end."
+          placement="top"
+          arrow
         >
-          Start automatic recording
-        </Button>
+          <span>
+            <Button
+              size="small"
+              variant="contained"
+              onClick={() => void toggleAutomaticRecording(true)}
+              disabled={!connected || busy || recording}
+            >
+              Start automatic recording
+            </Button>
+          </span>
+        </Tooltip>
       )}
-      <Button
-        size="small"
-        variant={manualRecording ? "outlined" : "contained"}
-        color={manualRecording ? "error" : "primary"}
-        onClick={() => void (manualRecording ? stopManualRecording() : startManualRecording())}
-        disabled={
-          !connected || busy || (!manualRecording && (recording || state.automation.enabled))
+      <Tooltip
+        title={
+          manualRecording
+            ? ""
+            : "Starts an OBS recording immediately. Stop it when you are done; an armed move is saved as a move take."
         }
+        placement="top"
+        arrow
       >
-        {manualRecording
-          ? "Stop recording"
-          : moveCapture.armed
-            ? `Start ${moveCapture.armed.moveLabel} ${moveCapture.armed.outcome} take`
-            : "Start recording"}
-      </Button>
+        <span>
+          <Button
+            size="small"
+            variant={manualRecording ? "outlined" : "contained"}
+            color={manualRecording ? "error" : "primary"}
+            onClick={() => void (manualRecording ? stopManualRecording() : startManualRecording())}
+            disabled={
+              !connected || busy || (!manualRecording && (recording || state.automation.enabled))
+            }
+          >
+            {manualRecording
+              ? "Stop recording"
+              : moveCapture.armed
+                ? `Start ${moveCapture.armed.moveLabel} ${moveCapture.armed.outcome} take`
+                : "Start recording"}
+          </Button>
+        </span>
+      </Tooltip>
       {moveCapture.armed && (
         <Chip
           size="small"

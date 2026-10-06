@@ -1,7 +1,4 @@
 import {
-  Accordion,
-  AccordionDetails,
-  AccordionSummary,
   Alert,
   Box,
   Button,
@@ -19,6 +16,11 @@ type CaptureState = {
   hotkeyRegistered: boolean;
   lastAction: "started" | "stopped" | null;
   error: string | null;
+  chapterHotkey: string;
+  chapterHotkeyRegistered: boolean;
+  chapterLastAddedAt: string | null;
+  chapterError: string | null;
+  autoGameChapters: boolean;
 };
 
 export function ObsRecordingPanel() {
@@ -31,6 +33,7 @@ export function ObsRecordingPanel() {
     busy,
     notice,
     error,
+    connectFailed,
     savedPasswordMask,
     labatarSceneNames,
     updateSetting,
@@ -67,6 +70,19 @@ export function ObsRecordingPanel() {
   const [captureBusy, setCaptureBusy] = useState(false);
   const [captureNotice, setCaptureNotice] = useState<string | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [chapterBusy, setChapterBusy] = useState(false);
+  const [gameChapterBusy, setGameChapterBusy] = useState(false);
+  const [gameChapterError, setGameChapterError] = useState<string | null>(null);
+  const [obsLaunchBusy, setObsLaunchBusy] = useState(false);
+  const [obsLaunchNotice, setObsLaunchNotice] = useState<string | null>(null);
+  const [obsLaunchError, setObsLaunchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (connected) {
+      setObsLaunchNotice(null);
+      setObsLaunchError(null);
+    }
+  }, [connected]);
 
   useEffect(() => {
     if (!window.electronAPI?.capture) return;
@@ -107,22 +123,61 @@ export function ObsRecordingPanel() {
     }
   };
 
+  const addChapter = async () => {
+    if (!window.electronAPI?.capture) return;
+    setChapterBusy(true);
+    try {
+      await window.electronAPI.capture.addChapter();
+    } catch {
+      // The capture state displays the OBS error sent by the main process.
+    } finally {
+      setChapterBusy(false);
+    }
+  };
+
+  const setAutoGameChapters = async (enabled: boolean) => {
+    if (!window.electronAPI?.capture) return;
+    setGameChapterBusy(true);
+    setGameChapterError(null);
+    try {
+      setCaptureState(await window.electronAPI.capture.setAutoGameChapters(enabled));
+    } catch (settingError) {
+      setGameChapterError(
+        settingError instanceof Error ? settingError.message : String(settingError),
+      );
+    } finally {
+      setGameChapterBusy(false);
+    }
+  };
+
+  const openObsApp = async () => {
+    if (!window.electronAPI?.obs) return;
+    setObsLaunchBusy(true);
+    setObsLaunchNotice(null);
+    setObsLaunchError(null);
+    try {
+      if (await window.electronAPI.obs.openApp()) {
+        setObsLaunchNotice(
+          "OBS launch requested. Once OBS is running and its WebSocket server is ready, retry the connection.",
+        );
+      }
+    } catch (launchError) {
+      setObsLaunchError(launchError instanceof Error ? launchError.message : String(launchError));
+    } finally {
+      setObsLaunchBusy(false);
+    }
+  };
+
   return (
-    <Accordion
-      disableGutters
-      defaultExpanded
+    <Box
       sx={{
         border: 1,
         borderColor: "divider",
         borderRadius: 1,
         textAlign: "left",
-        "&:before": { display: "none" },
       }}
     >
-      <AccordionSummary
-        expandIcon={<span aria-hidden="true">v</span>}
-        sx={{ "& .MuiAccordionSummary-content": { alignItems: "center" } }}
-      >
+      <Box sx={{ display: "flex", alignItems: "center", gap: 2, px: 3, pt: 2, pb: 1 }}>
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Typography variant="h6">Capture configuration</Typography>
           <Typography color="text.secondary">
@@ -132,19 +187,50 @@ export function ObsRecordingPanel() {
         <Typography
           variant="caption"
           color={recording ? "error.main" : connected ? "success.main" : "text.secondary"}
-          sx={{ mr: 2, flexShrink: 0 }}
+          sx={{ flexShrink: 0 }}
         >
           {recording ? "Recording active" : state.status}
         </Typography>
-      </AccordionSummary>
-      <AccordionDetails sx={{ px: 3, pb: 3 }}>
+      </Box>
+      <Box sx={{ px: 3, pb: 3 }}>
+        {connectFailed && (
+          <Alert
+            severity="error"
+            sx={{ mb: 2 }}
+            action={
+              <Button
+                color="secondary"
+                variant="outlined"
+                size="small"
+                sx={{ textTransform: "none" }}
+                onClick={() => void openObsApp()}
+                disabled={obsLaunchBusy || busy}
+              >
+                attempt to open OBS
+              </Button>
+            }
+          >
+            Could not connect to OBS. Is OBS running? If it is, check its WebSocket server, port,
+            and password, then retry the connection.
+            {displayedError && (
+              <Typography variant="body2" sx={{ mt: 1 }}>
+                {displayedError}
+              </Typography>
+            )}
+          </Alert>
+        )}
         <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 2 }}>
           In OBS, enable the WebSocket server under Tools: WebSocket Server Settings. The default
           port is 4455; use the password configured there.
         </Typography>
 
         <Stack spacing={1.5}>
-          <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
+          <Stack
+            direction={{ xs: "column", md: "row" }}
+            spacing={1}
+            useFlexGap
+            sx={{ flexWrap: "wrap" }}
+          >
             <TextField
               label="OBS host"
               size="small"
@@ -201,7 +287,21 @@ export function ObsRecordingPanel() {
                   ? "Disconnect"
                   : "Connect"}
             </Button>
+            {!connected && !connectFailed && (
+              <Button
+                variant="outlined"
+                color="secondary"
+                sx={{ textTransform: "none" }}
+                onClick={() => void openObsApp()}
+                disabled={obsLaunchBusy || busy}
+              >
+                attempt to open OBS
+              </Button>
+            )}
           </Stack>
+
+          {obsLaunchNotice && <Alert severity="success">{obsLaunchNotice}</Alert>}
+          {obsLaunchError && <Alert severity="error">{obsLaunchError}</Alert>}
 
           <Typography variant="body2" color={connected ? "success.main" : "text.secondary"}>
             Status: {state.status}
@@ -255,6 +355,63 @@ export function ObsRecordingPanel() {
             {captureError && (
               <Alert severity="error" sx={{ mt: 1 }}>
                 {captureError}
+              </Alert>
+            )}
+          </Box>
+
+          <Box sx={{ borderTop: 1, borderColor: "divider", pt: 2 }}>
+            <Typography variant="subtitle2">Recording chapter marker</Typography>
+            <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1 }}>
+              Press F10 while recording, even when Labatar is not focused, to add an unnamed chapter
+              directly to the OBS Hybrid MP4. OBS saves chapters when the recording stops.
+            </Typography>
+            <Button
+              variant="outlined"
+              onClick={() => void addChapter()}
+              disabled={!connected || !recording || state.recording.paused || chapterBusy}
+            >
+              Add chapter marker (F10)
+            </Button>
+            <Typography
+              variant="caption"
+              color={captureState?.chapterHotkeyRegistered ? "success.main" : "warning.main"}
+              component="div"
+              sx={{ mt: 1 }}
+            >
+              {captureState
+                ? `F10: ${captureState.chapterHotkeyRegistered ? "registered" : "not registered"}`
+                : "Loading chapter shortcut status..."}
+            </Typography>
+            {captureState?.chapterLastAddedAt && recording && (
+              <Alert severity="success" sx={{ mt: 1 }}>
+                OBS accepted a chapter marker at{" "}
+                {new Date(captureState.chapterLastAddedAt).toLocaleTimeString()}.
+              </Alert>
+            )}
+            {captureState?.chapterError && (
+              <Alert severity="error" sx={{ mt: 1 }}>
+                {captureState.chapterError}
+              </Alert>
+            )}
+            <FormControlLabel
+              sx={{ mt: 1 }}
+              control={
+                <Checkbox
+                  checked={captureState?.autoGameChapters ?? false}
+                  disabled={!captureState || gameChapterBusy}
+                  onChange={(_, checked) => void setAutoGameChapters(checked)}
+                />
+              }
+              label="Add game-start chapters to future automatic MP4 recordings"
+            />
+            <Typography variant="caption" color="text.secondary" component="div">
+              After OBS stops and replay linking finishes, Labatar copies the MP4 streams into a
+              chaptered file without re-encoding. Existing F10 chapters are kept. This may take time
+              and needs temporary free space roughly equal to the recording size.
+            </Typography>
+            {gameChapterError && (
+              <Alert severity="error" sx={{ mt: 1 }}>
+                {gameChapterError}
               </Alert>
             )}
           </Box>
@@ -348,9 +505,9 @@ export function ObsRecordingPanel() {
             </Typography>
           )}
           {notice && <Alert severity="success">{notice}</Alert>}
-          {displayedError && <Alert severity="error">{displayedError}</Alert>}
+          {!connectFailed && displayedError && <Alert severity="error">{displayedError}</Alert>}
         </Stack>
-      </AccordionDetails>
-    </Accordion>
+      </Box>
+    </Box>
   );
 }

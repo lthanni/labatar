@@ -32,6 +32,7 @@ import {
   Typography,
 } from "@mui/material";
 import type { RecordedVideo, RecordingTagCategory, RecordingTags } from "./recording-types";
+import { timelineChapterMarkers, type RecordingChapter } from "./recording-chapters";
 import type {
   RecordingAnalysisDiagnosticFrame,
   RecordingAnalysisHitbox,
@@ -278,14 +279,6 @@ function SceneMarkerIcon() {
   );
 }
 
-function PencilIcon() {
-  return (
-    <SvgIcon viewBox="0 0 24 24">
-      <path d="m3 17.25 9.06-9.06 3.75 3.75L6.75 21H3v-3.75ZM14.06 7.94l1.42-1.42a2 2 0 0 1 2.83 0l.17.17a2 2 0 0 1 0 2.83l-1.42 1.42-3-3ZM3 3h8v2H5v14h14v-6h2v8a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
-    </SvgIcon>
-  );
-}
-
 function CheckIcon() {
   return (
     <SvgIcon viewBox="0 0 24 24">
@@ -394,6 +387,9 @@ export function RecordingViewer({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [chapters, setChapters] = useState<RecordingChapter[]>([]);
+  const [chapterLoadError, setChapterLoadError] = useState<string | null>(null);
+  const [chapterRefreshToken, setChapterRefreshToken] = useState(0);
   const [reviewFrame, setReviewFrame] = useState<ExactReviewFrame | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [clipRange, setClipRange] = useState<[number, number]>([0, 0]);
@@ -410,6 +406,12 @@ export function RecordingViewer({
   const [editingRecordingName, setEditingRecordingName] = useState("");
   const [renamingRecordingId, setRenamingRecordingId] = useState<string | null>(null);
   const [reprocessingNameId, setReprocessingNameId] = useState<string | null>(null);
+  const [gameChaptersId, setGameChaptersId] = useState<string | null>(null);
+  const [gameChaptersNotice, setGameChaptersNotice] = useState<string | null>(null);
+  const [gameChaptersError, setGameChaptersError] = useState<string | null>(null);
+  const [f10ClipsId, setF10ClipsId] = useState<string | null>(null);
+  const [f10ClipsNotice, setF10ClipsNotice] = useState<string | null>(null);
+  const [f10ClipsError, setF10ClipsError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     recording: RecordedVideo;
     mouseX: number;
@@ -444,6 +446,7 @@ export function RecordingViewer({
   const frameReaderSession = useRef<string | null>(null);
   const frameReaderRecordingId = useRef<string | null>(null);
   const reviewRequestId = useRef(0);
+  const loadGeneration = useRef(0);
   const extractionRecording = extractionCaptureActive && obsState.recording.active;
 
   useEffect(() => {
@@ -490,10 +493,14 @@ export function RecordingViewer({
 
   const loadRecordings = useCallback(async () => {
     if (!window.electronAPI?.recordings) return;
+    const generation = ++loadGeneration.current;
     setLoading(true);
     setError(null);
     try {
-      const result = await window.electronAPI.recordings.list();
+      const result = await window.electronAPI.recordings.list({
+        analysisScope: mode === "nerd-processing" ? "all" : "none",
+      });
+      if (generation !== loadGeneration.current) return;
       const tabRecordings =
         mode === "recordings"
           ? result.recordings.filter(
@@ -508,19 +515,56 @@ export function RecordingViewer({
           : (tabRecordings[0]?.id ?? null),
       );
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : String(loadError));
+      if (generation === loadGeneration.current) {
+        setError(loadError instanceof Error ? loadError.message : String(loadError));
+      }
     } finally {
-      setLoading(false);
+      if (generation === loadGeneration.current) setLoading(false);
     }
   }, [mode]);
 
   useEffect(() => {
-    void loadRecordings();
-  }, [loadRecordings, refreshToken]);
+    if (active) void loadRecordings();
+    return () => {
+      loadGeneration.current += 1;
+    };
+  }, [active, loadRecordings, refreshToken]);
 
   const selectedRecording = useMemo(
     () => recordings.find((recording) => recording.id === selectedId) ?? null,
     [recordings, selectedId],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    setChapters([]);
+    setChapterLoadError(null);
+    if (
+      !active ||
+      !selectedRecording?.name.toLowerCase().endsWith(".mp4") ||
+      !window.electronAPI?.recordings
+    ) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    void window.electronAPI.recordings.getChapters({ recordingId: selectedRecording.id }).then(
+      (nextChapters) => {
+        if (!cancelled) setChapters(nextChapters);
+      },
+      (loadError) => {
+        if (!cancelled)
+          setChapterLoadError(loadError instanceof Error ? loadError.message : String(loadError));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [active, selectedRecording?.id, selectedRecording?.modifiedAt, chapterRefreshToken]);
+
+  const timelineChapters = useMemo(
+    () => timelineChapterMarkers(chapters, duration),
+    [chapters, duration],
   );
 
   const closeFrameReader = useCallback(async () => {
@@ -545,6 +589,12 @@ export function RecordingViewer({
         const reader = await window.electronAPI!.recordings.openFrameReader({
           recordingId: selectedRecording.id,
         });
+        if (requestId !== reviewRequestId.current) {
+          await window
+            .electronAPI!.recordings.closeFrameReader({ sessionId: reader.sessionId })
+            .catch(() => undefined);
+          throw new Error("Frame review was cancelled.");
+        }
         frameReaderSession.current = reader.sessionId;
         frameReaderRecordingId.current = selectedRecording.id;
         return reader.sessionId;
@@ -596,6 +646,25 @@ export function RecordingViewer({
       void closeFrameReader();
     };
   }, [closeFrameReader, selectedRecording?.id]);
+
+  useEffect(() => {
+    if (active) return;
+    reviewRequestId.current += 1;
+    const video = videoRef.current;
+    if (video && selectedRecording) {
+      savePlaybackPosition(selectedRecording.id, video.currentTime);
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+    void closeFrameReader();
+    setRecordings((current) => (current.length ? [] : current));
+    setChapters((current) => (current.length ? [] : current));
+    setReviewFrame(null);
+    setLoading(false);
+    setIsPlaying(false);
+    restoredRecordingId.current = null;
+  }, [active, closeFrameReader, savePlaybackPosition, selectedRecording]);
 
   useEffect(() => {
     setShowAnalysisDebug(false);
@@ -665,6 +734,8 @@ export function RecordingViewer({
       const recordingId = (event as CustomEvent<string>).detail;
       if (typeof recordingId !== "string") return;
       if (recordings.some((recording) => recording.id === recordingId)) {
+        setShowFullRecordings(true);
+        setSelectedTagFilters(emptyRecordingTags);
         selectRecording(recordingId);
         localStorage.removeItem(techSelectedRecordingStorageKey);
       } else {
@@ -689,6 +760,8 @@ export function RecordingViewer({
     ) {
       return;
     }
+    setShowFullRecordings(true);
+    setSelectedTagFilters(emptyRecordingTags);
     selectRecording(pendingRecordingId);
     localStorage.removeItem(techSelectedRecordingStorageKey);
   }, [recordings, selectRecording]);
@@ -704,10 +777,11 @@ export function RecordingViewer({
   }, [selectedId]);
 
   useEffect(() => {
+    if (!active || loading || recordings.length === 0) return;
     if (selectedId && visibleRecordings.some((recording) => recording.id === selectedId)) return;
     if (visibleRecordings[0]) selectRecording(visibleRecordings[0].id);
     else if (selectedId) setSelectedId(null);
-  }, [selectRecording, selectedId, visibleRecordings]);
+  }, [active, loading, recordings.length, selectRecording, selectedId, visibleRecordings]);
 
   const exportClip = useCallback(async () => {
     if (!window.electronAPI?.recordings || !selectedRecording || clipRange[1] <= clipRange[0]) {
@@ -811,6 +885,71 @@ export function RecordingViewer({
       }
     },
     [finishRecordingRename, reprocessingNameId],
+  );
+
+  const addGameChapters = useCallback(
+    async (recording: RecordedVideo) => {
+      if (!window.electronAPI?.recordings || gameChaptersId) return;
+      setContextMenu(null);
+      setGameChaptersId(recording.id);
+      setGameChaptersNotice(null);
+      setGameChaptersError(null);
+      try {
+        if (selectedRecording?.id === recording.id) {
+          videoRef.current?.pause();
+          await closeFrameReader();
+        }
+        const result = await window.electronAPI.recordings.addGameChapters({
+          recordingId: recording.id,
+        });
+        await loadRecordings();
+        setChapterRefreshToken((token) => token + 1);
+        if (selectedRecording?.id === recording.id) videoRef.current?.load();
+        setGameChaptersNotice(
+          `Added ${result.added} game-start chapter${result.added === 1 ? "" : "s"} to ${recording.name}.${result.skipped.length ? ` Skipped ${result.skipped.length} game${result.skipped.length === 1 ? "" : "s"} with uncertain timing.` : ""}${result.backupPath ? ` The original backup could not be removed; it remains at ${result.backupPath}.` : ""}`,
+        );
+      } catch (chapterError) {
+        setGameChaptersError(
+          chapterError instanceof Error ? chapterError.message : String(chapterError),
+        );
+      } finally {
+        setGameChaptersId(null);
+      }
+    },
+    [closeFrameReader, gameChaptersId, loadRecordings, selectedRecording?.id],
+  );
+
+  const createF10Clips = useCallback(
+    async (recording: RecordedVideo) => {
+      if (!window.electronAPI?.recordings || f10ClipsId) return;
+      setContextMenu(null);
+      setF10ClipsId(recording.id);
+      setF10ClipsNotice(null);
+      setF10ClipsError(null);
+      try {
+        const result = await window.electronAPI.recordings.createF10Clips({
+          recordingId: recording.id,
+        });
+        await loadRecordings();
+        if (result.total === 0) {
+          setF10ClipsNotice(`No unnamed manual chapters were found in ${recording.name}.`);
+        } else {
+          setF10ClipsNotice(
+            `Created ${result.created} clip${result.created === 1 ? "" : "s"} from manual chapters in ${recording.name}.${result.alreadyExisting ? ` ${result.alreadyExisting} already existed.` : ""}`,
+          );
+        }
+        if (result.failures.length) {
+          setF10ClipsError(
+            `${result.failures.length} manual-chapter clip${result.failures.length === 1 ? "" : "s"} failed: ${result.failures.map(({ chapterStartMs, error }) => `${(chapterStartMs / 1000).toFixed(1)}s (${error})`).join("; ")}`,
+          );
+        }
+      } catch (clipError) {
+        setF10ClipsError(clipError instanceof Error ? clipError.message : String(clipError));
+      } finally {
+        setF10ClipsId(null);
+      }
+    },
+    [f10ClipsId, loadRecordings],
   );
 
   const openYouTubeStudio = useCallback(async (recording: RecordedVideo) => {
@@ -1450,6 +1589,10 @@ export function RecordingViewer({
     <Stack spacing={2} sx={{ height: "100%", minHeight: 0, overflow: "hidden" }}>
       {error && <Alert severity="error">{error}</Alert>}
       {renameError && <Alert severity="error">{renameError}</Alert>}
+      {gameChaptersError && <Alert severity="error">{gameChaptersError}</Alert>}
+      {gameChaptersNotice && <Alert severity="success">{gameChaptersNotice}</Alert>}
+      {f10ClipsError && <Alert severity="error">{f10ClipsError}</Alert>}
+      {f10ClipsNotice && <Alert severity="success">{f10ClipsNotice}</Alert>}
       {youtubeError && <Alert severity="error">{youtubeError}</Alert>}
       {mode === "nerd-processing" && processingConfigError && (
         <Alert severity="error">{processingConfigError}</Alert>
@@ -1778,13 +1921,19 @@ export function RecordingViewer({
                     if (editingRecordingId !== recording.id) selectRecording(recording.id);
                   }}
                   onKeyDown={(event) => {
-                    if (
-                      editingRecordingId === recording.id ||
-                      event.target !== event.currentTarget ||
-                      (event.key !== "Enter" && event.key !== " ")
-                    ) {
+                    if (editingRecordingId === recording.id || event.target !== event.currentTarget)
+                      return;
+                    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                      event.preventDefault();
+                      const bounds = event.currentTarget.getBoundingClientRect();
+                      setContextMenu({
+                        recording,
+                        mouseX: bounds.left + 16,
+                        mouseY: bounds.top + 16,
+                      });
                       return;
                     }
+                    if (event.key !== "Enter" && event.key !== " ") return;
                     event.preventDefault();
                     selectRecording(recording.id);
                   }}
@@ -1835,7 +1984,11 @@ export function RecordingViewer({
                         }
                       : {}),
                   }}
-                  title={editingRecordingId === recording.id ? undefined : "Drag to share"}
+                  title={
+                    editingRecordingId === recording.id
+                      ? undefined
+                      : "Click to select · Right-click for actions · Drag to share"
+                  }
                 >
                   {editingRecordingId === recording.id ? (
                     <Stack direction="row" spacing={0.5} sx={{ flex: 1, minWidth: 0 }}>
@@ -1891,46 +2044,11 @@ export function RecordingViewer({
                       </Tooltip>
                     </Stack>
                   ) : (
-                    <>
-                      <ListItemText
-                        primary={recording.name}
-                        secondary={`${recording.moveTake ? `${recording.moveTake.moveLabel} · ${recording.moveTake.outcome} · ${recording.moveTake.validation.status} | ` : ""}${formatFileSize(recording.size)} | ${formatModifiedAt(recording.modifiedAt)}`}
-                        slotProps={{
-                          primary: { sx: { overflowWrap: "anywhere" } },
-                        }}
-                      />
-                      <Tooltip title="Rename recording">
-                        <IconButton
-                          edge="end"
-                          size="small"
-                          aria-label={`Rename ${recording.name}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            beginRename(recording);
-                          }}
-                        >
-                          <PencilIcon />
-                        </IconButton>
-                      </Tooltip>
-                      {recording.source === "automatic" && (
-                        <Tooltip title="Rebuild name from first game's replay">
-                          <span>
-                            <IconButton
-                              edge="end"
-                              size="small"
-                              aria-label={`Rebuild name for ${recording.name}`}
-                              disabled={Boolean(reprocessingNameId)}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                void reprocessRecordingName(recording);
-                              }}
-                            >
-                              <RefreshIcon />
-                            </IconButton>
-                          </span>
-                        </Tooltip>
-                      )}
-                    </>
+                    <ListItemText
+                      primary={recording.name}
+                      secondary={`${recording.moveTake ? `${recording.moveTake.moveLabel} · ${recording.moveTake.outcome} · ${recording.moveTake.validation.status} | ` : ""}${formatFileSize(recording.size)} | ${formatModifiedAt(recording.modifiedAt)}`}
+                      slotProps={{ primary: { sx: { overflowWrap: "anywhere" } } }}
+                    />
                   )}
                 </ListItemButton>
               ))}
@@ -1957,9 +2075,32 @@ export function RecordingViewer({
               disabled={Boolean(reprocessingNameId)}
               onClick={() => void reprocessRecordingName(contextMenu.recording)}
             >
-              Rebuild automatic name
+              Rebuild name and set number
             </MenuItem>
           )}
+          {contextMenu?.recording.source === "automatic" &&
+            contextMenu.recording.name.toLowerCase().endsWith(".mp4") &&
+            contextMenu.recording.games.length > 0 && (
+              <MenuItem
+                disabled={Boolean(gameChaptersId)}
+                onClick={() => void addGameChapters(contextMenu.recording)}
+              >
+                {gameChaptersId === contextMenu.recording.id
+                  ? "Adding game chapters..."
+                  : "Add/rebuild game-start chapters"}
+              </MenuItem>
+            )}
+          {contextMenu?.recording.name.toLowerCase().endsWith(".mp4") &&
+            !contextMenu.recording.clip && (
+              <MenuItem
+                disabled={Boolean(f10ClipsId) || Boolean(gameChaptersId)}
+                onClick={() => void createF10Clips(contextMenu.recording)}
+              >
+                {f10ClipsId === contextMenu.recording.id
+                  ? "Creating clips from manual chapters..."
+                  : "Create 30-second clips from manual chapters"}
+              </MenuItem>
+            )}
           <MenuItem
             sx={{ color: "error.main" }}
             onClick={() => contextMenu && requestDelete(contextMenu.recording)}
@@ -2423,6 +2564,7 @@ export function RecordingViewer({
                   controls={false}
                   preload="metadata"
                   onLoadedMetadata={(event) => {
+                    if (!active) return;
                     const video = event.currentTarget;
                     updateVideoContentBox();
                     const nextDuration = video.duration;
@@ -2472,6 +2614,7 @@ export function RecordingViewer({
                     });
                   }}
                   onTimeUpdate={(event) => {
+                    if (!active) return;
                     const video = event.currentTarget;
                     const nextTime = video.currentTime;
                     if (clipMode && !video.paused && nextTime >= clipRange[1]) {
@@ -2502,6 +2645,7 @@ export function RecordingViewer({
                   }}
                   onClick={togglePlayback}
                   onError={() => {
+                    if (!active) return;
                     setPlaybackError(
                       "This video could not be played by the built-in player. The recording container or codec may not be supported yet.",
                     );
@@ -2947,6 +3091,82 @@ export function RecordingViewer({
                 </Button>
               </Box>
               <Stack spacing={0.5}>
+                {timelineChapters.length > 0 && (
+                  <Box
+                    aria-label="Recording chapters"
+                    sx={{ position: "relative", height: 22, mx: "6px", mt: 0.5 }}
+                  >
+                    <Box
+                      sx={{
+                        position: "absolute",
+                        bottom: 2,
+                        left: 0,
+                        right: 0,
+                        borderBottom: 1,
+                        borderColor: "divider",
+                      }}
+                    />
+                    {timelineChapters.map((marker, index) => (
+                      <Tooltip
+                        key={`${marker.time}-${index}`}
+                        arrow
+                        placement="top"
+                        title={
+                          <>
+                            {marker.titles.map((title, titleIndex) => (
+                              <Typography
+                                key={`${title}-${titleIndex}`}
+                                variant="caption"
+                                component="div"
+                              >
+                                {title}
+                              </Typography>
+                            ))}
+                            <Typography variant="caption" component="div" sx={{ opacity: 0.75 }}>
+                              {formatVideoTime(marker.time)}
+                            </Typography>
+                          </>
+                        }
+                      >
+                        <Box
+                          component="button"
+                          type="button"
+                          aria-label={`Seek to ${marker.titles.join(" and ")} at ${formatVideoTime(marker.time)}`}
+                          onClick={() => seekTo(marker.time)}
+                          sx={{
+                            position: "absolute",
+                            left: `${marker.positionPercent}%`,
+                            bottom: 0,
+                            transform: "translateX(-50%)",
+                            width: 12,
+                            height: 22,
+                            p: 0,
+                            border: 0,
+                            borderRadius: 0.5,
+                            background: "transparent",
+                            cursor: "pointer",
+                            "&::after": {
+                              content: '""',
+                              position: "absolute",
+                              left: "50%",
+                              bottom: 1,
+                              transform: "translateX(-50%)",
+                              width: 3,
+                              height: 17,
+                              borderRadius: 1,
+                              bgcolor: marker.gameStart ? "warning.main" : "info.light",
+                            },
+                            "&:hover::after, &:focus-visible::after": { width: 5, height: 20 },
+                            "&:focus-visible": {
+                              outline: "2px solid",
+                              outlineColor: "primary.main",
+                            },
+                          }}
+                        />
+                      </Tooltip>
+                    ))}
+                  </Box>
+                )}
                 {clipMode ? (
                   <>
                     <Slider
@@ -3099,12 +3319,28 @@ export function RecordingViewer({
                       >
                         Create a clip
                       </Button>
+                      {selectedRecording?.name.toLowerCase().endsWith(".mp4") &&
+                        !selectedRecording.clip && (
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            disabled={Boolean(f10ClipsId) || Boolean(gameChaptersId)}
+                            onClick={() => void createF10Clips(selectedRecording)}
+                          >
+                            {f10ClipsId === selectedRecording.id
+                              ? "Creating clips from manual chapters..."
+                              : "Create 30-second clips from manual chapters"}
+                          </Button>
+                        )}
                     </Stack>
                   </>
                 )}
               </Stack>
               {clipExportNotice && <Alert severity="success">{clipExportNotice}</Alert>}
               {clipExportError && <Alert severity="error">{clipExportError}</Alert>}
+              {chapterLoadError && (
+                <Alert severity="warning">Could not read MP4 chapters: {chapterLoadError}</Alert>
+              )}
               {playbackError && <Alert severity="warning">{playbackError}</Alert>}
               {(selectedRecording.clip || linkedClips.length > 0) && (
                 <>

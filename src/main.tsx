@@ -78,6 +78,8 @@ declare global {
         getState: () => Promise<CaptureState>;
         setSettings: (request: { hotkey: string }) => Promise<CaptureState>;
         toggle: () => Promise<{ outputPath?: string | null }>;
+        addChapter: () => Promise<{ at: string }>;
+        setAutoGameChapters: (enabled: boolean) => Promise<CaptureState>;
         onState: (listener: (state: CaptureState) => void) => () => void;
       };
       obs: {
@@ -89,6 +91,7 @@ declare global {
           password?: string;
           rememberPassword?: boolean;
         }) => Promise<ObsState>;
+        openApp: () => Promise<boolean>;
         clearPassword: () => Promise<boolean>;
         disconnect: () => Promise<ObsState>;
         prepareProfile: (request: {
@@ -145,10 +148,14 @@ declare global {
         ) => () => void;
       };
       recordings: {
-        list: () => Promise<{
+        onChanged: (listener: () => void) => () => void;
+        list: (request?: { analysisScope?: "none" | "move-takes" | "all" }) => Promise<{
           folder: string;
           recordings: RecordedVideo[];
         }>;
+        getChapters: (request: {
+          recordingId: string;
+        }) => Promise<Array<{ startMs: number; title: string }>>;
         openFrameReader: (request: { recordingId: string }) => Promise<{
           sessionId: string;
           frameRate: number;
@@ -163,8 +170,17 @@ declare global {
           startTime: number;
           endTime: number;
         }) => Promise<RecordedVideo>;
+        createF10Clips: (request: { recordingId: string }) => Promise<{
+          total: number;
+          created: number;
+          alreadyExisting: number;
+          failures: Array<{ chapterStartMs: number; error: string }>;
+        }>;
         renameRecording: (request: { recordingId: string; name: string }) => Promise<RecordedVideo>;
         reprocessName: (request: { recordingId: string }) => Promise<RecordedVideo>;
+        addGameChapters: (request: {
+          recordingId: string;
+        }) => Promise<{ added: number; skipped: string[]; backupPath: string | null }>;
         openYouTubeStudio: (request: { recordingId: string }) => Promise<void>;
         setTags: (request: { recordingId: string; tags: RecordingTags }) => Promise<RecordedVideo>;
         saveAnalysis: (request: {
@@ -214,6 +230,11 @@ type CaptureState = {
   hotkeyRegistered: boolean;
   lastAction: "started" | "stopped" | null;
   error: string | null;
+  chapterHotkey: string;
+  chapterHotkeyRegistered: boolean;
+  chapterLastAddedAt: string | null;
+  chapterError: string | null;
+  autoGameChapters: boolean;
 };
 
 type UpdateStatus = {
@@ -234,7 +255,7 @@ function ReplayFolderPicker({
   rankAffectingOnly,
   onRankAffectingOnlyChange,
 }: {
-  onData: (games: ReplayRow[], counts: Record<string, number>) => void;
+  onData: (games: ReplayRow[], counts: Record<string, number>, folder: string) => void;
   dateFrom: string;
   dateTo: string;
   invalidDateRange: boolean;
@@ -266,7 +287,7 @@ function ReplayFolderPicker({
       try {
         const result = await window.electronAPI.replays.scanFolder(selectedFolder);
         if (generation !== scanGeneration.current) return;
-        onData(result.games, result.playerCounts);
+        onData(result.games, result.playerCounts, selectedFolder);
         setDuplicateCount(result.duplicateCount);
         const scannedCount = result.games.length + result.duplicateCount;
         setProgress({ completed: scannedCount, total: scannedCount, phase: "scanning" });
@@ -541,8 +562,15 @@ function UpdateStatusBanner({
   );
 }
 
-function ReplayAnalysis() {
+function ReplayAnalysis({
+  active,
+  recordingsRefreshToken,
+}: {
+  active: boolean;
+  recordingsRefreshToken: number;
+}) {
   const [games, setGames] = useState<ReplayRow[]>([]);
+  const [replayFolder, setReplayFolder] = useState<string | null>(null);
   const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
   const [overridePlayer, setOverridePlayer] = useState<string | null>(null);
   const [rankedOnly, setRankedOnly] = useState(false);
@@ -556,13 +584,17 @@ function ReplayAnalysis() {
     winRate: 0,
   });
   const [isGridPending, startGridTransition] = useTransition();
-  const onData = useCallback((nextGames: ReplayRow[], counts: Record<string, number>) => {
-    startGridTransition(() => {
-      setGames(nextGames);
-      setPlayerCounts(counts);
-      setOverridePlayer(null);
-    });
-  }, []);
+  const onData = useCallback(
+    (nextGames: ReplayRow[], counts: Record<string, number>, folder: string) => {
+      startGridTransition(() => {
+        setGames(nextGames);
+        setReplayFolder(folder);
+        setPlayerCounts(counts);
+        setOverridePlayer(null);
+      });
+    },
+    [],
+  );
   const deferredGames = useDeferredValue(games);
   const isGridStale = deferredGames !== games;
   const isPreparingGrid = isGridPending || isGridStale;
@@ -692,6 +724,9 @@ function ReplayAnalysis() {
       </Stack>
       <AvatarGrid
         rowData={relevantGames}
+        replayFolder={replayFolder}
+        active={active}
+        recordingsRefreshToken={recordingsRefreshToken}
         playerOfInterest={playerOfInterest}
         dateFrom={dateFrom}
         dateTo={dateTo}
@@ -755,6 +790,8 @@ function App() {
     previousRecordingActive.current = obsState.recording.active;
   }, [obsState.recording.active, refreshRecordings]);
 
+  useEffect(() => window.electronAPI?.recordings.onChanged(refreshRecordings), [refreshRecordings]);
+
   useEffect(() => {
     const showRecordings = () => {
       if (recordingTabAvailable) changeTab(recordingsTabIndex);
@@ -813,7 +850,7 @@ function App() {
       </Dialog>
       {mountedTabs.replay && (
         <Box sx={{ display: tab === 0 ? "block" : "none" }}>
-          <ReplayAnalysis />
+          <ReplayAnalysis active={tab === 0} recordingsRefreshToken={recordingsRefreshToken} />
         </Box>
       )}
       {recordingTabAvailable && mountedTabs.recordings && (

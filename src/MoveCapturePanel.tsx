@@ -205,7 +205,7 @@ export function MoveCapturePanel() {
     if (!window.electronAPI?.recordings) return null;
     setEvidenceLoading(true);
     try {
-      const result = await window.electronAPI.recordings.list();
+      const result = await window.electronAPI.recordings.list({ analysisScope: "move-takes" });
       setAllRecordings(result.recordings);
       return result.recordings;
     } catch (loadError) {

@@ -18,6 +18,7 @@ export type RecordingClipMetadata = {
   startTime: number;
   endTime: number;
   createdAt: string | null;
+  manualChapterStartMs?: number;
 };
 
 export type RecordingCaptureMetadata = {

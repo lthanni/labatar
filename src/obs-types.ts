@@ -63,6 +63,7 @@ export type ObsAutomationState = {
   currentMatch: {
     matchId: string;
     lobbyId: string | null;
+    mode: "ranked" | "casual" | null;
     logTime: string | null;
     startedAt: string;
     player1: DetectedPlayer | null;
