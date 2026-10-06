@@ -100,6 +100,10 @@ function parseLobbyEvent(line) {
   if (finalized) return { type: "finalized", lobbyId: finalized[1] };
   const joined = line.match(/Joined meetup lobby,\s*setting currentMeetupLobbyIdHash to\s*(\d+)/i);
   if (joined) return { type: "joined", lobbyId: joined[1] };
+  // Public-lobby fights do not emit the XMatch/meetup events above. The fight
+  // lobby is adopted once and retained through rematches until Steam leaves it.
+  const adopted = line.match(/Adopting already joined lobby:\s*(\d+)\s+with gamemode\s+\w+/i);
+  if (adopted) return { type: "adopted", lobbyId: adopted[1] };
   const leaving = line.match(/Steam:\s*Leaving lobby\s*(\d+)/i);
   if (leaving) return { type: "left", lobbyId: leaving[1] };
   if (
@@ -138,6 +142,7 @@ class MatchLogWatcher {
     this.offset = 0;
     this.lineBuffer = "";
     this.currentMatch = null;
+    this.replayMatchId = null;
     this.setNumber = 0;
     this.gameNumber = 0;
     this.lobbyId = null;
@@ -146,6 +151,7 @@ class MatchLogWatcher {
     this.lastReplayPath = null;
     this.status = "disabled";
     this.error = null;
+    this.lastEmittedSnapshot = null;
   }
 
   diagnostic(event, details = {}) {
@@ -167,7 +173,12 @@ class MatchLogWatcher {
   }
 
   emit() {
-    this.onState?.(this.snapshot());
+    if (!this.onState) return;
+    const snapshot = this.snapshot();
+    const serialized = JSON.stringify(snapshot);
+    if (serialized === this.lastEmittedSnapshot) return;
+    this.lastEmittedSnapshot = serialized;
+    this.onState(snapshot);
   }
 
   async findNewestLog(logsDirectory) {
@@ -192,14 +203,16 @@ class MatchLogWatcher {
       await handle.close();
     }
     let currentMatch = null;
-    for (const line of buffer.toString("latin1").split(/\r?\n/)) {
+    const lines = buffer.toString("latin1").split(/\r?\n/);
+    if (tailSize < size) lines.shift(); // The tail can begin in the middle of a log line.
+    for (const line of lines) {
       this.observeLobbyEvent(parseLobbyEvent(line));
-      if (/EndMatch:\s*Match ended/i.test(line)) {
+      if (parseMatchEndReason(line)) {
         currentMatch = null;
         continue;
       }
       currentMatch = updateMatchFromLine(currentMatch, line);
-      if (currentMatch?.lobbyId == null) currentMatch.lobbyId = this.lobbyId;
+      if (currentMatch && currentMatch.lobbyId == null) currentMatch.lobbyId = this.lobbyId;
     }
     this.currentMatch = currentMatch;
     this.offset = size;
@@ -214,13 +227,21 @@ class MatchLogWatcher {
     const stat = await fs.promises.stat(filePath);
     this.logPath = filePath;
     this.currentMatch = null;
+    this.replayMatchId = null;
     this.lastReplayPath = null;
     this.setNumber = 0;
     this.gameNumber = 0;
     this.lobbyId = null;
     this.numberedSetKey = null;
     this.numberedMatchId = null;
-    await this.primeCurrentFile(filePath, stat.size);
+    if (Date.now() - stat.mtimeMs > 120_000) {
+      // An old log is history, not evidence that its final match is still live.
+      this.offset = stat.size;
+      this.lineBuffer = "";
+      this.diagnostic("stale-log-skipped", { ageMs: Date.now() - stat.mtimeMs });
+    } else {
+      await this.primeCurrentFile(filePath, stat.size);
+    }
     this.diagnostic("log-switched", { filePath, size: stat.size });
     this.emit();
   }
@@ -246,6 +267,7 @@ class MatchLogWatcher {
     const endReason = parseMatchEndReason(line);
     if (nextMatch && nextMatch.lobbyId == null) nextMatch.lobbyId = this.lobbyId;
     if (nextMatch !== this.currentMatch && nextMatch?.matchId) {
+      this.replayMatchId = null;
       this.diagnostic("match-detected", {
         matchId: nextMatch.matchId,
         logTime: nextMatch.logTime,
@@ -274,6 +296,7 @@ class MatchLogWatcher {
       if (endReason) {
         const completedMatch = this.currentMatch;
         this.currentMatch = null;
+        this.replayMatchId = completedMatch.matchId;
         this.diagnostic("match-end-handler-start", {
           matchId: completedMatch.matchId,
           logTime: completedMatch.logTime,
@@ -298,8 +321,10 @@ class MatchLogWatcher {
     const replayPath = parseReplayPath(line);
     if (replayPath) {
       this.lastReplayPath = replayPath;
-      this.diagnostic("replay-detected", { replayPath, logTime: parseLogTime(line) });
-      await this.onReplaySaved?.(replayPath);
+      const matchId = this.replayMatchId;
+      this.replayMatchId = null;
+      this.diagnostic("replay-detected", { replayPath, matchId, logTime: parseLogTime(line) });
+      await this.onReplaySaved?.(replayPath, matchId);
       this.emit();
     }
   }
@@ -360,7 +385,10 @@ class MatchLogWatcher {
     const previousLobbyId = this.lobbyId;
     if (event.type === "left") {
       const matchesCurrentLobby = !event.lobbyId || !this.lobbyId || event.lobbyId === this.lobbyId;
-      if (matchesCurrentLobby) this.lobbyId = null;
+      if (matchesCurrentLobby) {
+        this.lobbyId = null;
+        this.replayMatchId = null;
+      }
       this.diagnostic("lobby-left", {
         eventLobbyId: event.lobbyId,
         lobbyId: this.lobbyId,
@@ -371,6 +399,7 @@ class MatchLogWatcher {
     }
     const changed = Boolean(this.lobbyId && this.lobbyId !== event.lobbyId);
     if (changed) {
+      this.replayMatchId = null;
       this.diagnostic("lobby-changed", {
         previousLobbyId,
         lobbyId: event.lobbyId,
@@ -476,6 +505,7 @@ class MatchLogWatcher {
     this.offset = 0;
     this.lineBuffer = "";
     this.currentMatch = null;
+    this.replayMatchId = null;
     this.lobbyId = null;
     this.emit();
     return this.snapshot();
