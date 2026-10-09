@@ -68,9 +68,13 @@ export function ObsRecordingPanel() {
   const displayedError = error ?? state.error ?? state.automation.error;
   const [captureState, setCaptureState] = useState<CaptureState | null>(null);
   const [captureHotkey, setCaptureHotkey] = useState("F9");
+  const [chapterHotkey, setChapterHotkey] = useState("F10");
   const [captureBusy, setCaptureBusy] = useState(false);
+  const [chapterShortcutBusy, setChapterShortcutBusy] = useState(false);
   const [captureNotice, setCaptureNotice] = useState<string | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [chapterShortcutNotice, setChapterShortcutNotice] = useState<string | null>(null);
+  const [chapterShortcutError, setChapterShortcutError] = useState<string | null>(null);
   const [chapterBusy, setChapterBusy] = useState(false);
   const [gameChapterBusy, setGameChapterBusy] = useState(false);
   const [gameChapterError, setGameChapterError] = useState<string | null>(null);
@@ -94,11 +98,13 @@ export function ObsRecordingPanel() {
       if (!active) return;
       setCaptureState(nextState);
       setCaptureHotkey(nextState.hotkey);
+      setChapterHotkey(nextState.chapterHotkey);
     });
     void window.electronAPI.capture.getState().then((nextState) => {
       if (!active) return;
       setCaptureState(nextState);
       setCaptureHotkey(nextState.hotkey);
+      setChapterHotkey(nextState.chapterHotkey);
     });
     return () => {
       active = false;
@@ -135,6 +141,27 @@ export function ObsRecordingPanel() {
       // The capture state displays the OBS error sent by the main process.
     } finally {
       setChapterBusy(false);
+    }
+  };
+
+  const saveChapterShortcut = async () => {
+    if (!window.electronAPI?.capture) return;
+    setChapterShortcutBusy(true);
+    setChapterShortcutNotice(null);
+    setChapterShortcutError(null);
+    try {
+      const nextState = await window.electronAPI.capture.setChapterSettings({
+        hotkey: chapterHotkey,
+      });
+      setCaptureState(nextState);
+      setChapterHotkey(nextState.chapterHotkey);
+      setChapterShortcutNotice(
+        `Recording chapter shortcut ${nextState.chapterHotkey} ${nextState.chapterHotkeyRegistered ? "registered" : "not registered"}.`,
+      );
+    } catch (saveError) {
+      setChapterShortcutError(saveError instanceof Error ? saveError.message : String(saveError));
+    } finally {
+      setChapterShortcutBusy(false);
     }
   };
 
@@ -378,15 +405,38 @@ export function ObsRecordingPanel() {
           <Box sx={{ borderTop: 1, borderColor: "divider", pt: 2 }}>
             <Typography variant="subtitle2">Recording chapter marker</Typography>
             <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1 }}>
-              Press F10 while recording, even when Labatar is not focused, to add an unnamed chapter
-              directly to the OBS Hybrid MP4. OBS saves chapters when the recording stops.
+              Use this global shortcut while recording, even when Labatar is not focused, to add an
+              unnamed chapter directly to the OBS Hybrid MP4. OBS saves chapters when the recording
+              stops.
             </Typography>
+            <Stack
+              direction={{ xs: "column", md: "row" }}
+              spacing={1}
+              sx={{ alignItems: "center", mb: 1 }}
+            >
+              <TextField
+                label="Chapter shortcut"
+                size="small"
+                value={chapterHotkey}
+                onChange={(event) => setChapterHotkey(event.target.value)}
+                disabled={chapterShortcutBusy || recording}
+                helperText="Examples: F10 or CommandOrControl+Shift+C"
+                sx={{ minWidth: 260 }}
+              />
+              <Button
+                variant="outlined"
+                onClick={() => void saveChapterShortcut()}
+                disabled={chapterShortcutBusy || recording}
+              >
+                Save shortcut
+              </Button>
+            </Stack>
             <Button
               variant="outlined"
               onClick={() => void addChapter()}
               disabled={!connected || !recording || state.recording.paused || chapterBusy}
             >
-              Add chapter marker (F10)
+              Add chapter marker ({captureState?.chapterHotkey ?? "F10"})
             </Button>
             <Typography
               variant="caption"
@@ -395,9 +445,19 @@ export function ObsRecordingPanel() {
               sx={{ mt: 1 }}
             >
               {captureState
-                ? `F10: ${captureState.chapterHotkeyRegistered ? "registered" : "not registered"}`
+                ? `${captureState.chapterHotkey}: ${captureState.chapterHotkeyRegistered ? "registered" : "not registered"}`
                 : "Loading chapter shortcut status..."}
             </Typography>
+            {chapterShortcutNotice && (
+              <Alert severity="success" sx={{ mt: 1 }}>
+                {chapterShortcutNotice}
+              </Alert>
+            )}
+            {chapterShortcutError && (
+              <Alert severity="error" sx={{ mt: 1 }}>
+                {chapterShortcutError}
+              </Alert>
+            )}
             {captureState?.chapterLastAddedAt && recording && (
               <Alert severity="success" sx={{ mt: 1 }}>
                 OBS accepted a chapter marker at{" "}

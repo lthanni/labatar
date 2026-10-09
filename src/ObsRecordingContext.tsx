@@ -500,8 +500,8 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
               ? "Disconnect OBS"
               : "Connect to OBS"}
         </Button>
-        <Tooltip title="OBS settings">
-          <IconButton size="small" aria-label="OBS settings" onClick={onOpenSettings}>
+        <Tooltip title="Settings">
+          <IconButton size="small" aria-label="Settings" onClick={onOpenSettings}>
             <SettingsIcon fontSize="small" />
           </IconButton>
         </Tooltip>

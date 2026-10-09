@@ -5,7 +5,6 @@ import {
   CardContent,
   Checkbox,
   FormControl,
-  FormControlLabel,
   InputLabel,
   ListItemText,
   MenuItem,
@@ -27,11 +26,23 @@ import {
   YAxis,
 } from "recharts";
 import type { ReplayRow } from "./AvatarGrid";
+import supportMap from "../electron/support-map.json";
+
+const ENABLE_OPPONENT_WIN_RATE_CHART = false;
 
 type AnalyticsSectionProps = {
+  fillHeight?: boolean;
+  tableContent: ReactNode;
   games: ReplayRow[];
   sessions: Array<{ games: ReplayRow[] }>;
+  getPortrait: (
+    character: string,
+    support: string,
+  ) => { portraitUrl: string | null; supportUrl: string | null } | undefined;
   playerOfInterest: string | null;
+  playerCounts: Record<string, number>;
+  playerOverride: string | null;
+  onPlayerOverrideChange: (value: string | null) => void;
   dateFrom: string;
   dateTo: string;
   invalidDateRange: boolean;
@@ -71,7 +82,7 @@ type TimelineRow = {
 type MatchupStats = { games: number; wins: number; losses: number };
 type SupportStats = { name: string; games: number };
 
-const OPPONENT_CHARACTER_ROSTER = [
+export const OPPONENT_CHARACTER_ROSTER = [
   "Aang",
   "Korra",
   "Nightmare Korra",
@@ -93,6 +104,7 @@ function displayCharacterName(name: string) {
 type MatchupData = {
   rows: string[];
   columns: string[];
+  playerCharacterCounts: Map<string, number>;
   opponentCharacterCounts: Map<string, number>;
   supportsByCharacter: Map<string, SupportStats[]>;
   supportsByOpponentCharacter: Map<string, SupportStats[]>;
@@ -172,7 +184,7 @@ function localDateKey(date: Date) {
     .join("-");
 }
 
-function isInDateRange(game: ReplayRow, dateFrom: string, dateTo: string) {
+export function isInDateRange(game: ReplayRow, dateFrom: string, dateTo: string) {
   if (!dateFrom && !dateTo) return true;
   const date = parseTimestamp(game.timestamp);
   if (!date) return false;
@@ -295,6 +307,7 @@ function buildMatchupData(games: ReplayRow[], poi: string): MatchupData {
             : OPPONENT_CHARACTER_ROSTER.length) ||
         left.localeCompare(right),
     ),
+    playerCharacterCounts: rowCounts,
     opponentCharacterCounts: columnCounts,
     supportsByCharacter: new Map(
       [...supportCounts.entries()].map(([character, supports]) => [
@@ -319,37 +332,38 @@ function buildMatchupData(games: ReplayRow[], poi: string): MatchupData {
 function ChartPanel({
   title,
   subtitle,
-  headerAction,
   children,
   height = 270,
 }: {
-  title: string;
+  title?: string;
   subtitle?: string;
-  headerAction?: ReactNode;
   children: ReactNode;
   height?: number | string;
 }) {
   return (
     <Card variant="outlined" sx={{ minWidth: 0 }}>
       <CardContent>
-        <Stack
-          direction={{ xs: "column", sm: "row" }}
-          spacing={1}
-          sx={{ alignItems: { sm: "flex-start" }, justifyContent: "flex-start" }}
-        >
-          <Box sx={{ minWidth: 0 }}>
-            <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-              {title}
-            </Typography>
-            {subtitle && (
-              <Typography variant="caption" color="text.secondary">
-                {subtitle}
-              </Typography>
-            )}
-          </Box>
-          {headerAction}
-        </Stack>
-        <Box sx={{ width: "100%", height, mt: 1 }}>{children}</Box>
+        {(title || subtitle) && (
+          <Stack
+            direction={{ xs: "column", sm: "row" }}
+            spacing={1}
+            sx={{ alignItems: { sm: "flex-start" }, justifyContent: "flex-start" }}
+          >
+            <Box sx={{ minWidth: 0 }}>
+              {title && (
+                <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                  {title}
+                </Typography>
+              )}
+              {subtitle && (
+                <Typography variant="caption" color="text.secondary">
+                  {subtitle}
+                </Typography>
+              )}
+            </Box>
+          </Stack>
+        )}
+        <Box sx={{ width: "100%", height, mt: title || subtitle ? 1 : 0 }}>{children}</Box>
       </CardContent>
     </Card>
   );
@@ -397,25 +411,145 @@ function MultiSelectFilter({
   );
 }
 
+const SUPPORT_SLOTS = [1, 2, 3] as const;
+const supportNamesByCharacter = supportMap as Record<string, Record<string, string>>;
+
+export function supportFilters(character: string, supports: SupportStats[]) {
+  const used = new Set<string>();
+  const slots = SUPPORT_SLOTS.map((slot) => {
+    const mappedName = supportNamesByCharacter[character]?.[String(slot)] ?? `Support #${slot}`;
+    const support =
+      supports.find(({ name }) => name.toLowerCase() === mappedName.toLowerCase()) ??
+      supports.find(({ name }) => name.toLowerCase() === `support #${slot}`);
+    if (support) used.add(support.name);
+    return { slot, name: support?.name ?? mappedName, games: support?.games ?? 0 };
+  });
+  return { slots, extra: supports.filter(({ name }) => !used.has(name)) };
+}
+
+function PortraitFilterButton({
+  label,
+  count,
+  src,
+  fallback,
+  selected,
+  onClick,
+  size,
+  disabled = false,
+}: {
+  label: string;
+  count: number;
+  src: string | null;
+  fallback: string;
+  selected: boolean;
+  onClick: () => void;
+  size: number;
+  disabled?: boolean;
+}) {
+  const inactive = disabled || count === 0;
+  const active = selected && !inactive;
+  return (
+    <Box
+      component="button"
+      type="button"
+      aria-label={`${label}: ${count} ${count === 1 ? "game" : "games"}`}
+      aria-pressed={active}
+      title={`${label} (${count})`}
+      disabled={inactive}
+      onClick={onClick}
+      sx={{
+        width: size + 8,
+        flexShrink: 0,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 0.25,
+        p: 0.25,
+        color: "text.primary",
+        bgcolor: active ? "action.selected" : "background.default",
+        border: "1px solid",
+        borderColor: active ? "primary.main" : "grey.800",
+        borderRadius: 1,
+        cursor: inactive ? "default" : "pointer",
+        "&:hover": inactive ? undefined : { borderColor: "primary.light" },
+        "&:focus-visible": { outline: "2px solid", outlineColor: "primary.light" },
+      }}
+    >
+      {src ? (
+        <Box
+          component="img"
+          src={src}
+          alt=""
+          loading="lazy"
+          sx={{
+            width: size,
+            height: size,
+            objectFit: "contain",
+            filter: active ? "none" : "grayscale(1)",
+            opacity: active ? 1 : 0.5,
+          }}
+        />
+      ) : (
+        <Box
+          sx={{
+            width: size,
+            height: size,
+            display: "grid",
+            placeItems: "center",
+            textAlign: "center",
+            fontSize: "0.65rem",
+            lineHeight: 1.1,
+            overflow: "hidden",
+            opacity: active ? 1 : 0.5,
+          }}
+        >
+          {fallback}
+        </Box>
+      )}
+      <Typography component="span" variant="caption" sx={{ lineHeight: 1 }}>
+        {count}
+      </Typography>
+    </Box>
+  );
+}
+
 function MatchupHeatmap({
   data,
+  getPortrait,
+  playerOfInterest,
+  playerCounts,
+  playerOverride,
+  onPlayerOverrideChange,
+  opponentPlayers,
+  selectedOpponentPlayers,
+  onOpponentPlayersChange,
   disabledMatchups,
   disabledOpponentCharacters,
   disabledOpponentSupports,
   disabledPoiSupports,
   onToggle,
   onToggleOpponentCharacter,
+  onToggleAllOpponentCharacters,
   onToggleOpponentSupport,
   onToggleRow,
   onTogglePoiSupport,
 }: {
   data: MatchupData;
+  getPortrait: AnalyticsSectionProps["getPortrait"];
+  playerOfInterest: string | null;
+  playerCounts: Record<string, number>;
+  playerOverride: string | null;
+  onPlayerOverrideChange: (value: string | null) => void;
+  opponentPlayers: string[];
+  selectedOpponentPlayers: string[];
+  onOpponentPlayersChange: (value: string[]) => void;
   disabledMatchups: Set<string>;
   disabledOpponentCharacters: Set<string>;
   disabledOpponentSupports: Set<string>;
   disabledPoiSupports: Set<string>;
   onToggle: (key: string) => void;
   onToggleOpponentCharacter: (value: string) => void;
+  onToggleAllOpponentCharacters: (selectAll: boolean) => void;
   onToggleOpponentSupport: (value: string) => void;
   onToggleRow: (row: string, selectAll: boolean) => void;
   onTogglePoiSupport: (value: string) => void;
@@ -423,94 +557,170 @@ function MatchupHeatmap({
   const {
     rows,
     columns,
+    playerCharacterCounts,
     opponentCharacterCounts,
     supportsByCharacter,
     supportsByOpponentCharacter,
     cells,
   } = data;
-  if (columns.length === 0) return <EmptyChart />;
+  const activeOpponentColumns = columns.filter(
+    (column) => opponentCharacterCounts.get(column) ?? 0,
+  );
+  const allOpponentCharactersSelected =
+    activeOpponentColumns.length > 0 &&
+    activeOpponentColumns.every((column) => !disabledOpponentCharacters.has(column));
+  const corner = (
+    <Box
+      sx={{
+        minWidth: 212,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "flex-start",
+        justifyContent: "space-between",
+        gap: 0.75,
+        p: 0.5,
+        textAlign: "left",
+      }}
+    >
+      <MultiSelectFilter
+        label="Opponent"
+        values={opponentPlayers}
+        selected={selectedOpponentPlayers}
+        onChange={onOpponentPlayersChange}
+      />
+      <FormControl size="small" sx={{ width: "100%", backgroundColor: "background.paper" }}>
+        <InputLabel id="matchup-player-label" shrink>
+          Player
+        </InputLabel>
+        <Select
+          labelId="matchup-player-label"
+          label="Player"
+          value={playerOverride ?? ""}
+          displayEmpty
+          renderValue={(selected) =>
+            selected || (playerOfInterest ? `${playerOfInterest} (auto)` : "Auto-detected")
+          }
+          onChange={(event) => onPlayerOverrideChange(event.target.value || null)}
+        >
+          <MenuItem value="">Auto-detected</MenuItem>
+          {Object.entries(playerCounts)
+            .sort((a, b) => b[1] - a[1])
+            .map(([name, count]) => (
+              <MenuItem key={name} value={name}>
+                {name} ({count})
+              </MenuItem>
+            ))}
+        </Select>
+      </FormControl>
+    </Box>
+  );
+  if (columns.length === 0) {
+    return (
+      <Box sx={{ display: "flex", height: "100%", gap: 2 }}>
+        {corner}
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <EmptyChart />
+        </Box>
+      </Box>
+    );
+  }
   return (
     <Box sx={{ overflowX: "auto", overflowY: rows.length > 1 ? "auto" : "hidden", height: "100%" }}>
       <Box
         sx={{
           display: "grid",
-          gridTemplateColumns: `max-content repeat(${columns.length}, minmax(110px, 1fr))`,
-          minWidth: 620,
+          gridTemplateColumns: `212px 56px repeat(${columns.length}, 160px)`,
           gap: 0.5,
         }}
       >
+        {corner}
         <Box
+          component="button"
+          type="button"
+          disabled={activeOpponentColumns.length === 0}
+          aria-label={
+            allOpponentCharactersSelected
+              ? "Deselect all opponent characters"
+              : "Select all opponent characters"
+          }
+          aria-pressed={allOpponentCharactersSelected}
+          title={
+            allOpponentCharactersSelected
+              ? "Deselect all opponent characters"
+              : "Select all opponent characters"
+          }
+          onClick={() => onToggleAllOpponentCharacters(!allOpponentCharactersSelected)}
           sx={{
-            minWidth: 190,
-            display: "flex",
-            alignItems: "flex-end",
-            justifyContent: "flex-end",
-            pb: 0.5,
-            pr: 0.5,
-            textAlign: "right",
+            width: "100%",
+            height: "100%",
+            minHeight: 42,
+            p: 0,
+            border: "1px solid",
+            borderColor: allOpponentCharactersSelected ? "grey.700" : "grey.900",
+            borderRadius: 1,
+            bgcolor: allOpponentCharactersSelected ? "background.paper" : "#424242",
+            cursor: activeOpponentColumns.length ? "pointer" : "default",
+            "&:hover": activeOpponentColumns.length ? { filter: "brightness(1.15)" } : undefined,
+            "&:focus-visible": { outline: "2px solid", outlineColor: "primary.light" },
           }}
-        >
-          <Typography variant="caption" color="text.secondary">
-            Player character
-          </Typography>
-        </Box>
+        />
         {columns.map((column) => {
           const supports = supportsByOpponentCharacter.get(column) ?? [];
+          const supportOptions = supportFilters(column, supports);
           const games = opponentCharacterCounts.get(column) ?? 0;
           const displayColumn = displayCharacterName(column);
           const columnDisabled = disabledOpponentCharacters.has(column);
           return (
-            <Card
-              key={column}
-              variant="outlined"
-              aria-pressed={!columnDisabled}
-              onClick={() => onToggleOpponentCharacter(column)}
-              sx={{
-                minWidth: 110,
-                cursor: "pointer",
-                backgroundColor: columnDisabled ? "#424242" : "background.paper",
-                "&:hover": { filter: "brightness(1.15)" },
-              }}
-            >
-              <CardContent sx={{ py: 0.5, "&:last-child": { pb: 0.5 } }}>
-                <Typography
-                  variant="body2"
-                  sx={{ fontWeight: 600 }}
-                  noWrap
-                  title={`${displayColumn} (${games})`}
-                >
-                  {displayColumn} ({games})
-                </Typography>
-                <Stack sx={{ ml: 1 }}>
-                  {supports.map((support) => {
-                    const supportKey = getPoiSupportKey(column, support.name);
-                    return (
-                      <FormControlLabel
-                        key={supportKey}
-                        label={`${support.name} (${support.games})`}
-                        disabled={columnDisabled}
-                        sx={{
-                          m: 0,
-                          justifyContent: "flex-start",
-                          width: "100%",
-                          "& .MuiCheckbox-root": { p: 0.25 },
-                          "& .MuiFormControlLabel-label": {
-                            fontSize: "0.67rem",
-                            lineHeight: 1.15,
-                          },
-                        }}
-                        onClick={(event) => event.stopPropagation()}
-                        control={
-                          <Checkbox
-                            size="small"
-                            checked={!disabledOpponentSupports.has(supportKey)}
-                            onClick={(event) => event.stopPropagation()}
-                            onChange={() => onToggleOpponentSupport(supportKey)}
+            <Card key={column} variant="outlined" sx={{ minWidth: 160 }}>
+              <CardContent sx={{ p: 0.5, "&:last-child": { pb: 0.5 } }}>
+                <Stack spacing={0.5} sx={{ alignItems: "center" }}>
+                  <PortraitFilterButton
+                    label={column}
+                    count={games}
+                    src={getPortrait(column, "Support #1")?.portraitUrl ?? null}
+                    fallback={displayColumn}
+                    selected={!columnDisabled}
+                    onClick={() => onToggleOpponentCharacter(column)}
+                    size={54}
+                  />
+                  <Stack direction="row" spacing={0.25}>
+                    {supportOptions.slots.map((support) => {
+                      const supportKey = getPoiSupportKey(column, support.name);
+                      return (
+                        <PortraitFilterButton
+                          key={support.slot}
+                          label={`${column} / ${support.name}`}
+                          count={support.games}
+                          src={getPortrait(column, `Support #${support.slot}`)?.supportUrl ?? null}
+                          fallback={`#${support.slot}`}
+                          selected={!columnDisabled && !disabledOpponentSupports.has(supportKey)}
+                          disabled={columnDisabled}
+                          onClick={() => onToggleOpponentSupport(supportKey)}
+                          size={36}
+                        />
+                      );
+                    })}
+                  </Stack>
+                  {supportOptions.extra.length > 0 && (
+                    <Stack direction="row" spacing={0.25} sx={{ flexWrap: "wrap" }}>
+                      {supportOptions.extra.map((support) => {
+                        const supportKey = getPoiSupportKey(column, support.name);
+                        return (
+                          <PortraitFilterButton
+                            key={supportKey}
+                            label={`${column} / ${support.name}`}
+                            count={support.games}
+                            src={null}
+                            fallback={support.name}
+                            selected={!columnDisabled && !disabledOpponentSupports.has(supportKey)}
+                            disabled={columnDisabled}
+                            onClick={() => onToggleOpponentSupport(supportKey)}
+                            size={36}
                           />
-                        }
-                      />
-                    );
-                  })}
+                        );
+                      })}
+                    </Stack>
+                  )}
                 </Stack>
               </CardContent>
             </Card>
@@ -518,6 +728,7 @@ function MatchupHeatmap({
         })}
         {rows.map((row) => {
           const supports = supportsByCharacter.get(row) ?? [];
+          const supportOptions = supportFilters(row, supports);
           const rowCells = columns
             .map((column) => {
               const key = `${row}\u0000${column}`;
@@ -525,57 +736,100 @@ function MatchupHeatmap({
             })
             .filter((entry): entry is { key: string; cell: MatchupStats } => Boolean(entry.cell));
           const rowKeys = rowCells.map(({ key }) => key);
-          const rowSelected = rowKeys.every((key) => !disabledMatchups.has(key));
+          const rowSelected = rowKeys.some((key) => !disabledMatchups.has(key));
+          const rowWins = rowCells.reduce((total, { cell }) => total + cell.wins, 0);
+          const rowLosses = rowCells.reduce((total, { cell }) => total + cell.losses, 0);
+          const overallRate = rowWins + rowLosses > 0 ? getWinRate(rowWins, rowLosses) : null;
+          const rateColor =
+            overallRate === null
+              ? "rgba(255,255,255,0.04)"
+              : overallRate >= 50
+                ? "144,202,249"
+                : "239,154,154";
+          const rateOpacity = overallRate === null ? 1 : 0.2 + Math.abs(overallRate - 50) / 100;
           return (
             <Fragment key={row}>
-              <Card
-                variant="outlined"
-                aria-pressed={rowSelected}
-                onClick={() => onToggleRow(row, !rowSelected)}
-                sx={{
-                  minWidth: 190,
-                  cursor: "pointer",
-                  backgroundColor: rowSelected ? "background.paper" : "#424242",
-                  "&:hover": { filter: "brightness(1.15)" },
-                }}
-              >
-                <CardContent sx={{ py: 0.5, "&:last-child": { pb: 0.5 } }}>
-                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                    {displayCharacterName(row)}
-                  </Typography>
-                  <Stack sx={{ ml: 1 }}>
-                    {supports.map((support) => {
-                      const supportKey = getPoiSupportKey(row, support.name);
-                      return (
-                        <FormControlLabel
-                          key={supportKey}
-                          label={`${support.name} (${support.games})`}
-                          sx={{
-                            m: 0,
-                            justifyContent: "flex-start",
-                            width: "100%",
-                            "& .MuiCheckbox-root": { p: 0.25 },
-                            "& .MuiFormControlLabel-label": {
-                              fontSize: "0.67rem",
-                              lineHeight: 1.15,
-                            },
-                          }}
-                          onClick={(event) => event.stopPropagation()}
-                          control={
-                            <Checkbox
-                              size="small"
-                              sx={{ p: 0.25 }}
-                              checked={!disabledPoiSupports.has(supportKey)}
-                              onClick={(event) => event.stopPropagation()}
-                              onChange={() => onTogglePoiSupport(supportKey)}
+              <Card variant="outlined" sx={{ minWidth: 212 }}>
+                <CardContent sx={{ p: 0.5, "&:last-child": { pb: 0.5 } }}>
+                  <Stack spacing={0.25}>
+                    <Stack direction="row" spacing={0.25} sx={{ alignItems: "center" }}>
+                      <PortraitFilterButton
+                        label={row}
+                        count={playerCharacterCounts.get(row) ?? 0}
+                        src={getPortrait(row, "Support #1")?.portraitUrl ?? null}
+                        fallback={displayCharacterName(row)}
+                        selected={rowSelected}
+                        onClick={() => onToggleRow(row, !rowSelected)}
+                        size={48}
+                      />
+                      {supportOptions.slots.map((support) => {
+                        const supportKey = getPoiSupportKey(row, support.name);
+                        return (
+                          <PortraitFilterButton
+                            key={support.slot}
+                            label={`${row} / ${support.name}`}
+                            count={support.games}
+                            src={getPortrait(row, `Support #${support.slot}`)?.supportUrl ?? null}
+                            fallback={`#${support.slot}`}
+                            selected={rowSelected && !disabledPoiSupports.has(supportKey)}
+                            disabled={!rowSelected}
+                            onClick={() => onTogglePoiSupport(supportKey)}
+                            size={36}
+                          />
+                        );
+                      })}
+                    </Stack>
+                    {supportOptions.extra.length > 0 && (
+                      <Stack direction="row" spacing={0.25} sx={{ flexWrap: "wrap" }}>
+                        {supportOptions.extra.map((support) => {
+                          const supportKey = getPoiSupportKey(row, support.name);
+                          return (
+                            <PortraitFilterButton
+                              key={supportKey}
+                              label={`${row} / ${support.name}`}
+                              count={support.games}
+                              src={null}
+                              fallback={support.name}
+                              selected={rowSelected && !disabledPoiSupports.has(supportKey)}
+                              disabled={!rowSelected}
+                              onClick={() => onTogglePoiSupport(supportKey)}
+                              size={36}
                             />
-                          }
-                        />
-                      );
-                    })}
+                          );
+                        })}
+                      </Stack>
+                    )}
                   </Stack>
                 </CardContent>
               </Card>
+              <Box
+                component="button"
+                type="button"
+                disabled={rowKeys.length === 0}
+                aria-label={`${displayCharacterName(row)} overall win rate: ${overallRate === null ? "no decided games" : `${overallRate}%`}`}
+                aria-pressed={rowSelected}
+                title={`${displayCharacterName(row)} overall: ${overallRate === null ? "no decided games" : `${overallRate}% win rate`} (${rowWins} wins, ${rowLosses} losses). Click to deselect all matchup percentages in this row.`}
+                onClick={() => onToggleRow(row, false)}
+                sx={{
+                  minHeight: 42,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  border: 0,
+                  borderRadius: 0.5,
+                  color: "inherit",
+                  font: "inherit",
+                  p: 0,
+                  backgroundColor: rowSelected ? `rgba(${rateColor}, ${rateOpacity})` : "#424242",
+                  cursor: rowKeys.length ? "pointer" : "default",
+                  "&:hover": rowKeys.length ? { filter: "brightness(1.15)" } : undefined,
+                  "&:focus-visible": { outline: "2px solid", outlineColor: "primary.light" },
+                }}
+              >
+                <Typography variant="caption">
+                  {overallRate === null ? "—" : `${overallRate}%`}
+                </Typography>
+              </Box>
               {columns.map((column) => {
                 const key = `${row}\u0000${column}`;
                 const cell = cells.get(key);
@@ -630,9 +884,15 @@ function MatchupHeatmap({
 }
 
 export function AnalyticsSection({
+  fillHeight = false,
+  tableContent,
   games,
   sessions,
+  getPortrait,
   playerOfInterest,
+  playerCounts,
+  playerOverride,
+  onPlayerOverrideChange,
   dateFrom,
   dateTo,
   invalidDateRange,
@@ -679,6 +939,7 @@ export function AnalyticsSection({
         : {
             rows: [],
             columns: [],
+            playerCharacterCounts: new Map<string, number>(),
             opponentCharacterCounts: new Map<string, number>(),
             supportsByCharacter: new Map<string, SupportStats[]>(),
             supportsByOpponentCharacter: new Map<string, SupportStats[]>(),
@@ -733,6 +994,17 @@ export function AnalyticsSection({
       const next = new Set(current);
       if (next.has(value)) next.delete(value);
       else next.add(value);
+      return next;
+    });
+  };
+  const toggleAllOpponentCharacters = (selectAll: boolean) => {
+    setDisabledOpponentCharacters((current) => {
+      const next = new Set(current);
+      for (const column of matchupData.columns) {
+        if (!matchupData.opponentCharacterCounts.get(column)) continue;
+        if (selectAll) next.delete(column);
+        else next.add(column);
+      }
       return next;
     });
   };
@@ -818,7 +1090,7 @@ export function AnalyticsSection({
   const chartGames = playerOfInterest ? selectedMatchupGames : analysisGames;
   const opponentData = useMemo(
     () =>
-      playerOfInterest
+      ENABLE_OPPONENT_WIN_RATE_CHART && playerOfInterest
         ? buildPerformance(chartGames, playerOfInterest, (game) =>
             getOpponent(game, playerOfInterest),
           )
@@ -829,127 +1101,141 @@ export function AnalyticsSection({
     () => (playerOfInterest ? buildTimeline(chartGames, playerOfInterest) : []),
     [chartGames, playerOfInterest],
   );
-  const maxSupportCount = Math.max(
-    0,
-    ...[...matchupData.supportsByCharacter.values()].map((supports) => supports.length),
-    ...[...matchupData.supportsByOpponentCharacter.values()].map((supports) => supports.length),
-  );
-  const matchupPanelHeight = Math.min(300, Math.max(190, maxSupportCount * 28 + 145));
+  const matchupPanelHeight = Math.min(500, Math.max(320, matchupData.rows.length * 72 + 175));
 
   return (
-    <Stack spacing={2} sx={{ mb: 2, textAlign: "left" }}>
+    <Stack
+      spacing={2}
+      sx={{
+        mb: 2,
+        textAlign: "left",
+        ...(fillHeight && { flex: "1 1 0", minHeight: 0 }),
+      }}
+    >
+      <ChartPanel height={matchupPanelHeight}>
+        <MatchupHeatmap
+          data={matchupData}
+          getPortrait={getPortrait}
+          playerOfInterest={playerOfInterest}
+          playerCounts={playerCounts}
+          playerOverride={playerOverride}
+          onPlayerOverrideChange={onPlayerOverrideChange}
+          opponentPlayers={opponentFilterValues.players}
+          selectedOpponentPlayers={selectedOpponentPlayers}
+          onOpponentPlayersChange={onOpponentPlayersChange}
+          disabledMatchups={disabledMatchups}
+          disabledOpponentCharacters={disabledOpponentCharacters}
+          disabledOpponentSupports={disabledOpponentSupports}
+          disabledPoiSupports={disabledPoiSupports}
+          onToggle={toggleMatchup}
+          onToggleOpponentCharacter={toggleOpponentCharacter}
+          onToggleAllOpponentCharacters={toggleAllOpponentCharacters}
+          onToggleOpponentSupport={toggleOpponentSupport}
+          onToggleRow={toggleMatchupRow}
+          onTogglePoiSupport={togglePoiSupport}
+        />
+      </ChartPanel>
       <Box
         sx={{
           display: "grid",
-          gridTemplateColumns: { xs: "1fr", lg: "repeat(2, minmax(0, 1fr))" },
+          gridTemplateColumns: { xs: "minmax(0, 1fr)", lg: "repeat(2, minmax(0, 1fr))" },
           gap: 2,
+          alignItems: fillHeight ? "stretch" : "start",
+          ...(fillHeight && {
+            flex: "1 1 0",
+            minHeight: 260,
+            overflow: "hidden",
+          }),
         }}
       >
-        <Box sx={{ order: -1, gridColumn: "1 / -1" }}>
+        <Box sx={{ minWidth: 0, minHeight: 0, height: fillHeight ? "100%" : undefined }}>
+          {tableContent}
+        </Box>
+        <Stack
+          spacing={2}
+          sx={{
+            minWidth: 0,
+            minHeight: 0,
+            height: fillHeight ? "100%" : undefined,
+            overflowY: fillHeight ? "auto" : undefined,
+          }}
+        >
           <ChartPanel
-            title="Character matchup"
-            subtitle="Click character cards, supports, or matchup cells to filter the charts below"
-            height={matchupPanelHeight}
-            headerAction={
-              <MultiSelectFilter
-                label="Opponent"
-                values={opponentFilterValues.players}
-                selected={selectedOpponentPlayers}
-                onChange={onOpponentPlayersChange}
-              />
-            }
+            title="Activity, win rate, and MMR"
+            subtitle="Games, win rate, and ranked MMR grouped by week for selected matchups"
           >
-            {playerOfInterest ? (
-              <MatchupHeatmap
-                data={matchupData}
-                disabledMatchups={disabledMatchups}
-                disabledOpponentCharacters={disabledOpponentCharacters}
-                disabledOpponentSupports={disabledOpponentSupports}
-                disabledPoiSupports={disabledPoiSupports}
-                onToggle={toggleMatchup}
-                onToggleOpponentCharacter={toggleOpponentCharacter}
-                onToggleOpponentSupport={toggleOpponentSupport}
-                onToggleRow={toggleMatchupRow}
-                onTogglePoiSupport={togglePoiSupport}
-              />
-            ) : (
+            {timelineData.length === 0 ? (
               <EmptyChart />
+            ) : (
+              <ResponsiveContainer>
+                <LineChart data={timelineData} margin={{ left: 0, right: 12 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="period" minTickGap={28} />
+                  <YAxis
+                    yAxisId="games"
+                    allowDecimals={false}
+                    domain={(domain) => getNormalizedDomain(domain, 0.5, 0)}
+                  />
+                  <YAxis
+                    yAxisId="mmr"
+                    orientation="left"
+                    allowDecimals={false}
+                    domain={(domain) => getNormalizedDomain(domain, 25)}
+                  />
+                  <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" />
+                  <Tooltip />
+                  <Legend />
+                  <ReferenceLine
+                    yAxisId="rate"
+                    y={50}
+                    stroke="#b0bec5"
+                    strokeDasharray="2 4"
+                    label={{ value: "50%", fill: "#b0bec5", position: "insideTopRight" }}
+                  />
+                  <Line
+                    yAxisId="games"
+                    type="monotone"
+                    dataKey="games"
+                    stroke="#80cbc4"
+                    name="Games"
+                  />
+                  <Line
+                    yAxisId="rate"
+                    type="monotone"
+                    dataKey="winRate"
+                    stroke="#ffcc80"
+                    name="Win rate"
+                  />
+                  <Line
+                    yAxisId="mmr"
+                    type="monotone"
+                    dataKey="mmr"
+                    stroke="#90caf9"
+                    name="Ranked MMR"
+                    connectNulls={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
             )}
           </ChartPanel>
-        </Box>
-        <ChartPanel
-          title="Activity, win rate, and MMR"
-          subtitle="Games, win rate, and ranked MMR grouped by week for selected matchups"
-        >
-          {timelineData.length === 0 ? (
-            <EmptyChart />
-          ) : (
-            <ResponsiveContainer>
-              <LineChart data={timelineData} margin={{ left: 0, right: 12 }}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="period" minTickGap={28} />
-                <YAxis
-                  yAxisId="games"
-                  allowDecimals={false}
-                  domain={(domain) => getNormalizedDomain(domain, 0.5, 0)}
-                />
-                <YAxis
-                  yAxisId="mmr"
-                  orientation="left"
-                  allowDecimals={false}
-                  domain={(domain) => getNormalizedDomain(domain, 25)}
-                />
-                <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" />
-                <Tooltip />
-                <Legend />
-                <ReferenceLine
-                  yAxisId="rate"
-                  y={50}
-                  stroke="#b0bec5"
-                  strokeDasharray="2 4"
-                  label={{ value: "50%", fill: "#b0bec5", position: "insideTopRight" }}
-                />
-                <Line
-                  yAxisId="games"
-                  type="monotone"
-                  dataKey="games"
-                  stroke="#80cbc4"
-                  name="Games"
-                />
-                <Line
-                  yAxisId="rate"
-                  type="monotone"
-                  dataKey="winRate"
-                  stroke="#ffcc80"
-                  name="Win rate"
-                />
-                <Line
-                  yAxisId="mmr"
-                  type="monotone"
-                  dataKey="mmr"
-                  stroke="#90caf9"
-                  name="Ranked MMR"
-                  connectNulls={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+          {ENABLE_OPPONENT_WIN_RATE_CHART && (
+            <ChartPanel title="Opponent win rate" subtitle="Top opponents by game count">
+              {opponentData.length === 0 ? (
+                <EmptyChart />
+              ) : (
+                <ResponsiveContainer>
+                  <BarChart data={opponentData} layout="vertical" margin={{ left: 20, right: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis type="number" domain={[0, 100]} unit="%" />
+                    <YAxis type="category" dataKey="name" width={120} interval={0} />
+                    <Tooltip />
+                    <Bar dataKey="winRate" name="Win rate" fill="#ce93d8" radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </ChartPanel>
           )}
-        </ChartPanel>
-        <ChartPanel title="Opponent win rate" subtitle="Top opponents by game count">
-          {opponentData.length === 0 ? (
-            <EmptyChart />
-          ) : (
-            <ResponsiveContainer>
-              <BarChart data={opponentData} layout="vertical" margin={{ left: 20, right: 20 }}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis type="number" domain={[0, 100]} unit="%" />
-                <YAxis type="category" dataKey="name" width={120} interval={0} />
-                <Tooltip />
-                <Bar dataKey="winRate" name="Win rate" fill="#ce93d8" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </ChartPanel>
+        </Stack>
       </Box>
     </Stack>
   );
