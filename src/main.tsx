@@ -2,6 +2,9 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Box,
   Button,
@@ -12,20 +15,15 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  FormControl,
   FormControlLabel,
-  IconButton,
-  InputLabel,
   LinearProgress,
-  MenuItem,
   Paper,
-  Select,
+  Slider,
   Stack,
   Tab,
   Tabs,
   TextField,
   ThemeProvider,
-  Tooltip,
   Typography,
   createTheme,
 } from "@mui/material";
@@ -42,9 +40,11 @@ import { ObsRecordingControls, ObsRecordingProvider, useObsRecording } from "./O
 import { MoveCapturePanel } from "./MoveCapturePanel";
 import { RecordingViewer } from "./RecordingViewer";
 import { TechSection } from "./TechSection";
+import { ArtworkPanel } from "./ArtworkPanel";
 import type { ObsSettings, ObsState, RecordingMetadata } from "./obs-types";
 import type { RecordedVideo, RecordingTags } from "./recording-types";
 import type { RecordingAnalysis } from "./recording-analysis-types";
+import type { ReplayStagingPreview, ReplayStagingStatus } from "./replay-staging-types";
 import type {
   KnownMoveCaptureVariant,
   MoveCaptureState,
@@ -77,6 +77,7 @@ declare global {
       capture: {
         getState: () => Promise<CaptureState>;
         setSettings: (request: { hotkey: string }) => Promise<CaptureState>;
+        setChapterSettings: (request: { hotkey: string }) => Promise<CaptureState>;
         toggle: () => Promise<{ outputPath?: string | null }>;
         addChapter: () => Promise<{ at: string }>;
         setAutoGameChapters: (enabled: boolean) => Promise<CaptureState>;
@@ -129,17 +130,30 @@ declare global {
       };
       replays: {
         getFolder: () => Promise<string | null>;
+        getGameFolderStatus: () => Promise<{ folder: string | null; issue: string | null }>;
         selectFolder: () => Promise<string | null>;
+        getCachedScan: (folder: string) => Promise<{
+          games: ReplayRow[];
+          playerCounts: Record<string, number>;
+          duplicateCount: number;
+        } | null>;
         scanFolder: (folder: string) => Promise<{
           games: ReplayRow[];
           playerCounts: Record<string, number>;
           duplicateCount: number;
         }>;
+        resolvePortraits: (request: {
+          pairs: Array<{ character: string; support: string }>;
+        }) => Promise<Array<{ portraitUrl: string | null; supportUrl: string | null }>>;
         showInFolder: (request: { ids: string[] }) => Promise<void>;
         zip: (request: { ids: string[]; suggestedName: string }) => Promise<{
           path: string;
           fileCount: number;
         } | null>;
+        stagingStatus: () => Promise<ReplayStagingStatus>;
+        stagingPreview: (request: { ids: string[] }) => Promise<ReplayStagingPreview>;
+        stage: (request: { ids: string[] }) => Promise<ReplayStagingStatus>;
+        restoreStaged: () => Promise<ReplayStagingStatus>;
         onScanProgress: (
           listener: (progress: {
             completed: number;
@@ -173,6 +187,11 @@ declare global {
           startTime: number;
           endTime: number;
         }) => Promise<RecordedVideo>;
+        trimClip: (request: {
+          recordingId: string;
+          startTime: number;
+          endTime: number;
+        }) => Promise<{ recording: RecordedVideo; backupPath: string; backupManifestPath: string }>;
         createF10Clips: (request: { recordingId: string }) => Promise<{
           total: number;
           created: number;
@@ -202,6 +221,22 @@ declare global {
         }) => Promise<RecordedVideo>;
         deleteRecording: (request: { recordingId: string }) => Promise<{ id: string }>;
         startDrag: (request: { recordingId: string }) => void;
+      };
+      artwork: {
+        getStatus: () => Promise<{ ready: boolean; missing: string[] }>;
+        extract: () => Promise<{
+          savedPortraits: number;
+        }>;
+        cancel: (request: { runId: string }) => Promise<{ cancelled: boolean }>;
+        onProgress: (
+          listener: (progress: {
+            runId: string;
+            stage: string;
+            message: string;
+            current: number | null;
+            total: number | null;
+          }) => void,
+        ) => () => void;
       };
       moveCatalog: {
         load: () => Promise<{
@@ -261,171 +296,124 @@ type UpdateStatus = {
   percent?: number;
 };
 
-function ReplayFolderPicker({
-  onData,
+function MatchHistoryFilters({
   dateFrom,
   dateTo,
+  availableDateFrom,
+  availableDateTo,
   invalidDateRange,
   onDateFromChange,
   onDateToChange,
+  onDateRangeChange,
   rankedOnly,
   onRankedOnlyChange,
   rankAffectingOnly,
   onRankAffectingOnlyChange,
 }: {
-  onData: (games: ReplayRow[], counts: Record<string, number>, folder: string) => void;
   dateFrom: string;
   dateTo: string;
+  availableDateFrom: string;
+  availableDateTo: string;
   invalidDateRange: boolean;
   onDateFromChange: (value: string) => void;
   onDateToChange: (value: string) => void;
+  onDateRangeChange: (from: string, to: string) => void;
   rankedOnly: boolean;
   onRankedOnlyChange: (value: boolean) => void;
   rankAffectingOnly: boolean;
   onRankAffectingOnlyChange: (value: boolean) => void;
 }) {
-  const [folder, setFolder] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState<{
-    completed: number;
-    total: number;
-    phase: "logs" | "scanning";
-  }>({ completed: 0, total: 0, phase: "scanning" });
-  const [error, setError] = useState<string | null>(null);
-  const [duplicateCount, setDuplicateCount] = useState(0);
-  const scanGeneration = useRef(0);
-  const scan = useCallback(
-    async (selectedFolder: string | null) => {
-      if (!selectedFolder || !window.electronAPI) return;
-      const generation = ++scanGeneration.current;
-      setLoading(true);
-      setError(null);
-      setDuplicateCount(0);
-      setProgress({ completed: 0, total: 0, phase: "logs" });
-      try {
-        const result = await window.electronAPI.replays.scanFolder(selectedFolder);
-        if (generation !== scanGeneration.current) return;
-        onData(result.games, result.playerCounts, selectedFolder);
-        setDuplicateCount(result.duplicateCount);
-        const scannedCount = result.games.length + result.duplicateCount;
-        setProgress({ completed: scannedCount, total: scannedCount, phase: "scanning" });
-      } catch (scanError) {
-        if (generation !== scanGeneration.current) return;
-        setError(scanError instanceof Error ? scanError.message : String(scanError));
-      } finally {
-        if (generation === scanGeneration.current) setLoading(false);
-      }
-    },
-    [onData],
+  const firstAvailableDay = dateKeyToDayIndex(availableDateFrom);
+  const lastAvailableDay = dateKeyToDayIndex(availableDateTo);
+  const selectedFromDay = dateKeyToDayIndex(dateFrom);
+  const selectedToDay = dateKeyToDayIndex(dateTo);
+  const sliderMin = Math.min(
+    firstAvailableDay ?? 0,
+    selectedFromDay ?? firstAvailableDay ?? 0,
+    selectedToDay ?? firstAvailableDay ?? 0,
   );
-
-  useEffect(() => {
-    let active = true;
-    const unsubscribe = window.electronAPI?.replays.onScanProgress((nextProgress) => {
-      setProgress(nextProgress);
-    });
-    void window.electronAPI?.replays.getFolder().then((savedFolder) => {
-      if (!active) return;
-      setFolder(savedFolder);
-      void scan(savedFolder);
-    });
-    return () => {
-      active = false;
-      unsubscribe?.();
-    };
-  }, [scan]);
-
-  const chooseFolder = async () => {
-    const selected = await window.electronAPI?.replays.selectFolder();
-    if (selected) {
-      setFolder(selected);
-      void scan(selected);
-    }
-  };
-
-  const refreshFolder = () => {
-    void scan(folder);
-  };
-
+  const sliderMax = Math.max(
+    lastAvailableDay ?? 0,
+    selectedFromDay ?? lastAvailableDay ?? 0,
+    selectedToDay ?? lastAvailableDay ?? 0,
+  );
+  const sliderValues: [number, number] = [
+    selectedFromDay ?? firstAvailableDay ?? 0,
+    selectedToDay ?? lastAvailableDay ?? 0,
+  ];
+  const [draggedValues, setDraggedValues] = useState<[number, number] | null>(null);
+  useEffect(() => setDraggedValues(null), [dateFrom, dateTo, availableDateFrom, availableDateTo]);
   return (
-    <Paper variant="outlined" sx={{ p: 2, textAlign: "left" }}>
-      <Stack
-        direction={{ xs: "column", lg: "row" }}
-        spacing={2}
-        sx={{ alignItems: { lg: "center" } }}
+    <Paper
+      variant="outlined"
+      sx={{ p: 1, width: "fit-content", maxWidth: "100%", textAlign: "left" }}
+    >
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          flexWrap: "wrap",
+          columnGap: 1.5,
+          rowGap: 0.5,
+        }}
       >
-        <Stack direction="row" spacing={2} sx={{ alignItems: "center", minWidth: 0 }}>
-          <Box sx={{ minWidth: 0 }}>
-            <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-              Replay folder
+        <Box sx={{ minWidth: 0 }}>
+          <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 0.75 }}>
+            <Typography variant="caption" color="text.secondary">
+              Date range
             </Typography>
-            <Typography variant="body2" color="text.secondary" noWrap title={folder ?? undefined}>
-              {folder ?? "No replay folder selected"}
+            <TextField
+              label="From"
+              type="date"
+              size="small"
+              value={dateFrom}
+              onChange={(event) => onDateFromChange(event.target.value)}
+              error={invalidDateRange}
+              slotProps={{ inputLabel: { shrink: true } }}
+              sx={{ width: 160, flexShrink: 0 }}
+            />
+            <Typography variant="body2" color="text.secondary">
+              –
             </Typography>
+            <TextField
+              label="To"
+              type="date"
+              size="small"
+              value={dateTo}
+              onChange={(event) => onDateToChange(event.target.value)}
+              error={invalidDateRange}
+              slotProps={{ inputLabel: { shrink: true } }}
+              sx={{ width: 160, flexShrink: 0 }}
+            />
           </Box>
-          <Button variant="contained" onClick={chooseFolder} disabled={loading}>
-            Choose folder
-          </Button>
-          <Tooltip title="Refresh replay files">
-            <span>
-              <IconButton
-                aria-label="Refresh replay files"
-                onClick={refreshFolder}
-                disabled={!folder || loading}
-                size="small"
-              >
-                <svg
-                  aria-hidden="true"
-                  viewBox="0 0 24 24"
-                  width="22"
-                  height="22"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M20 11a8.1 8.1 0 0 0-14.8-4.5L3 9" />
-                  <path d="M3 4v5h5" />
-                  <path d="M4 13a8.1 8.1 0 0 0 14.8 4.5L21 15" />
-                  <path d="M21 20v-5h-5" />
-                </svg>
-              </IconButton>
-            </span>
-          </Tooltip>
-        </Stack>
-        <Stack
-          direction="row"
-          spacing={1}
-          sx={{ alignItems: "center", justifyContent: "flex-end", ml: { lg: "auto" } }}
-        >
-          <Typography variant="caption" color="text.secondary">
-            Date range
-          </Typography>
-          <TextField
-            label="From"
-            type="date"
-            size="small"
-            value={dateFrom}
-            onChange={(event) => onDateFromChange(event.target.value)}
-            error={invalidDateRange}
-            slotProps={{ inputLabel: { shrink: true } }}
-            sx={{ width: 145 }}
-          />
-          <Typography variant="body2" color="text.secondary">
-            –
-          </Typography>
-          <TextField
-            label="To"
-            type="date"
-            size="small"
-            value={dateTo}
-            onChange={(event) => onDateToChange(event.target.value)}
-            error={invalidDateRange}
-            slotProps={{ inputLabel: { shrink: true } }}
-            sx={{ width: 145 }}
-          />
+          {firstAvailableDay !== null && lastAvailableDay !== null && (
+            <Box sx={{ px: 1.5, pt: 0.5 }}>
+              <Slider
+                value={draggedValues ?? sliderValues}
+                min={sliderMin}
+                max={sliderMax}
+                step={1}
+                disableSwap
+                disabled={invalidDateRange || sliderMin === sliderMax}
+                getAriaLabel={(index) => (index === 0 ? "Start date" : "End date")}
+                valueLabelDisplay="auto"
+                valueLabelFormat={dayIndexToDateKey}
+                onChange={(_, value) => {
+                  if (Array.isArray(value)) setDraggedValues([value[0], value[1]]);
+                }}
+                onChangeCommitted={(_, value) => {
+                  setDraggedValues(null);
+                  if (Array.isArray(value)) {
+                    onDateRangeChange(dayIndexToDateKey(value[0]), dayIndexToDateKey(value[1]));
+                  }
+                }}
+              />
+            </Box>
+          )}
+        </Box>
+        <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1 }}>
           <FormControlLabel
+            sx={{ m: 0 }}
             control={
               <Checkbox
                 size="small"
@@ -436,6 +424,7 @@ function ReplayFolderPicker({
             label="Ranked only"
           />
           <FormControlLabel
+            sx={{ m: 0 }}
             control={
               <Checkbox
                 size="small"
@@ -446,35 +435,8 @@ function ReplayFolderPicker({
             }
             label="Games which affect rank only"
           />
-        </Stack>
-      </Stack>
-      {loading && (
-        <Stack spacing={0.5} sx={{ mt: 1 }}>
-          <LinearProgress
-            variant={progress.total > 0 ? "determinate" : "indeterminate"}
-            value={progress.total > 0 ? (progress.completed / progress.total) * 100 : undefined}
-          />
-          <Typography variant="caption" color="text.secondary">
-            {progress.phase === "logs"
-              ? progress.total > 0
-                ? `Loading rating logs ${progress.completed} of ${progress.total}...`
-                : "Finding rating logs..."
-              : progress.total > 0
-                ? `Loading replay ${progress.completed} of ${progress.total}...`
-                : "Finding replay files..."}
-          </Typography>
-        </Stack>
-      )}
-      {duplicateCount > 0 && (
-        <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
-          Ignored {duplicateCount} duplicate replay file{duplicateCount === 1 ? "" : "s"}.
-        </Typography>
-      )}
-      {error && (
-        <Typography variant="caption" color="error" component="div" sx={{ mt: 1 }}>
-          Replay loading failed: {error}
-        </Typography>
-      )}
+        </Box>
+      </Box>
     </Paper>
   );
 }
@@ -497,6 +459,21 @@ function getLocalDateKey(timestamp: string | null) {
   return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
     .map((value, index) => (index === 0 ? String(value) : String(value).padStart(2, "0")))
     .join("-");
+}
+
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function dateKeyToDayIndex(dateKey: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return null;
+  const timestamp = Date.parse(`${dateKey}T00:00:00Z`);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== dateKey) {
+    return null;
+  }
+  return timestamp / MILLISECONDS_PER_DAY;
+}
+
+function dayIndexToDateKey(dayIndex: number) {
+  return new Date(Math.round(dayIndex) * MILLISECONDS_PER_DAY).toISOString().slice(0, 10);
 }
 
 function getReplayDateRange(games: ReplayRow[]) {
@@ -583,9 +560,17 @@ function UpdateStatusBanner({
 function ReplayAnalysis({
   active,
   recordingsRefreshToken,
+  gameFolder,
+  gameFolderRefreshToken,
+  onScanError,
+  onReplaysChanged,
 }: {
   active: boolean;
   recordingsRefreshToken: number;
+  gameFolder: string | null;
+  gameFolderRefreshToken: number;
+  onScanError: (message: string | null) => void;
+  onReplaysChanged: () => void;
 }) {
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [replayFolder, setReplayFolder] = useState<string | null>(null);
@@ -593,6 +578,13 @@ function ReplayAnalysis({
   const [overridePlayer, setOverridePlayer] = useState<string | null>(null);
   const [rankedOnly, setRankedOnly] = useState(false);
   const [rankAffectingOnly, setRankAffectingOnly] = useState(false);
+  const [scanLoading, setScanLoading] = useState(false);
+  const [focusRefreshToken, setFocusRefreshToken] = useState(0);
+  const [scanProgress, setScanProgress] = useState<{
+    completed: number;
+    total: number;
+    phase: "logs" | "scanning";
+  }>({ completed: 0, total: 0, phase: "scanning" });
   const [analysisSummary, setAnalysisSummary] = useState<AnalysisSummary>({
     games: 0,
     sessions: 0,
@@ -601,18 +593,102 @@ function ReplayAnalysis({
     opponents: 0,
     winRate: 0,
   });
+  useEffect(() => {
+    if (!active) return;
+    const refreshOnFocus = () => setFocusRefreshToken((current) => current + 1);
+    window.addEventListener("focus", refreshOnFocus);
+    return () => window.removeEventListener("focus", refreshOnFocus);
+  }, [active]);
   const [isGridPending, startGridTransition] = useTransition();
+  const lastLoadedFolder = useRef<string | null>(null);
   const onData = useCallback(
     (nextGames: ReplayRow[], counts: Record<string, number>, folder: string) => {
+      const folderChanged = lastLoadedFolder.current !== folder;
+      lastLoadedFolder.current = folder;
       startGridTransition(() => {
-        setGames(nextGames);
+        setGames((currentGames) => {
+          const previousById = new Map(currentGames.map((game) => [game.id, game]));
+          const stableGames = nextGames.map((game) => {
+            const previous = previousById.get(game.id);
+            return previous && JSON.stringify(previous) === JSON.stringify(game) ? previous : game;
+          });
+          return stableGames.length === currentGames.length &&
+            stableGames.every((game, index) => game === currentGames[index])
+            ? currentGames
+            : stableGames;
+        });
         setReplayFolder(folder);
-        setPlayerCounts(counts);
-        setOverridePlayer(null);
+        setPlayerCounts((currentCounts) => {
+          const currentKeys = Object.keys(currentCounts);
+          const nextKeys = Object.keys(counts);
+          return currentKeys.length === nextKeys.length &&
+            nextKeys.every((key) => currentCounts[key] === counts[key])
+            ? currentCounts
+            : counts;
+        });
+        if (folderChanged) setOverridePlayer(null);
       });
     },
     [],
   );
+  useEffect(() => {
+    if (!active) return;
+    const replays = window.electronAPI?.replays;
+    let current = true;
+    if (!replays || !gameFolder) {
+      onData([], {}, "");
+      setScanLoading(false);
+      onScanError(null);
+      return;
+    }
+    const showFullLoadProgress = lastLoadedFolder.current !== gameFolder;
+    let scanFinished = false;
+    let progressTimer: number | null = null;
+    if (showFullLoadProgress) {
+      progressTimer = window.setTimeout(() => {
+        if (current) setScanLoading(true);
+      }, 300);
+      setScanProgress({ completed: 0, total: 0, phase: "logs" });
+      void replays
+        .getCachedScan(gameFolder)
+        .then((cached) => {
+          if (!current || scanFinished || !cached) return;
+          if (progressTimer !== null) window.clearTimeout(progressTimer);
+          setScanLoading(false);
+          onScanError(null);
+          onData(cached.games, cached.playerCounts, gameFolder);
+        })
+        .catch(() => undefined);
+    }
+    const unsubscribe = replays.onScanProgress((nextProgress) => {
+      if (current && showFullLoadProgress) setScanProgress(nextProgress);
+    });
+    void replays
+      .scanFolder(gameFolder)
+      .then((result) => {
+        if (!current) return;
+        scanFinished = true;
+        if (progressTimer !== null) window.clearTimeout(progressTimer);
+        setScanLoading(false);
+        onScanError(null);
+        onData(result.games, result.playerCounts, gameFolder);
+        const scannedCount = result.games.length + result.duplicateCount;
+        setScanProgress({ completed: scannedCount, total: scannedCount, phase: "scanning" });
+      })
+      .catch((error) => {
+        if (!current) return;
+        scanFinished = true;
+        if (progressTimer !== null) window.clearTimeout(progressTimer);
+        setScanLoading(false);
+        if (showFullLoadProgress && lastLoadedFolder.current !== gameFolder) onData([], {}, "");
+        onScanError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      current = false;
+      if (progressTimer !== null) window.clearTimeout(progressTimer);
+      unsubscribe();
+    };
+  }, [active, gameFolder, gameFolderRefreshToken, focusRefreshToken, onData, onScanError]);
   const deferredGames = useDeferredValue(games);
   const isGridStale = deferredGames !== games;
   const isPreparingGrid = isGridPending || isGridStale;
@@ -635,7 +711,7 @@ function ReplayAnalysis({
     [modeFilteredGames, playerOfInterest],
   );
 
-  const onPlayerOverride = (nextPlayer: string) => {
+  const onPlayerOverride = (nextPlayer: string | null) => {
     startGridTransition(() => {
       setOverridePlayer(nextPlayer);
     });
@@ -651,80 +727,45 @@ function ReplayAnalysis({
   }, []);
 
   return (
-    <>
-      <ReplayFolderPicker
-        onData={onData}
-        dateFrom={dateFrom}
-        dateTo={dateTo}
-        invalidDateRange={invalidDateRange}
-        onDateFromChange={setDateFromOverride}
-        onDateToChange={setDateToOverride}
-        rankedOnly={rankedOnly}
-        onRankedOnlyChange={(nextRankedOnly) => {
-          setRankedOnly(nextRankedOnly);
-          if (!nextRankedOnly) setRankAffectingOnly(false);
-          setOverridePlayer(null);
-        }}
-        rankAffectingOnly={rankAffectingOnly}
-        onRankAffectingOnlyChange={setRankAffectingOnly}
-      />
-      {isPreparingGrid && (
-        <Stack spacing={0.5} sx={{ mb: 1, textAlign: "left" }}>
-          <LinearProgress />
-          <Typography variant="caption" color="text.secondary">
-            Preparing replay grid… The current grid remains available while this finishes.
-          </Typography>
-        </Stack>
-      )}
-      <Stack
-        direction={{ xs: "column", lg: "row" }}
-        spacing={2}
-        sx={{ mb: 1, alignItems: { lg: "center" }, justifyContent: "flex-start" }}
-      >
-        <Stack
-          direction={{ xs: "column", sm: "row" }}
-          spacing={1.5}
-          sx={{ alignItems: { sm: "center" }, flexWrap: "wrap" }}
-        >
-          <FormControl
-            size="small"
-            sx={{ minWidth: 240, backgroundColor: "background.paper", borderRadius: 1 }}
-          >
-            <InputLabel id="player-override-label">Player</InputLabel>
-            <Select
-              labelId="player-override-label"
-              value={playerOfInterest ?? ""}
-              label="Player"
-              onChange={(event) => onPlayerOverride(event.target.value)}
-            >
-              {Object.entries(visiblePlayerCounts)
-                .sort((a, b) => b[1] - a[1])
-                .map(([name, count]) => (
-                  <MenuItem key={name} value={name}>
-                    {name} ({count})
-                  </MenuItem>
-                ))}
-            </Select>
-          </FormControl>
-          <Button
-            variant="outlined"
-            disabled={!overridePlayer}
-            onClick={() => setOverridePlayer(null)}
-          >
-            Use auto-detected
-          </Button>
-          <Typography variant="caption" color="text.secondary">
-            {overridePlayer ? "Overridden" : "Auto-determined"}
-          </Typography>
-        </Stack>
+    <Box
+      sx={{
+        height: "100%",
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "stretch", gap: 1, mb: 1 }}>
+        <Box sx={{ flex: "1 1 650px", minWidth: 0 }}>
+          <MatchHistoryFilters
+            dateFrom={dateFrom}
+            dateTo={dateTo}
+            availableDateFrom={replayDateRange.from}
+            availableDateTo={replayDateRange.to}
+            invalidDateRange={invalidDateRange}
+            onDateFromChange={setDateFromOverride}
+            onDateToChange={setDateToOverride}
+            onDateRangeChange={(from, to) => {
+              setDateFromOverride(from);
+              setDateToOverride(to);
+            }}
+            rankedOnly={rankedOnly}
+            onRankedOnlyChange={(nextRankedOnly) => {
+              setRankedOnly(nextRankedOnly);
+              if (!nextRankedOnly) setRankAffectingOnly(false);
+              setOverridePlayer(null);
+            }}
+            rankAffectingOnly={rankAffectingOnly}
+            onRankAffectingOnlyChange={setRankAffectingOnly}
+          />
+        </Box>
         <Box
           sx={{
             display: "grid",
-            gridTemplateColumns: {
-              xs: "repeat(2, minmax(0, 1fr))",
-              sm: "repeat(3, minmax(0, 180px))",
-            },
+            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
             gap: 1,
+            flex: "1 1 430px",
+            minWidth: 0,
           }}
         >
           <SummaryCard
@@ -739,19 +780,52 @@ function ReplayAnalysis({
           />
           <SummaryCard label="Opponents" value={String(analysisSummary.opponents)} />
         </Box>
-      </Stack>
+      </Box>
+      {scanLoading && (
+        <Stack spacing={0.5} sx={{ mt: 1, textAlign: "left" }}>
+          <LinearProgress
+            variant={scanProgress.total > 0 ? "determinate" : "indeterminate"}
+            value={
+              scanProgress.total > 0
+                ? (scanProgress.completed / scanProgress.total) * 100
+                : undefined
+            }
+          />
+          <Typography variant="caption" color="text.secondary">
+            {scanProgress.phase === "logs"
+              ? scanProgress.total > 0
+                ? `Loading rating logs ${scanProgress.completed} of ${scanProgress.total}...`
+                : "Finding rating logs..."
+              : scanProgress.total > 0
+                ? `Loading replay ${scanProgress.completed} of ${scanProgress.total}...`
+                : "Finding replay files..."}
+          </Typography>
+        </Stack>
+      )}
+      {isPreparingGrid && (
+        <Stack spacing={0.5} sx={{ mb: 1, textAlign: "left" }}>
+          <LinearProgress />
+          <Typography variant="caption" color="text.secondary">
+            Preparing replay grid… The current grid remains available while this finishes.
+          </Typography>
+        </Stack>
+      )}
       <AvatarGrid
         rowData={relevantGames}
         replayFolder={replayFolder}
         active={active}
         recordingsRefreshToken={recordingsRefreshToken}
         playerOfInterest={playerOfInterest}
+        playerCounts={visiblePlayerCounts}
+        playerOverride={overridePlayer}
+        onPlayerOverrideChange={onPlayerOverride}
         dateFrom={dateFrom}
         dateTo={dateTo}
         invalidDateRange={invalidDateRange}
         onSummaryChange={onSummaryChange}
+        onReplaysChanged={onReplaysChanged}
       />
-    </>
+    </Box>
   );
 }
 
@@ -760,12 +834,29 @@ function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [recordingsRefreshToken, setRecordingsRefreshToken] = useState(0);
   const [recordingWork, setRecordingWork] = useState<RecordingWorkItem[]>([]);
-  const [obsSettingsOpen, setObsSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<"game" | "artwork" | "obs" | null>("obs");
+  const [gameFolderStatus, setGameFolderStatus] = useState<{
+    folder: string | null;
+    issue: string | null;
+  } | null>(null);
+  const [gameFolderStatusToken, setGameFolderStatusToken] = useState(0);
+  const [gameFolderRefreshToken, setGameFolderRefreshToken] = useState(0);
+  const [replayScanError, setReplayScanError] = useState<string | null>(null);
+  const [folderPopupDismissed, setFolderPopupDismissed] = useState(false);
+  const [artworkStatus, setArtworkStatus] = useState<{
+    ready: boolean;
+    missing: string[];
+  } | null>(null);
+  const [artworkStatusError, setArtworkStatusError] = useState(false);
+  const [artworkPopupDismissed, setArtworkPopupDismissed] = useState(false);
+  const [artworkStatusToken, setArtworkStatusToken] = useState(0);
   const recordingsTabIndex = 1;
   const captureTabIndex = 2;
   const nerdProcessingTabIndex = 3;
   const techTabIndex = 4;
   const recordingTabAvailable = Boolean(window.electronAPI?.recordings);
+  const artworkTabAvailable = Boolean(window.electronAPI?.artwork);
   const tabStorageKey = "avatar-app-last-tab-v2";
   const { state: obsState } = useObsRecording();
   const availableTabIndices = [
@@ -802,6 +893,92 @@ function App() {
   const refreshRecordings = useCallback(() => {
     setRecordingsRefreshToken((current) => current + 1);
   }, []);
+
+  useEffect(() => {
+    const replays = window.electronAPI?.replays;
+    if (!replays) return;
+    let active = true;
+    void replays
+      .getGameFolderStatus()
+      .then((status) => {
+        if (active) setGameFolderStatus(status);
+      })
+      .catch((error) => {
+        if (active) {
+          setGameFolderStatus({
+            folder: null,
+            issue: `Could not check the game folder: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [gameFolderStatusToken]);
+
+  useEffect(() => {
+    const artwork = window.electronAPI?.artwork;
+    if (!artwork) return;
+    let active = true;
+    void artwork
+      .getStatus()
+      .then((status) => {
+        if (active) {
+          setArtworkStatus(status);
+          setArtworkStatusError(false);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setArtworkStatus(null);
+          setArtworkStatusError(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [artworkStatusToken]);
+
+  useEffect(() => {
+    const refresh = () => {
+      setGameFolderStatusToken((current) => current + 1);
+      setArtworkStatusToken((current) => current + 1);
+    };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, []);
+
+  useEffect(() => setFolderPopupDismissed(false), [gameFolderStatus?.issue, replayScanError]);
+  const missingArtworkKey = artworkStatus?.missing.join("|") ?? "";
+  useEffect(() => setArtworkPopupDismissed(false), [missingArtworkKey]);
+
+  const openSettings = (section: "game" | "artwork" | "obs") => {
+    setSettingsSection(section);
+    setSettingsOpen(true);
+  };
+
+  const chooseGameFolder = async () => {
+    try {
+      const selected = await window.electronAPI?.replays.selectFolder();
+      if (!selected) return;
+      setGameFolderStatus({ folder: selected, issue: null });
+      setReplayScanError(null);
+      setFolderPopupDismissed(false);
+      setGameFolderRefreshToken((current) => current + 1);
+      setGameFolderStatusToken((current) => current + 1);
+    } catch (error) {
+      setGameFolderStatus({
+        folder: gameFolderStatus?.folder ?? null,
+        issue: `Could not choose the game folder: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  };
+
+  const artworkImported = () => {
+    setArtworkStatusToken((current) => current + 1);
+    setArtworkPopupDismissed(false);
+    refreshRecordings();
+  };
 
   const previousRecordingActive = useRef(false);
   useEffect(() => {
@@ -852,8 +1029,50 @@ function App() {
   }, []);
 
   return (
-    <>
+    <Box
+      sx={{
+        height: "100%",
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
       <UpdateStatusBanner status={updateStatus} onClose={() => setUpdateStatus(null)} />
+      {!settingsOpen && (
+        <Stack
+          spacing={1}
+          role="status"
+          sx={{
+            position: "fixed",
+            top: 16,
+            right: 16,
+            width: "min(440px, calc(100vw - 32px))",
+            zIndex: (theme) => theme.zIndex.snackbar,
+          }}
+        >
+          {(gameFolderStatus?.issue || replayScanError) && !folderPopupDismissed && (
+            <Alert severity="warning" onClose={() => setFolderPopupDismissed(true)}>
+              {gameFolderStatus?.issue ?? `Could not scan replays: ${replayScanError}`}
+              <Button size="small" color="inherit" onClick={() => openSettings("game")}>
+                Open game folder settings
+              </Button>
+            </Alert>
+          )}
+          {artworkTabAvailable &&
+            artworkStatus !== null &&
+            artworkStatus.missing.length > 0 &&
+            !artworkPopupDismissed && (
+              <Alert severity="info" onClose={() => setArtworkPopupDismissed(true)}>
+                {artworkStatus.missing.length} character/support PNG
+                {artworkStatus.missing.length === 1 ? " is" : "s are"} missing. Import artwork to
+                show all portraits.
+                <Button size="small" color="inherit" onClick={() => openSettings("artwork")}>
+                  Open artwork settings
+                </Button>
+              </Alert>
+            )}
+        </Stack>
+      )}
       <Stack
         direction={{ xs: "column", lg: "row" }}
         spacing={1.5}
@@ -867,7 +1086,7 @@ function App() {
           {developerTabsAvailable && <Tab label="Tech" value={techTabIndex} />}
         </Tabs>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: "center" }}>
-          <ObsRecordingControls onOpenSettings={() => setObsSettingsOpen(true)} />
+          <ObsRecordingControls onOpenSettings={() => openSettings("obs")} />
           {appVersion && (
             <Typography variant="caption" color="text.secondary">
               v{appVersion}
@@ -907,22 +1126,126 @@ function App() {
         </Stack>
       )}
       <Dialog
-        open={obsSettingsOpen}
-        onClose={() => setObsSettingsOpen(false)}
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
         maxWidth="md"
         fullWidth
+        keepMounted
       >
-        <DialogTitle>OBS settings</DialogTitle>
+        <DialogTitle>Settings</DialogTitle>
         <DialogContent sx={{ pt: 1 }}>
-          <ObsRecordingPanel />
+          <Accordion
+            expanded={settingsSection === "game"}
+            onChange={(_, expanded) => setSettingsSection(expanded ? "game" : null)}
+          >
+            <AccordionSummary expandIcon={<span aria-hidden="true">▾</span>}>
+              <Box sx={{ minWidth: 0, flex: 1 }}>
+                <Typography>Game folder</Typography>
+                <Typography
+                  variant="body2"
+                  color={gameFolderStatus?.issue ? "warning.main" : "text.secondary"}
+                  noWrap
+                  title={gameFolderStatus?.folder ?? undefined}
+                >
+                  {gameFolderStatus === null
+                    ? "Checking game folder…"
+                    : (gameFolderStatus.folder ?? "No game folder selected")}
+                </Typography>
+              </Box>
+            </AccordionSummary>
+            <AccordionDetails>
+              <Stack spacing={1.5}>
+                <Typography variant="body2" color="text.secondary">
+                  Select the game&apos;s installation folder. Labatar finds replay files and
+                  data_packages artwork inside it.
+                </Typography>
+                {gameFolderStatus?.issue && (
+                  <Alert severity="warning">{gameFolderStatus.issue}</Alert>
+                )}
+                <Stack direction="row" spacing={1}>
+                  <Button variant="contained" onClick={() => void chooseGameFolder()}>
+                    Choose game folder
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    disabled={!gameFolderStatus?.folder}
+                    onClick={() => setGameFolderRefreshToken((current) => current + 1)}
+                  >
+                    Rescan replays
+                  </Button>
+                </Stack>
+              </Stack>
+            </AccordionDetails>
+          </Accordion>
+          {artworkTabAvailable && (
+            <Accordion
+              expanded={settingsSection === "artwork"}
+              onChange={(_, expanded) => setSettingsSection(expanded ? "artwork" : null)}
+            >
+              <AccordionSummary expandIcon={<span aria-hidden="true">▾</span>}>
+                <Box sx={{ minWidth: 0, flex: 1 }}>
+                  <Typography>Artwork</Typography>
+                  <Typography
+                    variant="body2"
+                    color={
+                      artworkStatusError
+                        ? "warning.main"
+                        : artworkStatus?.missing.length
+                          ? "warning.main"
+                          : "text.secondary"
+                    }
+                  >
+                    {artworkStatusError
+                      ? "Status unavailable"
+                      : artworkStatus === null
+                        ? "Checking artwork…"
+                        : artworkStatus.missing.length === 0
+                          ? "All known portraits available"
+                          : `${artworkStatus.missing.length} PNG${artworkStatus.missing.length === 1 ? "" : "s"} missing`}
+                  </Typography>
+                </Box>
+              </AccordionSummary>
+              <AccordionDetails>
+                <ArtworkPanel onImported={artworkImported} />
+              </AccordionDetails>
+            </Accordion>
+          )}
+          <Accordion
+            expanded={settingsSection === "obs"}
+            onChange={(_, expanded) => setSettingsSection(expanded ? "obs" : null)}
+          >
+            <AccordionSummary expandIcon={<span aria-hidden="true">▾</span>}>
+              <Typography>OBS</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <ObsRecordingPanel />
+            </AccordionDetails>
+          </Accordion>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setObsSettingsOpen(false)}>Close</Button>
+          <Button onClick={() => setSettingsOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
       {mountedTabs.replay && (
-        <Box sx={{ display: tab === 0 ? "block" : "none" }}>
-          <ReplayAnalysis active={tab === 0} recordingsRefreshToken={recordingsRefreshToken} />
+        <Box
+          sx={{
+            display: tab === 0 ? "flex" : "none",
+            flex: "1 1 auto",
+            minHeight: 0,
+            flexDirection: "column",
+          }}
+        >
+          <ReplayAnalysis
+            active={tab === 0}
+            recordingsRefreshToken={recordingsRefreshToken}
+            gameFolder={gameFolderStatus?.folder ?? null}
+            gameFolderRefreshToken={gameFolderRefreshToken}
+            onScanError={setReplayScanError}
+            onReplaysChanged={() => {
+              setGameFolderRefreshToken((current) => current + 1);
+              refreshRecordings();
+            }}
+          />
         </Box>
       )}
       {recordingTabAvailable && mountedTabs.recordings && (
@@ -967,7 +1290,7 @@ function App() {
           <TechSection />
         </Box>
       )}
-    </>
+    </Box>
   );
 }
 
@@ -985,6 +1308,8 @@ createRoot(root).render(
           minHeight: 0,
           width: "100%",
           boxSizing: "border-box",
+          display: "flex",
+          flexDirection: "column",
           overflowX: "hidden",
           overflowY: "auto",
           p: 2,
