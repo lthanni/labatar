@@ -137,6 +137,23 @@ describe("lobbyless automatic recording safety", () => {
     expect(starts).toEqual(["4331450546401791302"]);
   });
 
+  it("ends a departed matchmaking lobby without inventing a game", async () => {
+    const events: string[] = [];
+    const lobbyId = "7813738033888547190";
+    const watcher = new MatchLogWatcher({
+      onLobbyStarted: () => events.push("lobby-start"),
+      onLobbyEnded: () => events.push("lobby-end"),
+      onMatchStarted: () => events.push("match-start"),
+    });
+    await watcher.processLine(
+      `[01:20:41] XMatch: MATCHED opponent=4041756540132919458, lobbyId=${lobbyId}; starting finalize`,
+    );
+    await watcher.processLine(`[01:21:06] Steam: Leaving lobby ${lobbyId}`);
+    expect(events).toEqual(["lobby-start", "lobby-end"]);
+    expect(watcher.currentMatch).toBeNull();
+    expect(watcher.lobbyId).toBeNull();
+  });
+
   it("accepts an identified two-player match without a lobby", () => {
     expect(canRecordLobbylessMatch(match)).toBe(true);
   });

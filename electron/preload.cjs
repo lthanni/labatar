@@ -46,6 +46,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   capture: {
     getState: () => ipcRenderer.invoke("capture:get-state"),
     setSettings: (request) => ipcRenderer.invoke("capture:set-settings", request),
+    setChapterSettings: (request) => ipcRenderer.invoke("capture:set-chapter-settings", request),
     toggle: () => ipcRenderer.invoke("capture:toggle"),
     addChapter: () => ipcRenderer.invoke("capture:add-chapter"),
     setAutoGameChapters: (enabled) =>
@@ -80,10 +81,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   replays: {
     getFolder: () => ipcRenderer.invoke("replays:get-folder"),
+    getGameFolderStatus: () => ipcRenderer.invoke("replays:get-game-folder-status"),
     selectFolder: () => ipcRenderer.invoke("replays:select-folder"),
+    getCachedScan: (folder) => ipcRenderer.invoke("replays:get-cached-scan", folder),
     scanFolder: (folder) => ipcRenderer.invoke("replays:scan-folder", folder),
+    resolvePortraits: (request) => ipcRenderer.invoke("replays:resolve-portraits", request),
     showInFolder: (request) => ipcRenderer.invoke("replays:show-in-folder", request),
     zip: (request) => ipcRenderer.invoke("replays:zip", request),
+    stagingStatus: () => ipcRenderer.invoke("replays:staging-status"),
+    stagingPreview: (request) => ipcRenderer.invoke("replays:staging-preview", request),
+    stage: (request) => ipcRenderer.invoke("replays:stage", request),
+    restoreStaged: () => ipcRenderer.invoke("replays:restore-staged"),
     onScanProgress: (listener) => {
       const handler = (_, progress) => listener(progress);
       ipcRenderer.on("replays:scan-progress", handler);
@@ -108,6 +116,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     readFrame: (request) => ipcRenderer.invoke("recordings:frame-reader-read", request),
     closeFrameReader: (request) => ipcRenderer.invoke("recordings:frame-reader-close", request),
     exportClip: (request) => ipcRenderer.invoke("recordings:export-clip", request),
+    trimClip: (request) => ipcRenderer.invoke("recordings:trim-clip", request),
     createF10Clips: (request) => ipcRenderer.invoke("recordings:create-f10-clips", request),
     renameRecording: (request) => ipcRenderer.invoke("recordings:rename", request),
     reprocessName: (request) => ipcRenderer.invoke("recordings:reprocess-name", request),
@@ -120,6 +129,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
     setMoveEvidence: (request) => ipcRenderer.invoke("recordings:set-move-evidence", request),
     deleteRecording: (request) => ipcRenderer.invoke("recordings:delete", request),
     startDrag: (request) => ipcRenderer.send("recordings:start-drag", request),
+  },
+  artwork: {
+    getStatus: () => ipcRenderer.invoke("artwork:get-status"),
+    extract: () => ipcRenderer.invoke("artwork:extract"),
+    cancel: (request) => ipcRenderer.invoke("artwork:cancel", request),
+    onProgress: (listener) => {
+      const handler = (_, progress) => listener(progress);
+      ipcRenderer.on("artwork:progress", handler);
+      return () => ipcRenderer.removeListener("artwork:progress", handler);
+    },
   },
   moveCatalog: {
     load: () => ipcRenderer.invoke("move-catalog:load"),

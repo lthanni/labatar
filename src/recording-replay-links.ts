@@ -53,18 +53,25 @@ export function buildRecordingReplayIndex(recordings: ReplayLinkedRecording[]) {
   for (const recording of recordings) {
     if (recording.source !== "automatic" || recording.clip) continue;
     const games = recording.games ?? [];
-    const replayPaths = [
-      ...games.filter((game) => charactersAgree(game, game.replay)).map((game) => game.replayPath),
+    const replayEntries = [
+      ...games.filter((game) => charactersAgree(game, game.replay)),
       ...(recording.replays ?? [])
         .filter((replay) => {
           const game = games.find((candidate) => candidate.matchId === replay.matchId);
           return game && charactersAgree(game, replay.replay ?? game.replay);
         })
-        .map((replay) => replay.replayPath),
+        .map((replay) => replay),
     ];
-    for (const replayPath of replayPaths) {
+    for (const { replayPath, replay } of replayEntries) {
       if (!replayPath) continue;
-      const key = comparablePath(replayPath);
+      const hash =
+        replay && typeof replay === "object" && "contentHash" in replay
+          ? (replay as { contentHash?: unknown }).contentHash
+          : null;
+      const key =
+        typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash)
+          ? `sha256:${hash.toLowerCase()}`
+          : comparablePath(replayPath);
       const linked = index.get(key) ?? new Set<string>();
       linked.add(recording.id);
       index.set(key, linked);
@@ -77,13 +84,16 @@ export function recordingIdForSet(
   replayIds: string[],
   replayFolder: string | null,
   index: Map<string, Set<string>>,
+  hashesByReplayId?: Map<string, string>,
 ) {
   if (!replayFolder || replayIds.length === 0) return null;
   const folder = replayFolder.replace(/[\\/]+$/, "");
   let commonRecordingId: string | null = null;
   for (const replayId of replayIds) {
     const absolutePath = comparablePath(`${folder}/${replayId.replace(/^[\\/]+/, "")}`);
-    const linked = index.get(absolutePath);
+    const hash = hashesByReplayId?.get(replayId);
+    const linked =
+      (hash ? index.get(`sha256:${hash.toLowerCase()}`) : null) ?? index.get(absolutePath);
     if (!linked || linked.size !== 1) return null;
     const [recordingId] = linked;
     if (commonRecordingId && commonRecordingId !== recordingId) return null;

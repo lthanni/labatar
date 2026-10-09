@@ -1,6 +1,7 @@
 # Logs
 /logs/
 /replays/
+/electron/generated/
 /.dev/recordings/
 /.dev/electron-user-data/
 *.log

@@ -1,0 +1,38 @@
+function buildClipExportFfmpegArgs({ sourcePath, startTime, duration, outputPath }) {
+  return [
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-y",
+    "-i",
+    sourcePath,
+    "-ss",
+    startTime.toFixed(3),
+    "-t",
+    duration.toFixed(3),
+    "-map",
+    "0:v:0",
+    "-map",
+    "0:a:0?",
+    "-map_chapters",
+    "-1",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "fast",
+    "-crf",
+    "18",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "192k",
+    "-movflags",
+    "+faststart",
+    "-avoid_negative_ts",
+    "make_zero",
+    outputPath,
+  ];
+}
+
+module.exports = { buildClipExportFfmpegArgs };

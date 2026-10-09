@@ -82,4 +82,29 @@ describe("set recording links", () => {
     ]);
     expect(recordingIdForSet(["wrong.dlr"], "C:/Replays", index)).toBeNull();
   });
+
+  it("keeps recording links distinct when restored and recovered replays share a filename", () => {
+    const oldHash = "a".repeat(64);
+    const newHash = "b".repeat(64);
+    const index = buildRecordingReplayIndex([
+      {
+        id: "old.mp4",
+        source: "automatic",
+        games: [{ replayPath: "C:/game/replays/first.dlr", replay: { contentHash: oldHash } }],
+      },
+      {
+        id: "new.mp4",
+        source: "automatic",
+        games: [{ replayPath: "C:/game/replays/first.dlr", replay: { contentHash: newHash } }],
+      },
+    ]);
+    const hashes = new Map([
+      ["replays/first.dlr", oldHash],
+      ["replays/Recovered while staged/abc/first.dlr", newHash],
+    ]);
+    expect(recordingIdForSet(["replays/first.dlr"], "C:/game", index, hashes)).toBe("old.mp4");
+    expect(
+      recordingIdForSet(["replays/Recovered while staged/abc/first.dlr"], "C:/game", index, hashes),
+    ).toBe("new.mp4");
+  });
 });

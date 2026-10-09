@@ -46,6 +46,21 @@ export type RecordedGame = {
   replayFileName: string | null;
 };
 
+export type RecordingPortraitSide = {
+  slot: 1 | 2;
+  playerName: string;
+  character: string;
+  support: string | null;
+  portraitUrl: string | null;
+  supportUrl: string | null;
+};
+
+export type RecordingPortraitMatchup = {
+  players: [RecordingPortraitSide, RecordingPortraitSide];
+  gameCount: number;
+  gameNumber: number | null;
+};
+
 export type RecordedVideo = {
   id: string;
   name: string;
@@ -54,6 +69,7 @@ export type RecordedVideo = {
   size: number;
   modifiedAt: number;
   metadata: RecordingMetadata | null;
+  portraitMatchup?: RecordingPortraitMatchup | null;
   tags: RecordingTags;
   analysis: RecordingAnalysis | null;
   analysisHistory?: Array<{

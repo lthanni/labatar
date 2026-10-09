@@ -11,7 +11,10 @@ import {
 import {
   buildRecordingDisplayRows,
   collapseRecordingDisplayRows,
+  countRecordingClips,
   descendantClipRanges,
+  recordingInheritedTags,
+  recordingLibraryTab,
 } from "../../src/recording-hierarchy";
 import {
   defaultInputDisplayGeometry,
@@ -601,7 +604,7 @@ describe("recording-analysis fixture contract", () => {
       createdAt: null,
     });
 
-    const rows = buildRecordingDisplayRows([child, parent, root], true, true);
+    const rows = buildRecordingDisplayRows([child, parent, root]);
     expect(rows.map(({ recording, depth }) => [recording.id, depth])).toEqual([
       [root.id, 0],
       [parent.id, 1],
@@ -615,16 +618,46 @@ describe("recording-analysis fixture contract", () => {
     ).toEqual([root.id]);
     expect(
       collapseRecordingDisplayRows(
-        buildRecordingDisplayRows([child, parent, root, otherRoot], true, true),
+        buildRecordingDisplayRows([child, parent, root, otherRoot]),
         new Set([root.id]),
       ).map(({ recording }) => recording.id),
     ).toEqual([root.id, otherRoot.id]);
-    expect(
-      collapseRecordingDisplayRows(
-        buildRecordingDisplayRows([child, parent, root], false, true),
-        new Set([parent.id]),
-      ).map(({ recording }) => recording.id),
-    ).toEqual([child.id, parent.id]);
+    expect(countRecordingClips(rows)).toEqual(
+      new Map([
+        [root.id, 2],
+        [parent.id, 1],
+      ]),
+    );
     expect(descendantClipRanges([root, parent, child], parent.id, 25)).toEqual([[3.69, 4.91]]);
+  });
+
+  it("keeps untagged clips with their match recording", () => {
+    const match = fixtureRecording("match");
+    match.tags.match = ["ranked"];
+    const clip = fixtureRecording("clip", {
+      sourceRecordingId: match.id,
+      sourceRecordingName: match.name,
+      startTime: 0,
+      endTime: 20,
+      createdAt: null,
+    });
+    const unrelated = fixtureRecording("unrelated");
+    const byId = new Map([match, clip, unrelated].map((recording) => [recording.id, recording]));
+
+    expect(recordingLibraryTab(match, byId)).toBe("matches");
+    expect(recordingLibraryTab(clip, byId)).toBe("matches");
+    expect(recordingInheritedTags(clip, byId).match).toEqual(["ranked"]);
+    expect(recordingLibraryTab(unrelated, byId)).toBe("other");
+
+    const otherClip = fixtureRecording("other-clip", {
+      sourceRecordingId: unrelated.id,
+      sourceRecordingName: unrelated.name,
+      startTime: 0,
+      endTime: 10,
+      createdAt: null,
+    });
+    otherClip.tags.match = ["casual"];
+    byId.set(otherClip.id, otherClip);
+    expect(recordingLibraryTab(otherClip, byId)).toBe("other");
   });
 });

@@ -13,14 +13,19 @@ const path = require("node:path");
 const fs = require("node:fs");
 const readline = require("node:readline");
 const { createHash, randomUUID } = require("node:crypto");
-const { spawn } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
+const { promisify } = require("node:util");
+const { deflateSync } = require("node:zlib");
 const { autoUpdater } = require("electron-updater");
 const { OBSWebSocket } = require("obs-websocket-js");
 const ffmpegStaticPath = require("ffmpeg-static");
 const { MatchLogWatcher } = require("./match-watcher.cjs");
 const { createUnnamedRecordChapter } = require("./record-chapter.cjs");
 const { addGameChaptersToMp4, probeChapters } = require("./game-chapters.cjs");
+const { buildClipExportFfmpegArgs } = require("./clip-export.cjs");
+const { planClipTrim, replaceClipWithBackup } = require("./clip-trim.cjs");
 const { createMissingManualChapterClips } = require("./manual-chapter-clips.cjs");
+const { noGameStartedRecordingBaseName } = require("./automatic-recording-outcome.cjs");
 const { normalizeYouTubeVideoUrl, readYouTubeVideoUrl } = require("./recording-youtube.cjs");
 const {
   takePendingReplayMatch,
@@ -38,8 +43,30 @@ const { createProcessingConfigurationStore } = require("./processing-config.cjs"
 const { createMoveCatalogStore } = require("./move-catalog.cjs");
 const { validateMoveTake } = require("./move-take-validation.cjs");
 const { createOpponentSetHistory } = require("./opponent-set-history.cjs");
+const {
+  createReplayStagingStore,
+  logicalReplayId,
+  orderReplayFilesForScan,
+} = require("./replay-staging.cjs");
 const detectorKeys = require("./detector-config-keys.json");
 const { configureDevelopmentUserData } = require("./dev-user-data.cjs");
+const {
+  publishPortraits,
+  readPortraitCatalog,
+  portraitPlayerNameHints,
+  portraitArtwork,
+  missingPortraitArtwork,
+  portraitMatchup,
+} = require("./portrait-library.cjs");
+const {
+  parsePakHeader,
+  parsePakDirectory,
+  portraitPakRelativePath,
+  decodePortraitMunged,
+  encodePngRgba,
+} = app.isPackaged
+  ? require("./generated/artwork-extractor.cjs")
+  : require("./artwork-extractor.ts");
 const isDev = !app.isPackaged;
 const rendererProfilingEnabled =
   process.env.LABATAR_RENDERER_PROFILE === "1" ||
@@ -50,6 +77,8 @@ const developmentUserData = isDev
 const processingConfigurationStore = () =>
   createProcessingConfigurationStore(app.getPath("userData"), detectorKeys);
 const moveCatalogStore = () => createMoveCatalogStore(app.getPath("userData"));
+const replayStagingStore = () => createReplayStagingStore(app.getPath("userData"));
+const execFileAsync = promisify(execFile);
 
 function startupDiagnosticLogFile() {
   try {
@@ -823,6 +852,7 @@ function finalizeObsRecording(outputPath, reason) {
 async function finalizeObsRecordingOnce(outputPath, reason) {
   const recording = activeObsRecording;
   activeObsRecording = null;
+  const noGameStartedName = noGameStartedRecordingBaseName(recording);
   setRecordingWork("obs-save", {
     title: "Saving recording",
     fileName: path.basename(outputPath || recording.outputPath || "OBS recording"),
@@ -830,7 +860,7 @@ async function finalizeObsRecordingOnce(outputPath, reason) {
   });
   if (recording.source === "automatic") {
     let setNumber = null;
-    if (recording.lobbyId) {
+    if (recording.lobbyId && !noGameStartedName) {
       try {
         setNumber = await opponentSetHistory.setNumberForLobby(recording.lobbyId);
       } catch (error) {
@@ -843,17 +873,26 @@ async function finalizeObsRecordingOnce(outputPath, reason) {
         logRecordingDiagnostic("opponent-set-number-unavailable", { lobbyId: recording.lobbyId });
       }
     }
-    const setLabel = recording.fallbackMatchId
-      ? "match"
-      : setNumber
-        ? `set ${setNumber}`
-        : "set unknown";
+    const setLabel = noGameStartedName
+      ? "no game started"
+      : recording.fallbackMatchId
+        ? "match"
+        : setNumber
+          ? `set ${setNumber}`
+          : "set unknown";
     recording.metadata = { ...recording.metadata, setLabel };
     for (const game of recording.games ?? []) {
       if (setNumber) game.setNumber = setNumber;
       else if (recording.fallbackMatchId) game.setNumber = null;
       game.metadata = { ...game.metadata, setLabel };
     }
+  }
+  if (noGameStartedName) {
+    logRecordingDiagnostic("automatic-no-game-recording", {
+      sessionId: recording.sessionId,
+      lobbyId: recording.lobbyId,
+      reason,
+    });
   }
   let manifestPath = null;
   let manifestError = null;
@@ -863,7 +902,7 @@ async function finalizeObsRecordingOnce(outputPath, reason) {
       recording.metadata,
       null,
       recording.source === "automatic"
-        ? recordingSetBaseName(recording.metadata)
+        ? (noGameStartedName ?? recordingSetBaseName(recording.metadata))
         : recording.fileNameBase,
     );
     if (recording.moveTake) {
@@ -914,6 +953,7 @@ async function finalizeObsRecordingOnce(outputPath, reason) {
             startedAt: recording.startedAt,
             stoppedAt: new Date().toISOString(),
             stopReason: reason,
+            recordingStatus: noGameStartedName ? "no-game-started" : null,
             outputPath: namedOutputPath,
             source: recording.source,
             tags: recording.tags ?? { match: [], lab: [], combo: false, pressure: false },
@@ -2256,6 +2296,7 @@ function watchElectronFiles() {
     __filename,
     path.join(__dirname, "preload.cjs"),
     path.join(__dirname, "match-watcher.cjs"),
+    path.join(__dirname, "artwork-extractor.ts"),
     path.join(__dirname, "support-map.json"),
     path.join(__dirname, "character-map.json"),
   ];
@@ -2287,8 +2328,13 @@ function getCaptureSettings() {
   const saved = readSettings().capture ?? {};
   const hotkey =
     typeof saved.hotkey === "string" && saved.hotkey.trim() ? saved.hotkey.trim() : "F9";
+  const chapterHotkey =
+    typeof saved.chapterHotkey === "string" && saved.chapterHotkey.trim()
+      ? saved.chapterHotkey.trim()
+      : "F10";
   return {
     hotkey,
+    chapterHotkey,
     autoGameChapters: saved.autoGameChapters === true,
     autoClipManualChapters: saved.autoClipManualChapters !== false,
   };
@@ -2364,27 +2410,45 @@ async function addRecordingChapter(trigger = "hotkey") {
   }
 }
 
-function registerChapterShortcut() {
-  const hotkey = "F10";
+function registerChapterShortcut(hotkey) {
+  if (hotkey.toUpperCase() === getCaptureSettings().hotkey.toUpperCase()) {
+    throw new Error("The chapter shortcut must be different from the global capture shortcut.");
+  }
+  const previousShortcut = chapterShortcut;
+  if (previousShortcut) {
+    globalShortcut.unregister(previousShortcut);
+    chapterShortcut = null;
+  }
   const registered = globalShortcut.register(hotkey, () => {
     void addRecordingChapter("hotkey").catch(() => undefined);
   });
   chapterShortcut = registered ? hotkey : null;
   setCaptureState({
+    chapterHotkey: hotkey,
     chapterHotkeyRegistered: registered,
     chapterError: registered
       ? null
       : `Could not register global shortcut ${hotkey}. It may already be in use.`,
   });
-  if (!registered)
+  if (!registered) {
+    if (previousShortcut) {
+      const restored = globalShortcut.register(previousShortcut, () => {
+        void addRecordingChapter("hotkey").catch(() => undefined);
+      });
+      chapterShortcut = restored ? previousShortcut : null;
+      setCaptureState({
+        chapterHotkey: previousShortcut,
+        chapterHotkeyRegistered: restored,
+      });
+    }
     throw new Error(`Could not register global shortcut ${hotkey}. It may already be in use.`);
+  }
+  return publicCaptureState();
 }
 
 function registerCaptureShortcut(hotkey) {
-  if (hotkey.toUpperCase() === "F10") {
-    throw new Error(
-      "F10 is reserved for adding a recording chapter. Choose another capture shortcut.",
-    );
+  if (hotkey.toUpperCase() === getCaptureSettings().chapterHotkey.toUpperCase()) {
+    throw new Error("The capture shortcut must be different from the recording chapter shortcut.");
   }
   if (captureShortcut) {
     globalShortcut.unregister(captureShortcut);
@@ -2410,6 +2474,42 @@ function getReplayFolder() {
   const savedFolder = readSettings().replaysFolder;
   if (typeof savedFolder === "string" && savedFolder.trim()) return savedFolder;
   return fs.existsSync(defaultReplaysFolder) ? defaultReplaysFolder : null;
+}
+
+async function getGameFolderStatus() {
+  const folder = getReplayFolder();
+  if (!folder) {
+    return {
+      folder: null,
+      issue: "Game folder not found. Choose the game's installation folder in Settings.",
+    };
+  }
+  const folderStat = await fs.promises.stat(folder).catch(() => null);
+  if (!folderStat?.isDirectory()) {
+    return {
+      folder,
+      issue:
+        "The selected game folder is unavailable. Choose the game's installation folder in Settings.",
+    };
+  }
+  const packagesFolder = path.join(folder, "data_packages");
+  const packagesStat = await fs.promises.stat(packagesFolder).catch(() => null);
+  if (!packagesStat?.isDirectory()) {
+    return {
+      folder,
+      issue:
+        "The selected game folder has no data_packages folder. Choose the game's installation folder in Settings.",
+    };
+  }
+  const pakFiles = await findDevArtworkPakFiles(packagesFolder).catch(() => null);
+  if (!pakFiles?.length) {
+    return {
+      folder,
+      issue:
+        "No readable game .pak files were found in data_packages. Choose the game's installation folder in Settings.",
+    };
+  }
+  return { folder, issue: null };
 }
 
 function updateInfo(info) {
@@ -2587,6 +2687,25 @@ ipcMain.handle("capture:set-settings", (_, request) => {
       // Keep the failed registration visible if the previous shortcut is no longer available.
     }
     setCaptureState({ error: obsErrorMessage(error) });
+    throw error;
+  }
+});
+ipcMain.handle("capture:set-chapter-settings", (_, request) => {
+  const current = getCaptureSettings();
+  const chapterHotkey = String(request?.hotkey ?? current.chapterHotkey).trim();
+  if (!chapterHotkey)
+    throw new Error("Enter a global shortcut, such as F10 or CommandOrControl+Shift+C.");
+  saveCaptureSettings({ chapterHotkey });
+  try {
+    return registerChapterShortcut(chapterHotkey);
+  } catch (error) {
+    saveCaptureSettings(current);
+    try {
+      registerChapterShortcut(current.chapterHotkey);
+    } catch {
+      // Keep the failed registration visible if the previous shortcut is no longer available.
+    }
+    setCaptureState({ chapterError: obsErrorMessage(error) });
     throw error;
   }
 });
@@ -2859,56 +2978,98 @@ async function findLogFiles(folder) {
   return [...new Set(logFiles)].sort((left, right) => left.localeCompare(right));
 }
 
-async function readReplayRatings(folder, onProgress) {
-  const logFiles = await findLogFiles(folder);
+async function readReplayRatingsFromLog(logFile) {
   const ratingsByReplayName = new Map();
-  for (const [index, logFile] of logFiles.entries()) {
-    let pendingRatings = null;
-    const pendingVolatility = {};
-    const pendingCharacters = {};
-    let pendingMmrChange = null;
-    const input = fs.createReadStream(logFile, { encoding: "latin1" });
-    const lines = readline.createInterface({ input, crlfDelay: Infinity });
-    for await (const line of lines) {
-      const glicko = parseSetNewMatchGlicko(line);
-      if (glicko) {
-        if (glicko.player === "player1") {
-          pendingCharacters.player1 = null;
-          pendingCharacters.player2 = null;
-          pendingMmrChange = null;
-        }
-        pendingVolatility[glicko.player] = glicko.volatility;
-        pendingCharacters[glicko.player] = glicko.character;
-      }
-
-      const mmrChange = parseCharacterMmrChange(line);
-      if (mmrChange) {
-        pendingMmrChange = mmrChange;
-      }
-
-      const gatheredRatings = line.match(/Gathered ratings for header:\s*(.*)$/i);
-      const writtenRatings = line.match(/Wrote ratings to header\s*\(([^)]*glicko[^)]*)\)/i);
-      if (gatheredRatings || writtenRatings) {
-        pendingRatings = parseReplayRatings(
-          gatheredRatings?.[1] ?? writtenRatings[1],
-          pendingVolatility,
-          pendingMmrChange,
-          pendingCharacters,
-        );
-      }
-
-      const replayMatch = line.match(/Successfully wrote replay file:\s*(.*?\.dlr)/i);
-      if (replayMatch && pendingRatings) {
-        ratingsByReplayName.set(path.win32.basename(replayMatch[1]), pendingRatings);
-        pendingRatings = null;
-        pendingVolatility.player1 = null;
-        pendingVolatility.player2 = null;
+  let pendingRatings = null;
+  const pendingVolatility = {};
+  const pendingCharacters = {};
+  let pendingMmrChange = null;
+  const input = fs.createReadStream(logFile, { encoding: "latin1" });
+  const lines = readline.createInterface({ input, crlfDelay: Infinity });
+  for await (const line of lines) {
+    const glicko = parseSetNewMatchGlicko(line);
+    if (glicko) {
+      if (glicko.player === "player1") {
         pendingCharacters.player1 = null;
         pendingCharacters.player2 = null;
         pendingMmrChange = null;
       }
+      pendingVolatility[glicko.player] = glicko.volatility;
+      pendingCharacters[glicko.player] = glicko.character;
+    }
+
+    const mmrChange = parseCharacterMmrChange(line);
+    if (mmrChange) {
+      pendingMmrChange = mmrChange;
+    }
+
+    const gatheredRatings = line.match(/Gathered ratings for header:\s*(.*)$/i);
+    const writtenRatings = line.match(/Wrote ratings to header\s*\(([^)]*glicko[^)]*)\)/i);
+    if (gatheredRatings || writtenRatings) {
+      pendingRatings = parseReplayRatings(
+        gatheredRatings?.[1] ?? writtenRatings[1],
+        pendingVolatility,
+        pendingMmrChange,
+        pendingCharacters,
+      );
+    }
+
+    const replayMatch = line.match(/Successfully wrote replay file:\s*(.*?\.dlr)/i);
+    if (replayMatch && pendingRatings) {
+      ratingsByReplayName.set(path.win32.basename(replayMatch[1]), pendingRatings);
+      pendingRatings = null;
+      pendingVolatility.player1 = null;
+      pendingVolatility.player2 = null;
+      pendingCharacters.player1 = null;
+      pendingCharacters.player2 = null;
+      pendingMmrChange = null;
+    }
+  }
+  return ratingsByReplayName;
+}
+
+async function readReplayRatings(folder, onProgress, cache) {
+  const logFiles = await findLogFiles(folder);
+  const ratingsByReplayName = new Map();
+  const currentLogKeys = new Set();
+  for (const [index, logFile] of logFiles.entries()) {
+    const cacheKey = path.resolve(logFile).toLowerCase();
+    currentLogKeys.add(cacheKey);
+    let ratings = null;
+    try {
+      const stat = await fs.promises.stat(logFile);
+      const fingerprint = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+      const cached = cache?.ratingLogs.get(cacheKey);
+      if (cached?.fingerprint === fingerprint) {
+        ratings = cached.ratings;
+        cache.ratingLogs.delete(cacheKey);
+        cache.ratingLogs.set(cacheKey, cached);
+      } else {
+        ratings = await readReplayRatingsFromLog(logFile);
+        if (cache) {
+          cache.ratingLogs.set(cacheKey, { fingerprint, ratings });
+          cache.dirty = true;
+        }
+      }
+    } catch {
+      // A rotating or deleted log should not prevent replay history from loading.
+    }
+    for (const [replayName, replayRatings] of ratings ?? []) {
+      ratingsByReplayName.set(replayName, replayRatings);
     }
     onProgress?.(index + 1, logFiles.length);
+  }
+  if (cache) {
+    for (const cacheKey of cache.ratingLogs.keys()) {
+      if (!currentLogKeys.has(cacheKey)) {
+        cache.ratingLogs.delete(cacheKey);
+        cache.dirty = true;
+      }
+    }
+    while (cache.ratingLogs.size > 512) {
+      cache.ratingLogs.delete(cache.ratingLogs.keys().next().value);
+      cache.dirty = true;
+    }
   }
   return ratingsByReplayName;
 }
@@ -3119,6 +3280,7 @@ async function processGameChapters(videoPath) {
     throw new Error("Game chapters are already being added to this recording.");
   if (manualChapterClipJobs.has(videoPath))
     throw new Error("Wait for F10 clip creation to finish before adding game chapters.");
+  if (clipTrimJobs.has(videoPath)) throw new Error("Wait for the clip trim to finish.");
   if (
     pendingAutoRecordings.some(({ recording }) => recording.outputPath === videoPath) ||
     [...replayAttachmentsInProgress.keys()].some((recording) => recording.outputPath === videoPath)
@@ -3479,9 +3641,25 @@ async function availableRecordingPath(directory, baseName, extension = ".mp4") {
   }
 }
 
+const clipExportSourceCounts = new Map();
+
 async function exportRecordingClip(request = {}, options = {}) {
   const recordingId = String(request.recordingId ?? "");
   const sourcePath = resolveRecordingPath(recordingId);
+  if (clipTrimJobs.has(sourcePath)) {
+    throw new Error("Wait for this clip's trim to finish before exporting from it.");
+  }
+  clipExportSourceCounts.set(sourcePath, (clipExportSourceCounts.get(sourcePath) ?? 0) + 1);
+  try {
+    return await exportRecordingClipFromSource(request, options, sourcePath);
+  } finally {
+    const remaining = (clipExportSourceCounts.get(sourcePath) ?? 1) - 1;
+    if (remaining > 0) clipExportSourceCounts.set(sourcePath, remaining);
+    else clipExportSourceCounts.delete(sourcePath);
+  }
+}
+
+async function exportRecordingClipFromSource(request, options, sourcePath) {
   const sourceStat = await fs.promises.stat(sourcePath).catch(() => null);
   if (!sourceStat?.isFile()) throw new Error("The source recording no longer exists.");
 
@@ -3509,38 +3687,7 @@ async function exportRecordingClip(request = {}, options = {}) {
   const duration = endTime - startTime;
 
   try {
-    await runFfmpeg([
-      "-nostdin",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-y",
-      "-i",
-      sourcePath,
-      "-ss",
-      startTime.toFixed(3),
-      "-t",
-      duration.toFixed(3),
-      "-map",
-      "0:v:0",
-      "-map",
-      "0:a:0?",
-      "-c:v",
-      "libx264",
-      "-preset",
-      "fast",
-      "-crf",
-      "18",
-      "-c:a",
-      "aac",
-      "-b:a",
-      "192k",
-      "-movflags",
-      "+faststart",
-      "-avoid_negative_ts",
-      "make_zero",
-      outputPath,
-    ]);
+    await runFfmpeg(buildClipExportFfmpegArgs({ sourcePath, startTime, duration, outputPath }));
   } catch (error) {
     await fs.promises.rm(outputPath, { force: true }).catch(() => undefined);
     throw error;
@@ -3601,10 +3748,107 @@ async function exportRecordingClip(request = {}, options = {}) {
   };
 }
 
+const clipTrimJobs = new Set();
+
+async function trimRecordingClip(request = {}) {
+  const videoPath = resolveRecordingPath(String(request.recordingId ?? ""));
+  if (path.extname(videoPath).toLowerCase() !== ".mp4") {
+    throw new Error("Only MP4 clips can be trimmed in place.");
+  }
+  if (clipTrimJobs.has(videoPath)) throw new Error("This clip is already being trimmed.");
+  if (clipExportSourceCounts.has(videoPath)) {
+    throw new Error("Wait for clip export to finish before trimming its source.");
+  }
+  if (gameChapterJobs.has(videoPath) || manualChapterClipJobs.has(videoPath)) {
+    throw new Error("Wait for chapter or clip processing to finish before trimming.");
+  }
+  if (
+    obsState.recording.active &&
+    [obsState.recording.outputPath, activeObsRecording?.outputPath].includes(videoPath)
+  ) {
+    throw new Error("Stop recording before trimming this clip.");
+  }
+  clipTrimJobs.add(videoPath);
+  let tempFolder = null;
+  try {
+    const sourceEntry = await fs.promises.lstat(videoPath);
+    if (!sourceEntry.isFile()) throw new Error("The clip must be a regular file, not a link.");
+    const originalStat = await fs.promises.stat(videoPath);
+    if (!originalStat.isFile()) throw new Error("The clip no longer exists.");
+    const manifestPath = recordingManifestPathForVideo(videoPath);
+    const manifestEntry = await fs.promises.lstat(manifestPath);
+    if (!manifestEntry.isFile()) throw new Error("The clip metadata must be a regular file.");
+    const originalManifestContent = await fs.promises.readFile(manifestPath, "utf8");
+    const manifest = JSON.parse(originalManifestContent);
+    if (!manifest?.clip) throw new Error("Only clips can be trimmed in place.");
+    const folder = path.resolve(getObsSettings().recordDirectory);
+    const recordingId = recordingIdForPath(videoPath, folder);
+    for (const filePath of await findRecordingFiles(folder)) {
+      if (filePath === videoPath) continue;
+      const childManifest = await fs.promises
+        .readFile(recordingManifestPathForVideo(filePath), "utf8")
+        .then(JSON.parse)
+        .catch(() => null);
+      if (childManifest?.clip?.sourceRecordingId === recordingId) {
+        throw new Error("This clip has child clips. Remove or export them before trimming it.");
+      }
+    }
+    const executable = resolveFfmpegPath();
+    const probe = await probeChapters(executable, videoPath);
+    const startTime = Number(request.startTime);
+    const endTime = Number(request.endTime);
+    const nextManifest = planClipTrim(manifest, startTime, endTime, probe.durationMs);
+    tempFolder = await fs.promises.mkdtemp(path.join(path.dirname(videoPath), ".labatar-trim-"));
+    const candidateVideoPath = path.join(tempFolder, "clip.mp4");
+    const candidateManifestPath = path.join(tempFolder, "clip.labatar.json");
+    await runFfmpeg(
+      buildClipExportFfmpegArgs({
+        sourcePath: videoPath,
+        startTime,
+        duration: endTime - startTime,
+        outputPath: candidateVideoPath,
+      }),
+    );
+    const candidateStat = await fs.promises.stat(candidateVideoPath);
+    const candidateProbe = await probeChapters(executable, candidateVideoPath);
+    if (
+      !candidateStat.isFile() ||
+      candidateStat.size === 0 ||
+      !Number.isFinite(candidateProbe.durationMs) ||
+      Math.abs(candidateProbe.durationMs - (endTime - startTime) * 1000) > 500 ||
+      candidateProbe.chapters.length > 0
+    ) {
+      throw new Error("The trimmed clip failed verification; the original was not replaced.");
+    }
+    await fs.promises.writeFile(
+      candidateManifestPath,
+      JSON.stringify(nextManifest, null, 2),
+      "utf8",
+    );
+    const backup = await replaceClipWithBackup({
+      videoPath,
+      manifestPath,
+      candidateVideoPath,
+      candidateManifestPath,
+      originalStat,
+      originalManifestContent,
+    });
+    return { recording: await getRecordedVideoForPath(videoPath), ...backup };
+  } finally {
+    clipTrimJobs.delete(videoPath);
+    if (tempFolder) {
+      await fs.promises.unlink(path.join(tempFolder, "clip.mp4")).catch(() => undefined);
+      await fs.promises.unlink(path.join(tempFolder, "clip.labatar.json")).catch(() => undefined);
+      await fs.promises.rmdir(tempFolder).catch(() => undefined);
+    }
+  }
+}
+
 async function processManualChapterClips(videoPath) {
   if (path.extname(videoPath).toLowerCase() !== ".mp4") {
     throw new Error("F10 chapter clips require an MP4 recording.");
   }
+  if (clipTrimJobs.has(videoPath)) throw new Error("Wait for the clip trim to finish.");
   if (manualChapterClipJobs.has(videoPath)) return manualChapterClipJobs.get(videoPath);
   if (gameChapterJobs.has(videoPath)) {
     throw new Error("Wait for game chapter processing to finish before creating F10 clips.");
@@ -3784,7 +4028,14 @@ async function reprocessAutomaticRecordingName(request = {}) {
   }
   let replay = null;
   if (replayPath) {
-    replay = await parseReplayFile(replayPath, path.dirname(replayPath)).catch(() => null);
+    const alternate = replayStagingStore().alternateSavedPath(replayPath);
+    for (const candidate of [replayPath, alternate].filter(Boolean)) {
+      const parsed = await parseReplayFile(candidate, path.dirname(candidate)).catch(() => null);
+      if (parsed && replayMatchesGame(firstGame, parsed, formatCharacter)) {
+        replay = parsed;
+        break;
+      }
+    }
   }
   replay ??= firstGame.replay ?? savedReplay?.replay ?? null;
   if (!replay) {
@@ -4184,56 +4435,313 @@ async function findReplayFiles(folder) {
   return replayFiles.sort((left, right) => left.localeCompare(right));
 }
 
+const REPLAY_SCAN_CACHE_VERSION = 1;
+
+let replayScanCache = {
+  folderKey: null,
+  folderPath: null,
+  replayFiles: new Map(),
+  ratingLogs: new Map(),
+  snapshot: null,
+  loaded: false,
+  loadPromise: null,
+  dirty: false,
+};
+
+function replayScanCacheFor(folder) {
+  const folderKey = path.resolve(folder).toLowerCase();
+  if (replayScanCache.folderKey !== folderKey) {
+    replayScanCache = {
+      folderKey,
+      folderPath: path.resolve(folder),
+      replayFiles: new Map(),
+      ratingLogs: new Map(),
+      snapshot: null,
+      loaded: false,
+      loadPromise: null,
+      dirty: false,
+    };
+  }
+  return replayScanCache;
+}
+
+function replayScanCachePath(folder) {
+  const key = createHash("sha256")
+    .update(path.resolve(folder).toLowerCase())
+    .digest("hex")
+    .slice(0, 20);
+  return path.join(app.getPath("userData"), `replay-scan-cache-${key}.json`);
+}
+
+async function loadReplayScanCache(folder) {
+  const cache = replayScanCacheFor(folder);
+  if (cache.loaded) return cache;
+  if (!cache.loadPromise) {
+    cache.loadPromise = (async () => {
+      try {
+        const stored = JSON.parse(await fs.promises.readFile(replayScanCachePath(folder), "utf8"));
+        if (
+          stored?.version !== REPLAY_SCAN_CACHE_VERSION ||
+          typeof stored.folder !== "string" ||
+          path.resolve(stored.folder).toLowerCase() !== cache.folderKey ||
+          !Array.isArray(stored.replayFiles) ||
+          !Array.isArray(stored.ratingLogs) ||
+          !Array.isArray(stored.snapshot?.games) ||
+          !stored.snapshot.playerCounts ||
+          typeof stored.snapshot.playerCounts !== "object"
+        ) {
+          return cache;
+        }
+        cache.replayFiles = new Map(stored.replayFiles);
+        cache.ratingLogs = new Map(
+          stored.ratingLogs.map(([key, entry]) => [
+            key,
+            { ...entry, ratings: new Map(entry.ratings) },
+          ]),
+        );
+        cache.snapshot = stored.snapshot;
+      } catch {
+        // A missing or unreadable cache falls back to a regular first scan.
+      } finally {
+        cache.loaded = true;
+      }
+      return cache;
+    })();
+  }
+  await Promise.resolve(cache.loadPromise);
+  return cache;
+}
+
+async function saveReplayScanCache(cache) {
+  if (!cache.dirty || !cache.folderPath) return;
+  const filePath = replayScanCachePath(cache.folderPath);
+  const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
+  const stored = {
+    version: REPLAY_SCAN_CACHE_VERSION,
+    folder: cache.folderPath,
+    replayFiles: [...cache.replayFiles],
+    ratingLogs: [...cache.ratingLogs].map(([key, entry]) => [
+      key,
+      { fingerprint: entry.fingerprint, ratings: [...entry.ratings] },
+    ]),
+    snapshot: cache.snapshot,
+  };
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  try {
+    await fs.promises.writeFile(temporaryPath, JSON.stringify(stored));
+    await fs.promises.rename(temporaryPath, filePath);
+    cache.dirty = false;
+  } finally {
+    await fs.promises.unlink(temporaryPath).catch(() => {});
+  }
+}
+
+function replayFileCacheKey(filePath, stat) {
+  const hasFileIdentity = Number.isFinite(stat.ino) && stat.ino !== 0;
+  return hasFileIdentity ? `${stat.dev}:${stat.ino}` : path.resolve(filePath).toLowerCase();
+}
+
+function replayFileFingerprint(stat) {
+  return `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+}
+
+let replayScanCount = 0;
+let replayStagingBusy = false;
+ipcMain.handle("replays:get-cached-scan", async (_, folder) => {
+  if (!folder || !fs.existsSync(folder)) return null;
+  const resolvedFolder = path.resolve(folder);
+  if (!fs.statSync(resolvedFolder).isDirectory()) return null;
+  const cache = await loadReplayScanCache(resolvedFolder);
+  return cache.snapshot;
+});
+
 ipcMain.handle("replays:scan-folder", async (event, folder) => {
+  if (replayStagingBusy)
+    throw new Error("Replay staging is in progress. Try scanning again shortly.");
   if (!folder || !fs.existsSync(folder)) return { games: [], playerCounts: {}, duplicateCount: 0 };
   const resolvedFolder = path.resolve(folder);
   if (!fs.statSync(resolvedFolder).isDirectory()) {
     return { games: [], playerCounts: {}, duplicateCount: 0 };
   }
-  writeSettings({ ...readSettings(), replaysFolder: resolvedFolder });
-  const replayFiles = await findReplayFiles(resolvedFolder);
-  const total = replayFiles.length;
-  const games = [];
-  const seenReplayHashes = new Set();
-  let duplicateCount = 0;
-  event.sender.send("replays:scan-progress", { completed: 0, total: 0, phase: "logs" });
-  const ratingsByReplayName = await readReplayRatings(resolvedFolder, (completed, logTotal) => {
-    event.sender.send("replays:scan-progress", {
-      completed,
-      total: logTotal,
-      phase: "logs",
-    });
-  });
-  event.sender.send("replays:scan-progress", { completed: 0, total, phase: "scanning" });
-  for (const [index, filePath] of replayFiles.entries()) {
-    const { contentHash, ...game } = await parseReplayFile(
-      filePath,
+  replayScanCount += 1;
+  try {
+    writeSettings({ ...readSettings(), replaysFolder: resolvedFolder });
+    const scanCache = await loadReplayScanCache(resolvedFolder);
+    const replayFiles = await findReplayFiles(resolvedFolder);
+    let stagingState = null;
+    try {
+      stagingState = replayStagingStore().stateForFolder(resolvedFolder);
+    } catch {
+      // An unreadable staging journal must not hide otherwise readable replay files.
+    }
+    orderReplayFilesForScan(resolvedFolder, replayFiles, stagingState);
+    const total = replayFiles.length;
+    const games = [];
+    const seenReplayHashes = new Set();
+    const seenReplayIds = new Set();
+    let duplicateCount = 0;
+    event.sender.send("replays:scan-progress", { completed: 0, total: 0, phase: "logs" });
+    const ratingsByReplayName = await readReplayRatings(
       resolvedFolder,
-      ratingsByReplayName,
+      (completed, logTotal) => {
+        event.sender.send("replays:scan-progress", {
+          completed,
+          total: logTotal,
+          phase: "logs",
+        });
+      },
+      scanCache,
     );
-    if (seenReplayHashes.has(contentHash)) duplicateCount += 1;
-    else {
-      seenReplayHashes.add(contentHash);
-      games.push(game);
+    event.sender.send("replays:scan-progress", { completed: 0, total, phase: "scanning" });
+    const currentReplayCacheKeys = new Set();
+    for (const [index, filePath] of replayFiles.entries()) {
+      const stat = await fs.promises.stat(filePath);
+      const cacheKey = replayFileCacheKey(filePath, stat);
+      currentReplayCacheKeys.add(cacheKey);
+      const fingerprint = replayFileFingerprint(stat);
+      let cached = scanCache.replayFiles.get(cacheKey);
+      if (cached?.fingerprint !== fingerprint) {
+        cached = {
+          fingerprint,
+          replay: await parseReplayFile(filePath, resolvedFolder, new Map()),
+        };
+        scanCache.dirty = true;
+      }
+      scanCache.replayFiles.delete(cacheKey);
+      scanCache.replayFiles.set(cacheKey, cached);
+      if (scanCache.replayFiles.size > 50000) {
+        scanCache.replayFiles.delete(scanCache.replayFiles.keys().next().value);
+        scanCache.dirty = true;
+      }
+      const game = {
+        ...cached.replay,
+        ratings: ratingsByReplayName.get(path.basename(filePath)) ?? null,
+      };
+      game.id = logicalReplayId(resolvedFolder, filePath, seenReplayIds, stagingState);
+      if (seenReplayHashes.has(game.contentHash)) duplicateCount += 1;
+      else {
+        seenReplayHashes.add(game.contentHash);
+        seenReplayIds.add(game.id);
+        games.push(game);
+      }
+      event.sender.send("replays:scan-progress", {
+        completed: index + 1,
+        total,
+        phase: "scanning",
+      });
+      // Give Electron a turn between batches so the window and progress events
+      // remain responsive during large replay-folder scans.
+      if ((index + 1) % 10 === 0) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
     }
-    event.sender.send("replays:scan-progress", {
-      completed: index + 1,
-      total,
-      phase: "scanning",
+    for (const cacheKey of scanCache.replayFiles.keys()) {
+      if (!currentReplayCacheKeys.has(cacheKey)) {
+        scanCache.replayFiles.delete(cacheKey);
+        scanCache.dirty = true;
+      }
+    }
+    const playerCounts = {};
+    for (const game of games) {
+      playerCounts[game.player1] = (playerCounts[game.player1] ?? 0) + 1;
+      playerCounts[game.player2] = (playerCounts[game.player2] ?? 0) + 1;
+    }
+    const result = { games, playerCounts, duplicateCount };
+    if (JSON.stringify(scanCache.snapshot) !== JSON.stringify(result)) scanCache.dirty = true;
+    scanCache.snapshot = result;
+    await saveReplayScanCache(scanCache).catch((error) => {
+      startupDiagnostic("replay-scan-cache-write-failed", {
+        folder: resolvedFolder,
+        error: error instanceof Error ? error.message : String(error),
+      });
     });
-    // Give Electron a turn between batches so the window and progress events
-    // remain responsive during large replay-folder scans.
-    if ((index + 1) % 10 === 0) {
-      await new Promise((resolve) => setImmediate(resolve));
+    return result;
+  } finally {
+    replayScanCount -= 1;
+  }
+});
+
+async function isGameRunning() {
+  if (process.platform !== "win32") return false;
+  try {
+    const { stdout } = await execFileAsync(
+      "tasklist",
+      ["/FI", "IMAGENAME eq Atla.exe", "/FO", "CSV", "/NH"],
+      { windowsHide: true },
+    );
+    return /^"Atla\.exe",/im.test(stdout);
+  } catch {
+    return false;
+  }
+}
+
+async function runReplayStagingMutation(operation) {
+  if (replayStagingBusy) throw new Error("A replay staging operation is already in progress.");
+  if (replayScanCount > 0)
+    throw new Error("Wait for the replay scan to finish before changing in-game replays.");
+  replayStagingBusy = true;
+  try {
+    if (
+      obsState.recording.active ||
+      pendingAutoRecordings.length ||
+      replayAttachmentsInProgress.size
+    ) {
+      throw new Error(
+        "Wait for recording and replay linking to finish before changing in-game replays.",
+      );
+    }
+    if (await isGameRunning()) {
+      throw new Error("Close Avatar Legends before changing in-game replays.");
+    }
+    return await operation();
+  } finally {
+    replayStagingBusy = false;
+  }
+}
+
+ipcMain.handle("replays:staging-status", async () =>
+  replayStagingStore().status(getReplayFolder()),
+);
+
+ipcMain.handle("replays:staging-preview", async (_, request) => {
+  const folder = getReplayFolder();
+  if (!folder) throw new Error("Choose the game folder before staging replays.");
+  return replayStagingStore().preview(folder, request?.ids);
+});
+
+ipcMain.handle("replays:stage", async (_, request) =>
+  runReplayStagingMutation(async () => {
+    const folder = getReplayFolder();
+    if (!folder) throw new Error("Choose the game folder before staging replays.");
+    return replayStagingStore().stage(folder, request?.ids);
+  }),
+);
+
+ipcMain.handle("replays:restore-staged", async () =>
+  runReplayStagingMutation(() => replayStagingStore().restore()),
+);
+
+async function hydrateFirstPortraitReplay(manifest) {
+  const game = manifest.games?.find(
+    (entry) => entry?.replay?.player1Character || entry?.metadata?.player1Character,
+  );
+  if (!game || (game.replay?.player1 && game.replay?.player2)) return;
+  const replayEntry = game.matchId
+    ? manifest.replays?.find((entry) => entry.matchId === game.matchId)
+    : null;
+  const replayPath = game.replayPath || replayEntry?.replayPath;
+  if (typeof replayPath !== "string" || !replayPath) return;
+  const alternate = replayStagingStore().alternateSavedPath(replayPath);
+  for (const candidate of [replayPath, alternate].filter(Boolean)) {
+    const stat = await fs.promises.stat(candidate).catch(() => null);
+    if (!stat?.isFile() || stat.size > 16 * 1024 * 1024) continue;
+    const replay = await parseReplayFile(candidate).catch(() => null);
+    if (replayMatchesGame(game, replay, formatCharacter)) {
+      game.replay = replay;
+      return;
     }
   }
-  const playerCounts = {};
-  for (const game of games) {
-    playerCounts[game.player1] = (playerCounts[game.player1] ?? 0) + 1;
-    playerCounts[game.player2] = (playerCounts[game.player2] ?? 0) + 1;
-  }
-  return { games, playerCounts, duplicateCount };
-});
+}
 
 ipcMain.handle("recordings:list", async (_, request) => {
   const analysisScope =
@@ -4241,12 +4749,15 @@ ipcMain.handle("recordings:list", async (_, request) => {
       ? request.analysisScope
       : "none";
   const folder = path.resolve(getObsSettings().recordDirectory);
+  await ensurePortraitLibrary();
+  const portraitCatalog = await readPortraitCatalog(portraitLibraryRoot());
   await repairDanglingClipLinks(folder);
   const files = await findRecordingFiles(folder);
   const recordings = [];
   for (const filePath of files) {
     const stat = await fs.promises.stat(filePath);
     const manifest = await readRecordingManifest(filePath, analysisScope);
+    await hydrateFirstPortraitReplay(manifest);
     recordings.push({
       id: path.relative(folder, filePath).split(path.sep).join("/"),
       name: path.basename(filePath),
@@ -4256,8 +4767,41 @@ ipcMain.handle("recordings:list", async (_, request) => {
       ...manifest,
     });
   }
+  const playerNameHints = portraitPlayerNameHints(recordings);
+  for (const recording of recordings) {
+    recording.portraitMatchup = portraitMatchup(recording, portraitCatalog, playerNameHints);
+  }
+  const byId = new Map(recordings.map((recording) => [recording.id, recording]));
+  for (const recording of recordings) {
+    if (recording.portraitMatchup || !recording.clip) continue;
+    const source = byId.get(recording.clip.sourceRecordingId);
+    if (source?.portraitMatchup?.gameCount <= 1) {
+      recording.portraitMatchup = source.portraitMatchup;
+    }
+  }
   recordings.sort((left, right) => right.modifiedAt - left.modifiedAt);
   return { folder, recordings };
+});
+
+ipcMain.handle("replays:resolve-portraits", async (_, request) => {
+  const pairs = request?.pairs;
+  if (!Array.isArray(pairs) || pairs.length > 512) {
+    throw new Error("Invalid replay portrait request.");
+  }
+  for (const pair of pairs) {
+    if (
+      typeof pair?.character !== "string" ||
+      pair.character.length > 100 ||
+      typeof pair?.support !== "string" ||
+      pair.support.length > 100
+    ) {
+      throw new Error("Invalid replay portrait request.");
+    }
+  }
+  if (!pairs.length) return [];
+  await ensurePortraitLibrary();
+  const catalog = await readPortraitCatalog(portraitLibraryRoot());
+  return pairs.map(({ character, support }) => portraitArtwork(character, support, catalog));
 });
 
 ipcMain.handle("recordings:get-chapters", async (_, request) => {
@@ -4287,6 +4831,231 @@ ipcMain.handle("recordings:frame-reader-close", (_, request) =>
 );
 
 ipcMain.handle("recordings:get-work-state", () => [...recordingWork.values()]);
+
+const devArtworkRoot = () => path.join(app.getPath("userData"), "dev-artwork");
+const portraitLibraryRoot = () => path.join(app.getPath("userData"), "portraits");
+const artworkJobs = new Map();
+let portraitLibraryInitialization = null;
+
+function ensurePortraitLibrary() {
+  if (!isDev) return Promise.resolve();
+  if (!portraitLibraryInitialization) {
+    portraitLibraryInitialization = (async () => {
+      const existing = await readPortraitCatalog(portraitLibraryRoot());
+      if (Object.keys(existing).length > 0) return;
+      const runs = await fs.promises
+        .readdir(devArtworkRoot(), { withFileTypes: true })
+        .catch((error) => {
+          if (error.code === "ENOENT") return [];
+          throw error;
+        });
+      for (const run of runs
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith("run-"))
+        .sort((a, b) => b.name.localeCompare(a.name))) {
+        const decoded = path.join(devArtworkRoot(), run.name, "decoded");
+        const stat = await fs.promises.stat(decoded).catch(() => null);
+        if (!stat?.isDirectory()) continue;
+        if (await publishPortraits(decoded, portraitLibraryRoot())) return;
+      }
+    })().catch((error) => {
+      portraitLibraryInitialization = null;
+      console.warn(`Could not import existing portrait artwork: ${error.message}`);
+    });
+  }
+  return portraitLibraryInitialization;
+}
+
+async function artworkSourceDirectory() {
+  const gameFolder = getReplayFolder();
+  if (!gameFolder)
+    throw new Error("Choose your game folder in Match history before importing artwork.");
+  const resolved = await fs.promises
+    .realpath(path.join(gameFolder, "data_packages"))
+    .catch(() => null);
+  if (!resolved) {
+    throw new Error(
+      "The selected game folder has no data_packages folder. Choose the game's installation folder in Match history.",
+    );
+  }
+  const stat = await fs.promises.stat(resolved).catch(() => null);
+  if (!stat?.isDirectory()) throw new Error("The game's data_packages path is not a folder.");
+  return resolved;
+}
+
+function createArtworkCancelledError() {
+  const error = new Error("Artwork extraction cancelled.");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  return error;
+}
+
+async function findDevArtworkPakFiles(directory, current = directory, signal) {
+  if (signal?.aborted) throw createArtworkCancelledError();
+  const entries = await fs.promises.readdir(current, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if (signal?.aborted) throw createArtworkCancelledError();
+    const filePath = path.join(current, entry.name);
+    if (entry.isDirectory())
+      files.push(...(await findDevArtworkPakFiles(directory, filePath, signal)));
+    else if (entry.isFile() && path.extname(entry.name).toLowerCase() === ".pak") {
+      files.push(filePath);
+    }
+  }
+  return files.sort((left, right) => left.localeCompare(right));
+}
+
+async function readDevArtworkPakBytes(handle, length, position, signal) {
+  const bytes = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    if (signal.aborted) throw createArtworkCancelledError();
+    const { bytesRead } = await handle.read(bytes, offset, length - offset, position + offset);
+    if (!bytesRead) throw new Error("The PAK file ended unexpectedly.");
+    offset += bytesRead;
+  }
+  return bytes;
+}
+
+async function extractDevArtworkPak(
+  pakFile,
+  filters,
+  decodedDirectory,
+  signal,
+  report,
+  decodedSoFar,
+) {
+  const handle = await fs.promises.open(pakFile, "r");
+  try {
+    const stat = await handle.stat();
+    const header = await readDevArtworkPakBytes(handle, 12, 0, signal);
+    const { directoryOffset, directoryBytes } = parsePakHeader(header, stat.size);
+    const directory = await readDevArtworkPakBytes(handle, directoryBytes, directoryOffset, signal);
+    const entries = parsePakDirectory(directory, stat.size);
+    let decodedCount = 0;
+    for (const entry of entries) {
+      if (signal.aborted) throw createArtworkCancelledError();
+      const relativePath = portraitPakRelativePath(entry.name, filters);
+      if (!relativePath) continue;
+      if (entry.size > 16 * 1024 * 1024)
+        throw new Error(`Portrait asset is too large: ${entry.name}`);
+      report(
+        "decoding",
+        `Decoding ${path.basename(relativePath)} from ${path.basename(pakFile)}...`,
+      );
+      const raw = await readDevArtworkPakBytes(handle, entry.size, entry.offset, signal);
+      const image = decodePortraitMunged(raw);
+      const imageBytes = encodePngRgba(image.width, image.height, image.pixels, deflateSync);
+      const decodedPath = path.join(
+        decodedDirectory,
+        ...relativePath.replace(/\.munged$/i, ".png").split("/"),
+      );
+      await fs.promises.mkdir(path.dirname(decodedPath), { recursive: true });
+      await fs.promises.writeFile(decodedPath, imageBytes);
+      decodedCount += 1;
+      report("decoding", `Decoded ${decodedSoFar + decodedCount} portrait images.`);
+    }
+    return decodedCount;
+  } finally {
+    await handle.close();
+  }
+}
+
+function sendArtworkProgress(event, progress) {
+  if (!event.sender.isDestroyed()) event.sender.send("artwork:progress", progress);
+}
+
+ipcMain.handle("artwork:get-status", async () => {
+  await ensurePortraitLibrary();
+  const catalog = await readPortraitCatalog(portraitLibraryRoot());
+  const missing = missingPortraitArtwork(catalog);
+  return {
+    ready: missing.length === 0,
+    missing,
+  };
+});
+ipcMain.handle("artwork:extract", async (event) => {
+  const runId = `run-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const controller = new AbortController();
+  artworkJobs.set(runId, controller);
+  const report = (stage, message, current = null, total = null) =>
+    sendArtworkProgress(event, { runId, stage, message, current, total });
+  report("preparing", "Checking the game PAK files...");
+  let runDirectory = null;
+  try {
+    const sourceDirectory = await artworkSourceDirectory();
+    const assetFilters = ["~hud~art~portraitart", "~hud~art~support"];
+    const pakFiles = await findDevArtworkPakFiles(
+      sourceDirectory,
+      sourceDirectory,
+      controller.signal,
+    );
+    if (pakFiles.length === 0) throw new Error("No .pak files found in the source folder.");
+    report("preparing", `Found ${pakFiles.length} PAK file${pakFiles.length === 1 ? "" : "s"}.`);
+    runDirectory = await fs.promises.mkdtemp(path.join(app.getPath("temp"), "labatar-artwork-"));
+    const decodedDirectory = path.join(runDirectory, "decoded");
+    let decodedCount = 0;
+    for (const [index, pakFile] of pakFiles.entries()) {
+      report(
+        "extracting",
+        `Scanning ${path.basename(pakFile)} (${index + 1}/${pakFiles.length})...`,
+        index,
+        pakFiles.length,
+      );
+      const count = await extractDevArtworkPak(
+        pakFile,
+        assetFilters,
+        decodedDirectory,
+        controller.signal,
+        report,
+        decodedCount,
+      );
+      decodedCount += count;
+      report(
+        "extracting",
+        `Scanned ${index + 1}/${pakFiles.length} PAK files; decoded ${decodedCount} images.`,
+        index + 1,
+        pakFiles.length,
+      );
+    }
+    if (decodedCount === 0) throw new Error("No character or support portraits were found.");
+    report("saving", "Saving character and support portraits to the local library...");
+    const savedPortraits = await publishPortraits(
+      decodedDirectory,
+      portraitLibraryRoot(),
+      controller.signal,
+    );
+    report("complete", `Imported ${savedPortraits} portraits.`, 1, 1);
+    return {
+      savedPortraits,
+    };
+  } catch (error) {
+    report(
+      controller.signal.aborted ? "cancelled" : "error",
+      controller.signal.aborted
+        ? "Artwork extraction cancelled."
+        : error instanceof Error
+          ? error.message
+          : String(error),
+    );
+    throw error;
+  } finally {
+    artworkJobs.delete(runId);
+    if (runDirectory) {
+      await fs.promises.rm(runDirectory, { recursive: true, force: true }).catch((error) => {
+        console.warn(`Could not remove temporary artwork files: ${error.message}`);
+      });
+    }
+  }
+});
+ipcMain.handle("artwork:cancel", (_, request) => {
+  const runId = String(request?.runId ?? "");
+  const controller = artworkJobs.get(runId);
+  if (!controller) return { cancelled: false };
+  controller.abort();
+  return { cancelled: true };
+});
+
 ipcMain.handle("recordings:export-clip", async (_, request) => {
   const workId = `clip-export:${randomUUID()}`;
   let fileName = "Recording";
@@ -4302,6 +5071,21 @@ ipcMain.handle("recordings:export-clip", async (_, request) => {
   });
   try {
     return await exportRecordingClip(request);
+  } finally {
+    clearRecordingWork(workId);
+  }
+});
+ipcMain.handle("recordings:trim-clip", async (_, request) => {
+  const workId = `clip-trim:${randomUUID()}`;
+  let fileName = "Clip";
+  try {
+    fileName = path.basename(resolveRecordingPath(String(request?.recordingId ?? "")));
+  } catch {
+    // The trim call will report an invalid ID.
+  }
+  setRecordingWork(workId, { title: "Trimming clip", fileName, detail: "Keeping original backup" });
+  try {
+    return await trimRecordingClip(request);
   } finally {
     clearRecordingWork(workId);
   }
@@ -4430,28 +5214,7 @@ function runPowerShellZip(sourceFolder, destination) {
 }
 
 async function resolveReplayPath(rootFolder, replayId) {
-  const normalizedId = replayId.replaceAll("/", path.sep);
-  const candidate = path.resolve(rootFolder, normalizedId);
-  const relativeCandidate = path.relative(rootFolder, candidate);
-  if (
-    relativeCandidate.startsWith(".." + path.sep) ||
-    relativeCandidate === ".." ||
-    path.isAbsolute(relativeCandidate)
-  ) {
-    throw new Error("A selected replay is outside the replay folder.");
-  }
-  const realCandidate = await fs.promises.realpath(candidate);
-  const realRelativeCandidate = path.relative(rootFolder, realCandidate);
-  if (
-    realRelativeCandidate.startsWith(".." + path.sep) ||
-    realRelativeCandidate === ".." ||
-    path.isAbsolute(realRelativeCandidate)
-  ) {
-    throw new Error("A selected replay is outside the replay folder.");
-  }
-  const stat = await fs.promises.stat(realCandidate);
-  if (!stat.isFile()) throw new Error(`Replay file not found: ${replayId}`);
-  return realCandidate;
+  return replayStagingStore().resolveSource(rootFolder, replayId);
 }
 
 ipcMain.handle("replays:show-in-folder", async (_, request) => {
@@ -4463,7 +5226,7 @@ ipcMain.handle("replays:show-in-folder", async (_, request) => {
         : [],
     ),
   ];
-  if (!folder) throw new Error("Select a replay folder before opening Explorer.");
+  if (!folder) throw new Error("Select a game folder before opening Explorer.");
   if (requestedIds.length === 0) throw new Error("No replay files were selected.");
 
   const rootFolder = await fs.promises.realpath(folder);
@@ -4481,34 +5244,18 @@ ipcMain.handle("replays:zip", async (_, request) => {
         : [],
     ),
   ];
-  if (!folder) throw new Error("Select a replay folder before exporting replays.");
+  if (!folder) throw new Error("Select a game folder before exporting replays.");
   if (requestedIds.length === 0) throw new Error("No replay files were selected.");
 
   const rootFolder = await fs.promises.realpath(folder);
   const files = [];
   for (const replayId of requestedIds) {
-    const normalizedId = replayId.replaceAll("/", path.sep);
-    const candidate = path.resolve(rootFolder, normalizedId);
-    const relativeCandidate = path.relative(rootFolder, candidate);
-    if (
-      relativeCandidate.startsWith(".." + path.sep) ||
-      relativeCandidate === ".." ||
-      path.isAbsolute(relativeCandidate)
-    ) {
-      throw new Error("A selected replay is outside the replay folder.");
+    const source = await resolveReplayPath(rootFolder, replayId);
+    const relative = path.normalize(replayId.replaceAll("/", path.sep));
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error("A selected replay is outside the game folder.");
     }
-    const realCandidate = await fs.promises.realpath(candidate);
-    const realRelativeCandidate = path.relative(rootFolder, realCandidate);
-    if (
-      realRelativeCandidate.startsWith(".." + path.sep) ||
-      realRelativeCandidate === ".." ||
-      path.isAbsolute(realRelativeCandidate)
-    ) {
-      throw new Error("A selected replay is outside the replay folder.");
-    }
-    const stat = await fs.promises.stat(realCandidate);
-    if (!stat.isFile()) throw new Error(`Replay file not found: ${replayId}`);
-    files.push({ source: realCandidate, relative: realRelativeCandidate });
+    files.push({ source, relative });
   }
 
   const defaultName = `${safeZipName(request?.suggestedName)}.zip`;
@@ -4542,6 +5289,8 @@ ipcMain.handle("replays:get-folder", () => {
   return getReplayFolder();
 });
 
+ipcMain.handle("replays:get-game-folder-status", () => getGameFolderStatus());
+
 ipcMain.handle("replays:select-folder", async () => {
   const savedFolder = getReplayFolder();
   const defaultPath =
@@ -4549,7 +5298,7 @@ ipcMain.handle("replays:select-folder", async () => {
     (fs.existsSync(defaultReplaysFolder) && defaultReplaysFolder) ||
     app.getPath("home");
   const result = await dialog.showOpenDialog({
-    title: "Select replay folder",
+    title: "Select game folder",
     properties: ["openDirectory", "createDirectory"],
     defaultPath,
   });
@@ -4701,6 +5450,25 @@ void app.whenReady().then(() => {
   protocol.handle("labatar-media", async (request) => {
     try {
       const url = new URL(request.url);
+      if (url.hostname === "portrait") {
+        const match = /^\/([a-z0-9_]+)\/(portrait|support[1-3](?:-[a-z0-9_-]+)?)\.png$/.exec(
+          url.pathname,
+        );
+        if (!match) return new Response("Not found", { status: 404 });
+        const filePath = path.join(
+          portraitLibraryRoot(),
+          "characters",
+          match[1],
+          `${match[2]}.png`,
+        );
+        const stat = await fs.promises.stat(filePath);
+        if (!stat.isFile() || stat.size > 12 * 1024 * 1024) {
+          return new Response("Not found", { status: 404 });
+        }
+        return new Response(await fs.promises.readFile(filePath), {
+          headers: { "Content-Type": "image/png", "Cache-Control": "no-store" },
+        });
+      }
       if (url.hostname !== "recording") return new Response("Not found", { status: 404 });
       const filePath = resolveRecordingPath(url.pathname.replace(/^\/+/, ""));
       const stat = await fs.promises.stat(filePath);
@@ -4718,6 +5486,7 @@ void app.whenReady().then(() => {
   const captureSettings = getCaptureSettings();
   setCaptureState({
     hotkey: captureSettings.hotkey,
+    chapterHotkey: captureSettings.chapterHotkey,
     autoGameChapters: captureSettings.autoGameChapters,
     autoClipManualChapters: captureSettings.autoClipManualChapters,
   });
@@ -4729,8 +5498,8 @@ void app.whenReady().then(() => {
     console.warn(`Global capture shortcut unavailable: ${obsErrorMessage(error)}`);
   }
   try {
-    registerChapterShortcut();
-    startupDiagnostic("chapter-shortcut-registered", { hotkey: "F10" });
+    registerChapterShortcut(captureSettings.chapterHotkey);
+    startupDiagnostic("chapter-shortcut-registered", { hotkey: captureSettings.chapterHotkey });
   } catch (error) {
     startupDiagnostic("chapter-shortcut-registration-failed", startupErrorDetails(error));
     console.warn(`Global chapter shortcut unavailable: ${obsErrorMessage(error)}`);

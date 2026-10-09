@@ -1,24 +1,50 @@
-import type { RecordedVideo } from "./recording-types";
+import type { RecordedVideo, RecordingTags } from "./recording-types";
 
 export type RecordingDisplayRow = {
   recording: RecordedVideo;
   depth: number;
 };
 
-export function buildRecordingDisplayRows(
-  recordings: RecordedVideo[],
-  showFullRecordings: boolean,
-  showClips: boolean,
-): RecordingDisplayRow[] {
-  const visible = recordings.filter(
-    (recording) =>
-      (showFullRecordings && !recording.clip) || (showClips && Boolean(recording.clip)),
-  );
-  const ungrouped = visible.map((recording) => ({ recording, depth: 0 }));
-  if (!showFullRecordings || !showClips) return ungrouped;
+export function recordingInheritedTags(
+  recording: RecordedVideo,
+  byId: ReadonlyMap<string, RecordedVideo>,
+): RecordingTags {
+  const tags: RecordingTags = { match: [], lab: [], combo: false, pressure: false };
+  const seen = new Set<string>();
+  let current: RecordedVideo | undefined = recording;
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    for (const match of current.tags.match) {
+      if (!tags.match.includes(match)) tags.match.push(match);
+    }
+    for (const lab of current.tags.lab) {
+      if (!tags.lab.includes(lab)) tags.lab.push(lab);
+    }
+    tags.combo ||= current.tags.combo;
+    tags.pressure ||= current.tags.pressure;
+    current = current.clip ? byId.get(current.clip.sourceRecordingId) : undefined;
+  }
+  return tags;
+}
 
+export function recordingLibraryTab(
+  recording: RecordedVideo,
+  byId: ReadonlyMap<string, RecordedVideo>,
+): "matches" | "other" {
+  const seen = new Set<string>();
+  let root = recording;
+  while (root.clip && !seen.has(root.id)) {
+    seen.add(root.id);
+    const parent = byId.get(root.clip.sourceRecordingId);
+    if (!parent || seen.has(parent.id)) break;
+    root = parent;
+  }
+  return root.tags.match.length || root.games.length ? "matches" : "other";
+}
+
+export function buildRecordingDisplayRows(recordings: RecordedVideo[]): RecordingDisplayRow[] {
   const clipsBySource = new Map<string, RecordedVideo[]>();
-  for (const recording of visible) {
+  for (const recording of recordings) {
     const sourceId = recording.clip?.sourceRecordingId;
     if (!sourceId) continue;
     const sourceClips = clipsBySource.get(sourceId) ?? [];
@@ -37,7 +63,7 @@ export function buildRecordingDisplayRows(
     }
   };
 
-  for (const recording of visible) {
+  for (const recording of recordings) {
     if (recording.clip) continue;
     emitted.add(recording.id);
     grouped.push({ recording, depth: 0 });
@@ -46,7 +72,7 @@ export function buildRecordingDisplayRows(
 
   // Keep clips whose source is filtered out, missing, or part of a malformed
   // cycle visible instead of silently dropping them from the selector.
-  for (const recording of visible) {
+  for (const recording of recordings) {
     if (recording.clip && !emitted.has(recording.id)) {
       emitted.add(recording.id);
       grouped.push({ recording, depth: 0 });
@@ -54,6 +80,21 @@ export function buildRecordingDisplayRows(
     }
   }
   return grouped;
+}
+
+export function countRecordingClips(rows: RecordingDisplayRow[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  const ancestors: RecordingDisplayRow[] = [];
+  for (const row of rows) {
+    while (ancestors.length && ancestors.at(-1)!.depth >= row.depth) ancestors.pop();
+    if (row.recording.clip) {
+      for (const ancestor of ancestors) {
+        counts.set(ancestor.recording.id, (counts.get(ancestor.recording.id) ?? 0) + 1);
+      }
+    }
+    ancestors.push(row);
+  }
+  return counts;
 }
 
 export function collapseRecordingDisplayRows(
