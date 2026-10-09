@@ -24,7 +24,7 @@ type CaptureState = {
   autoClipManualChapters: boolean;
 };
 
-export function ObsRecordingPanel() {
+export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) {
   const {
     state,
     settings,
@@ -227,13 +227,17 @@ export function ObsRecordingPanel() {
             Connect Labatar to OBS and configure the profile, scenes, and automatic recording.
           </Typography>
         </Box>
-        <Typography
-          variant="caption"
-          color={recording ? "error.main" : connected ? "success.main" : "text.secondary"}
-          sx={{ flexShrink: 0 }}
-        >
-          {recording ? "Recording active" : state.status}
-        </Typography>
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexShrink: 0 }}>
+          <Button size="small" onClick={onOpenGuide}>
+            Recording guide
+          </Button>
+          <Typography
+            variant="caption"
+            color={recording ? "error.main" : connected ? "success.main" : "text.secondary"}
+          >
+            {recording ? "Recording active" : state.status}
+          </Typography>
+        </Stack>
       </Box>
       <Box sx={{ px: 3, pb: 3 }}>
         {connectFailed && (

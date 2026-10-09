@@ -1,7 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import SettingsIcon from "@mui/icons-material/Settings";
-import { Button, Chip, IconButton, Stack, Tooltip, Typography } from "@mui/material";
+import { Button, Chip, Stack, Tooltip, Typography } from "@mui/material";
 import type { ObsSettings, ObsState } from "./obs-types";
 import type { MoveCaptureState, MoveTakeOutcome } from "./move-capture-types";
 
@@ -479,33 +478,26 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
 
   return (
     <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: "stretch" }}>
-      <Stack direction="row" spacing={0.5} sx={{ alignItems: "center" }}>
-        <Button
-          size="small"
-          variant={connected ? "outlined" : "contained"}
-          onClick={() => {
-            if (connected) {
-              void disconnect();
-            } else {
-              void connect().then((succeeded) => {
-                if (!succeeded) onOpenSettings();
-              });
-            }
-          }}
-          disabled={busy || recording || state.status === "connecting"}
-        >
-          {state.status === "connecting"
-            ? "Connecting..."
-            : connected
-              ? "Disconnect OBS"
-              : "Connect to OBS"}
-        </Button>
-        <Tooltip title="Settings">
-          <IconButton size="small" aria-label="Settings" onClick={onOpenSettings}>
-            <SettingsIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
-      </Stack>
+      <Button
+        size="small"
+        variant={connected ? "outlined" : "contained"}
+        onClick={() => {
+          if (connected) {
+            void disconnect();
+          } else {
+            void connect().then((succeeded) => {
+              if (!succeeded) onOpenSettings();
+            });
+          }
+        }}
+        disabled={busy || recording || state.status === "connecting"}
+      >
+        {state.status === "connecting"
+          ? "Connecting..."
+          : connected
+            ? "Disconnect OBS"
+            : "Connect to OBS"}
+      </Button>
       {state.automation.enabled ? (
         <Stack
           direction="row"

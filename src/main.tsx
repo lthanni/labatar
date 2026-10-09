@@ -1,6 +1,8 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
+import NewReleasesIcon from "@mui/icons-material/NewReleases";
+import SettingsIcon from "@mui/icons-material/Settings";
 import {
   Accordion,
   AccordionDetails,
@@ -16,6 +18,7 @@ import {
   DialogContent,
   DialogTitle,
   FormControlLabel,
+  IconButton,
   LinearProgress,
   Paper,
   Slider,
@@ -24,6 +27,7 @@ import {
   Tabs,
   TextField,
   ThemeProvider,
+  Tooltip,
   Typography,
   createTheme,
 } from "@mui/material";
@@ -41,6 +45,12 @@ import { MoveCapturePanel } from "./MoveCapturePanel";
 import { RecordingViewer } from "./RecordingViewer";
 import { TechSection } from "./TechSection";
 import { ArtworkPanel } from "./ArtworkPanel";
+import {
+  GuidesDialog,
+  allGuideEntryIds,
+  type GuideEntryId,
+  type GuideSection,
+} from "./GuidesDialog";
 import type { ObsSettings, ObsState, RecordingMetadata } from "./obs-types";
 import type { RecordedVideo, RecordingTags } from "./recording-types";
 import type { RecordingAnalysis } from "./recording-analysis-types";
@@ -564,6 +574,7 @@ function ReplayAnalysis({
   gameFolderRefreshToken,
   onScanError,
   onReplaysChanged,
+  onOpenGuide,
 }: {
   active: boolean;
   recordingsRefreshToken: number;
@@ -571,6 +582,7 @@ function ReplayAnalysis({
   gameFolderRefreshToken: number;
   onScanError: (message: string | null) => void;
   onReplaysChanged: () => void;
+  onOpenGuide: (section: GuideSection) => void;
 }) {
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [replayFolder, setReplayFolder] = useState<string | null>(null);
@@ -824,6 +836,7 @@ function ReplayAnalysis({
         invalidDateRange={invalidDateRange}
         onSummaryChange={onSummaryChange}
         onReplaysChanged={onReplaysChanged}
+        onOpenGuide={onOpenGuide}
       />
     </Box>
   );
@@ -835,6 +848,21 @@ function App() {
   const [recordingsRefreshToken, setRecordingsRefreshToken] = useState(0);
   const [recordingWork, setRecordingWork] = useState<RecordingWorkItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [guidesOpen, setGuidesOpen] = useState(false);
+  const [guideSection, setGuideSection] = useState<GuideSection>("matches");
+  const [readGuideEntryIds, setReadGuideEntryIds] = useState<Set<string>>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("labatar-guide-read-v1") ?? "[]");
+      return new Set(
+        Array.isArray(stored)
+          ? stored.filter((value): value is string => typeof value === "string")
+          : [],
+      );
+    } catch {
+      return new Set();
+    }
+  });
+  const unreadGuideCount = allGuideEntryIds.filter((id) => !readGuideEntryIds.has(id)).length;
   const [settingsSection, setSettingsSection] = useState<"game" | "artwork" | "obs" | null>("obs");
   const [gameFolderStatus, setGameFolderStatus] = useState<{
     folder: string | null;
@@ -956,6 +984,17 @@ function App() {
     setSettingsSection(section);
     setSettingsOpen(true);
   };
+  const openGuide = (section: GuideSection) => {
+    setGuideSection(section);
+    setGuidesOpen(true);
+  };
+  const confirmGuideRead = (id: GuideEntryId) => {
+    if (readGuideEntryIds.has(id)) return;
+    const next = new Set(readGuideEntryIds);
+    next.add(id);
+    localStorage.setItem("labatar-guide-read-v1", JSON.stringify([...next]));
+    setReadGuideEntryIds(next);
+  };
 
   const chooseGameFolder = async () => {
     try {
@@ -1073,19 +1112,60 @@ function App() {
             )}
         </Stack>
       )}
-      <Stack
-        direction={{ xs: "column", lg: "row" }}
-        spacing={1.5}
-        sx={{ mb: 2, alignItems: { lg: "center" }, justifyContent: "space-between" }}
+      <Box
+        sx={{
+          mb: 2,
+          display: "grid",
+          gridTemplateColumns: { xs: "minmax(0, 1fr)", lg: "minmax(0, 1fr) auto minmax(0, 1fr)" },
+          alignItems: "center",
+          gap: 1.5,
+        }}
       >
-        <Tabs value={tab} onChange={(_, nextTab: number) => changeTab(nextTab)}>
+        <Tabs
+          value={tab}
+          onChange={(_, nextTab: number) => changeTab(nextTab)}
+          variant="scrollable"
+          allowScrollButtonsMobile
+          sx={{ minWidth: 0, maxWidth: "100%" }}
+        >
           <Tab label="Match history" />
           {recordingTabAvailable && <Tab label="Recordings" value={recordingsTabIndex} />}
           {developerTabsAvailable && <Tab label="Dev-only capture" value={captureTabIndex} />}
           {developerTabsAvailable && <Tab label="Nerd processing" value={nerdProcessingTabIndex} />}
           {developerTabsAvailable && <Tab label="Tech" value={techTabIndex} />}
         </Tabs>
-        <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: "center" }}>
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", justifySelf: "center" }}>
+          <Tooltip title={unreadGuideCount ? `${unreadGuideCount} unread guide entries` : "Guides"}>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => openGuide(tab === 0 ? "matches" : "recording")}
+              aria-label={
+                unreadGuideCount ? `Guides, ${unreadGuideCount} unread entries` : "Guides"
+              }
+              startIcon={
+                unreadGuideCount ? (
+                  <NewReleasesIcon
+                    fontSize="small"
+                    sx={{ color: "#111", bgcolor: "#ffd54f", borderRadius: "50%", p: 0.25 }}
+                  />
+                ) : undefined
+              }
+            >
+              Guides
+            </Button>
+          </Tooltip>
+          <Tooltip title="Settings">
+            <IconButton size="small" aria-label="Settings" onClick={() => openSettings("obs")}>
+              <SettingsIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ alignItems: "center", justifySelf: { xs: "center", lg: "end" }, minWidth: 0 }}
+        >
           <ObsRecordingControls onOpenSettings={() => openSettings("obs")} />
           {appVersion && (
             <Typography variant="caption" color="text.secondary">
@@ -1093,7 +1173,15 @@ function App() {
             </Typography>
           )}
         </Stack>
-      </Stack>
+      </Box>
+      <GuidesDialog
+        open={guidesOpen}
+        section={guideSection}
+        readEntryIds={readGuideEntryIds}
+        onSectionChange={setGuideSection}
+        onConfirmRead={confirmGuideRead}
+        onClose={() => setGuidesOpen(false)}
+      />
       {recordingWork.length > 0 && (
         <Stack
           spacing={1}
@@ -1218,7 +1306,7 @@ function App() {
               <Typography>OBS</Typography>
             </AccordionSummary>
             <AccordionDetails>
-              <ObsRecordingPanel />
+              <ObsRecordingPanel onOpenGuide={() => openGuide("recording")} />
             </AccordionDetails>
           </Accordion>
         </DialogContent>
@@ -1245,6 +1333,7 @@ function App() {
               setGameFolderRefreshToken((current) => current + 1);
               refreshRecordings();
             }}
+            onOpenGuide={openGuide}
           />
         </Box>
       )}

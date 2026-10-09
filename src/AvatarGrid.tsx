@@ -605,6 +605,7 @@ export function AvatarGrid({
   invalidDateRange,
   onSummaryChange,
   onReplaysChanged,
+  onOpenGuide,
 }: {
   rowData: ReplayRow[];
   replayFolder: string | null;
@@ -619,6 +620,7 @@ export function AvatarGrid({
   invalidDateRange: boolean;
   onSummaryChange: (summary: AnalysisSummary) => void;
   onReplaysChanged: () => void;
+  onOpenGuide: (section: "matches" | "staging") => void;
 }) {
   const gridRef = useRef<AgGridReact<DisplayRow>>(null);
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
@@ -1256,6 +1258,14 @@ export function AvatarGrid({
             : ""}
         </Alert>
       )}
+      <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: "center", textAlign: "left" }}>
+        <Typography variant="caption" color="text.secondary">
+          Tip: Right-click a set or game for file, ZIP, and playback actions.
+        </Typography>
+        <Button size="small" onClick={() => onOpenGuide("staging")}>
+          How staging works
+        </Button>
+      </Stack>
       <AnalyticsSection
         fillHeight
         tableContent={
