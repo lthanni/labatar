@@ -49,6 +49,14 @@ linked to it. Without a lobby ID, Labatar cannot establish a historical set
 number, so these files use a `match` label instead of inventing one. Matches
 without enough identity information remain unrecorded automatically.
 
+Lobby recording begins before the first game so character selection and other
+pre-game footage are preserved. If the lobby closes without a `SetNewMatch`
+game (for example, after a declined match), Labatar keeps the MP4 but names it
+`No game started - <UTC time>` and records `recordingStatus: no-game-started`
+alongside the actual stop reason in its sidecar. The log does not reliably say
+who declined or why, so this label does not claim a specific cause. No set
+number is assigned to a lobby with no recorded game.
+
 ## Recording chapter markers
 
 The Labatar Recording profile uses OBS Hybrid MP4 (`RecFormat2=hybrid_mp4`).

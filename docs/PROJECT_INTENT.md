@@ -67,9 +67,9 @@ Key files:
 
 ### 1. Replay scanning and history
 
-The app scans replay folders recursively, filters duplicates by content hash, and builds a searchable set of match rows.
+The app scans the selected game folder recursively for replays, filters duplicates by content hash, and builds a searchable set of match rows.
 
-This is the main product loop for the app: pick a replay folder, pick a player, filter by matchup or ranking status, then inspect matches and replay details.
+This is the main product loop for the app: pick a game folder in Settings, pick a player, filter by matchup or ranking status, then inspect matches and replay details.
 
 ### 2. Replay analytics
 
