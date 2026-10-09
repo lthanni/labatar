@@ -40,6 +40,85 @@ export function gatherMoves(
   });
 }
 
+export type AutomatedWhiffEligibility =
+  | { eligible: true; validation: "tested" | "needs-validation" }
+  | {
+      eligible: false;
+      reason: string;
+      kind:
+        | "nonstandard"
+        | "unsupported"
+        | "not-applicable"
+        | "existing-take"
+        | "already-attempted";
+    };
+
+/** Grounded recipes the input worker can send. Captured takes still require video review. */
+export function automatedWhiffEligibility(
+  move: TechMove,
+  recordings: RecordedVideo[],
+  variantId: string,
+  attemptedMoveIds: ReadonlySet<string> = new Set(),
+  facing: "Right" | "Left" = "Right",
+): AutomatedWhiffEligibility {
+  if (move.notApplicable?.whiff?.trim()) {
+    return {
+      eligible: false,
+      kind: "not-applicable",
+      reason: `Whiff not applicable: ${move.notApplicable.whiff.trim()}`,
+    };
+  }
+  if (move.nonstandard) {
+    return {
+      eligible: false,
+      kind: "nonstandard",
+      reason: move.nonstandardNote?.trim()
+        ? `Tagged nonstandard: ${move.nonstandardNote.trim()}`
+        : "Tagged nonstandard; capture manually.",
+    };
+  }
+  const slotTakes = takesForSlot(recordings, variantId, move.id, "whiff");
+  if (slotTakes.some((take) => take.moveTake?.evidenceStatus === "active")) {
+    return {
+      eligible: false,
+      kind: "existing-take",
+      reason: "An active whiff take already exists.",
+    };
+  }
+  if (slotTakes.some((take) => take.moveTake?.evidenceStatus === "pending")) {
+    return {
+      eligible: false,
+      kind: "existing-take",
+      reason: "A pending whiff take already exists.",
+    };
+  }
+  if (attemptedMoveIds.has(move.id)) {
+    return {
+      eligible: false,
+      kind: "already-attempted",
+      reason: "Already attempted in this pass.",
+    };
+  }
+  const input = move.input.toUpperCase();
+  if (
+    move.isCharged ||
+    move.dependsOnMoveId ||
+    move.isStanceParent ||
+    !/^(?:236|214|[1-9])(?:EX|[ABCF])$/.test(input)
+  ) {
+    return {
+      eligible: false,
+      kind: "unsupported",
+      reason: "No supported grounded whiff recipe for this input.",
+    };
+  }
+  return {
+    eligible: true,
+    validation:
+      input === "5A" || (input === "236A" && facing === "Right") ? "tested" : "needs-validation",
+  };
+}
+
 /** Captured, pending videos that have not had an analysis saved yet. */
 export function unprocessedMoveTakes(recordings: RecordedVideo[], variantId: string) {
   return recordings
@@ -48,6 +127,8 @@ export function unprocessedMoveTakes(recordings: RecordedVideo[], variantId: str
         recording.moveTake?.characterId === variantId &&
         recording.moveTake.status === "captured" &&
         recording.moveTake.evidenceStatus === "pending" &&
+        (recording.moveTake.captureMethod !== "automated" ||
+          recording.moveTake.captureReviewStatus === "approved-for-processing") &&
         !recording.moveTake.storageError &&
         !recording.analysis,
     )

@@ -448,7 +448,13 @@ export function useObsRecording() {
   return context;
 }
 
-export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () => void }) {
+export function ObsRecordingControls({
+  onOpenSettings,
+  disableCaptureStart = false,
+}: {
+  onOpenSettings: () => void;
+  disableCaptureStart?: boolean;
+}) {
   const {
     busy,
     state,
@@ -591,7 +597,7 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
               size="small"
               variant="contained"
               onClick={() => void toggleAutomaticRecording(true)}
-              disabled={!connected || busy || recording}
+              disabled={!connected || busy || recording || disableCaptureStart}
             >
               Start automatic recording
             </Button>
@@ -614,7 +620,9 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
             color={manualRecording ? "error" : "primary"}
             onClick={() => void (manualRecording ? stopManualRecording() : startManualRecording())}
             disabled={
-              !connected || busy || (!manualRecording && (recording || state.automation.enabled))
+              !connected ||
+              busy ||
+              (!manualRecording && (recording || state.automation.enabled || disableCaptureStart))
             }
           >
             {manualRecording

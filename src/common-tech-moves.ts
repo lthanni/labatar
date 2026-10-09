@@ -26,6 +26,7 @@ export function withCommonTechMoves(character: string, existing: TechMove[]): Te
       input,
       isStanceParent: false,
       isCharged: false,
+      nonstandard: false,
       flowCancellable: isFlowCancellableByDefault(input),
       stanceFollowupPattern: null,
       dependsOnMoveId: null,

@@ -53,6 +53,7 @@ import {
 } from "./GuidesDialog";
 import type { ObsSettings, ObsState, RecordingMetadata } from "./obs-types";
 import type { RecordedVideo, RecordingTags } from "./recording-types";
+import type { DevBlackoutStatus } from "./dev-blackout-types";
 import type { RecordingAnalysis } from "./recording-analysis-types";
 import type { ReplayStagingPreview, ReplayStagingStatus } from "./replay-staging-types";
 import type {
@@ -66,6 +67,16 @@ import type {
   ProcessingConfigurationResult,
 } from "./processing-config-types";
 import { techSelectComboEvent, techSelectRecordingEvent } from "./tech-types";
+
+type AutomaticMoveRunState = {
+  status: "idle" | "countdown" | "running" | "paused" | "completed" | "cancelled" | "error";
+  index: number;
+  total: number;
+  currentMove: string | null;
+  phase: string;
+  error: string | null;
+  runId?: string;
+};
 
 declare global {
   interface Window {
@@ -89,6 +100,7 @@ declare global {
         setSettings: (request: { hotkey: string }) => Promise<CaptureState>;
         setChapterSettings: (request: { hotkey: string }) => Promise<CaptureState>;
         toggle: () => Promise<{ outputPath?: string | null }>;
+        setDevTabActive: (active: boolean) => Promise<void>;
         addChapter: () => Promise<{ at: string }>;
         setAutoGameChapters: (enabled: boolean) => Promise<CaptureState>;
         setAutoClipManualChapters: (enabled: boolean) => Promise<CaptureState>;
@@ -229,7 +241,13 @@ declare global {
           action: "accept" | "archive";
           reason?: string;
         }) => Promise<RecordedVideo>;
+        reviewCapture: (request: {
+          recordingId: string;
+          action: "approve" | "reject";
+          reason?: string;
+        }) => Promise<RecordedVideo>;
         deleteRecording: (request: { recordingId: string }) => Promise<{ id: string }>;
+        deletePendingMove: (request: { recordingId: string }) => Promise<{ id: string }>;
         startDrag: (request: { recordingId: string }) => void;
       };
       artwork: {
@@ -272,7 +290,22 @@ declare global {
           outcome: MoveTakeOutcome;
         }) => Promise<MoveCaptureState>;
         disarm: () => Promise<MoveCaptureState>;
+        automaticStart: (request: {
+          variantId: string;
+          moves: Array<{ id: string; input: string }>;
+          facing: "Right" | "Left";
+        }) => Promise<AutomaticMoveRunState>;
+        automaticStatus: () => Promise<AutomaticMoveRunState>;
+        automaticPause: () => Promise<AutomaticMoveRunState>;
+        automaticResume: () => Promise<AutomaticMoveRunState>;
+        automaticCancel: () => Promise<AutomaticMoveRunState>;
+        onAutomaticState: (listener: (state: AutomaticMoveRunState) => void) => () => void;
         onState: (listener: (state: MoveCaptureState) => void) => () => void;
+      };
+      devBlackout: {
+        status: () => Promise<DevBlackoutStatus>;
+        start: () => Promise<DevBlackoutStatus>;
+        restore: () => Promise<DevBlackoutStatus>;
       };
     };
   }
@@ -905,6 +938,39 @@ function App() {
     nerdProcessing: developerTabsAvailable && tab === nerdProcessingTabIndex,
     tech: tab === techTabIndex,
   }));
+  const [blackoutStatus, setBlackoutStatus] = useState<DevBlackoutStatus>({
+    available: false,
+    gameRunning: false,
+    active: false,
+    busy: false,
+    restorePending: false,
+    error: null,
+  });
+  const refreshBlackoutStatus = useCallback(async () => {
+    const api = window.electronAPI?.devBlackout;
+    if (!api) return;
+    try {
+      setBlackoutStatus(await api.status());
+    } catch (error) {
+      setBlackoutStatus({
+        available: true,
+        gameRunning: false,
+        active: false,
+        busy: false,
+        restorePending: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, []);
+  useEffect(() => {
+    if (!developerTabsAvailable) return;
+    const active = tab === captureTabIndex;
+    void window.electronAPI?.capture.setDevTabActive(active);
+    if (!active) return;
+    void refreshBlackoutStatus();
+    const timer = window.setInterval(() => void refreshBlackoutStatus(), 4000);
+    return () => window.clearInterval(timer);
+  }, [tab, captureTabIndex, refreshBlackoutStatus]);
   const changeTab = (nextTab: number) => {
     if (!availableTabIndices.includes(nextTab)) return;
     setTab(nextTab);
@@ -1166,7 +1232,10 @@ function App() {
           spacing={1}
           sx={{ alignItems: "center", justifySelf: { xs: "center", lg: "end" }, minWidth: 0 }}
         >
-          <ObsRecordingControls onOpenSettings={() => openSettings("obs")} />
+          <ObsRecordingControls
+            onOpenSettings={() => openSettings("obs")}
+            disableCaptureStart={tab === captureTabIndex && !blackoutStatus.active}
+          />
           {appVersion && (
             <Typography variant="caption" color="text.secondary">
               v{appVersion}
@@ -1355,7 +1424,10 @@ function App() {
       )}
       {developerTabsAvailable && mountedTabs.capture && (
         <Box sx={{ display: tab === captureTabIndex ? "block" : "none" }}>
-          <MoveCapturePanel />
+          <MoveCapturePanel
+            blackoutStatus={blackoutStatus}
+            refreshBlackoutStatus={refreshBlackoutStatus}
+          />
         </Box>
       )}
       {developerTabsAvailable && mountedTabs.nerdProcessing && (

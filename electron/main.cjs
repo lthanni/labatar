@@ -42,6 +42,18 @@ const characterMap = require("./character-map.json");
 const { createProcessingConfigurationStore } = require("./processing-config.cjs");
 const { createMoveCatalogStore } = require("./move-catalog.cjs");
 const { validateMoveTake } = require("./move-take-validation.cjs");
+const { createAutomaticMoveRunner } = require("./automatic-move-runner.cjs");
+const { createTrainingInputClient } = require("./training-input-client.cjs");
+const {
+  gameRunning: blackoutGameRunning,
+  sha256: sha256BlackoutFile,
+  readSession: readBlackoutSession,
+  writeSession: writeBlackoutSession,
+  prepareSession: prepareBlackoutSession,
+  installSession: installBlackoutSession,
+  verifyInstalled: verifyBlackoutInstalled,
+  restoreSession: restoreBlackoutSession,
+} = require("./dev-blackout-game.cjs");
 const { createOpponentSetHistory } = require("./opponent-set-history.cjs");
 const {
   createReplayStagingStore,
@@ -190,6 +202,14 @@ let captureState = {
   autoClipManualChapters: true,
 };
 let armedMoveCapture = null;
+let automaticMoveRun = null;
+let automaticMoveInput = null;
+let automaticMoveRunner = null;
+let automaticMoveCountdown = null;
+let blackoutBusy = false;
+let blackoutRecoveryBusy = false;
+let blackoutWatcherStarting = null;
+let devCaptureTabActive = false;
 
 const defaultReplaysFolder = path.join(
   "C:\\",
@@ -676,6 +696,375 @@ function disarmMoveCapture() {
   return publicMoveCaptureState();
 }
 
+const automaticMoveRunFile = () => path.join(app.getPath("userData"), "automatic-move-run.json");
+let automaticMoveRunLoaded = false;
+
+function loadAutomaticMoveRun() {
+  if (automaticMoveRunLoaded) return automaticMoveRun;
+  automaticMoveRunLoaded = true;
+  try {
+    const saved = JSON.parse(fs.readFileSync(automaticMoveRunFile(), "utf8"));
+    if (
+      !Array.isArray(saved.queue) ||
+      !Array.isArray(saved.completed) ||
+      typeof saved.runId !== "string" ||
+      typeof saved.obsSetup?.recordDirectory !== "string"
+    ) {
+      return null;
+    }
+    automaticMoveRun = {
+      ...saved,
+      status: ["running", "countdown"].includes(saved.status) ? "paused" : saved.status,
+      error: ["running", "countdown"].includes(saved.status)
+        ? "Labatar restarted during the capture pass. Resume after checking the game and OBS."
+        : (saved.error ?? null),
+    };
+  } catch {
+    automaticMoveRun = null;
+  }
+  return automaticMoveRun;
+}
+
+function saveAutomaticMoveRun() {
+  if (!automaticMoveRun) return;
+  const target = automaticMoveRunFile();
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const temporary = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(automaticMoveRun, null, 2), "utf8");
+  const retryWait = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.renameSync(temporary, target);
+      return;
+    } catch (error) {
+      if (attempt >= 5 || !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+      Atomics.wait(retryWait, 0, 0, 25 * 2 ** attempt);
+    }
+  }
+}
+
+function publicAutomaticMoveRun() {
+  const run = loadAutomaticMoveRun();
+  if (!run) {
+    return { status: "idle", index: 0, total: 0, currentMove: null, phase: "", error: null };
+  }
+  return {
+    status: run.status,
+    index: run.index,
+    total: run.queue.length,
+    currentMove: run.queue[run.index]?.input ?? null,
+    phase: run.phase ?? "",
+    error: run.error ?? null,
+    runId: run.runId,
+  };
+}
+
+function automaticMoveRunIsOpen() {
+  return ["running", "countdown", "paused"].includes(loadAutomaticMoveRun()?.status);
+}
+
+function publishAutomaticMoveRun(patch = {}) {
+  const run = loadAutomaticMoveRun();
+  if (!run) return publicAutomaticMoveRun();
+  Object.assign(run, patch);
+  saveAutomaticMoveRun();
+  const state = publicAutomaticMoveRun();
+  if (canSendToRenderer()) mainWindow.webContents.send("move-capture:automatic-state", state);
+  return state;
+}
+
+async function getAutomaticMoveInput() {
+  if (!automaticMoveInput) {
+    automaticMoveInput = await createTrainingInputClient({ gameRoot: automaticMoveRun.gameRoot });
+  }
+  return automaticMoveInput;
+}
+
+async function closeAutomaticMoveInput() {
+  const client = automaticMoveInput;
+  automaticMoveInput = null;
+  if (client) await client.close();
+}
+
+function validateAutomaticMoveQueue(request = {}) {
+  const variantId = String(request.variantId ?? "");
+  const variant = knownMoveCaptureVariants().find((entry) => entry.id === variantId);
+  if (!variant) throw new Error("Select a known character and support before automatic capture.");
+  const facing = request.facing === "Left" ? "Left" : "Right";
+  if (!Array.isArray(request.moves) || request.moves.length < 1 || request.moves.length > 200) {
+    throw new Error("The automatic capture queue must contain 1 to 200 moves.");
+  }
+  const seen = new Set();
+  const queue = request.moves.map((move) => {
+    const id = String(move?.id ?? "");
+    const input = String(move?.input ?? "").toUpperCase();
+    if (!/^[a-z0-9][a-z0-9-]*$/i.test(id) || seen.has(id)) {
+      throw new Error("The automatic capture queue has an invalid or repeated move ID.");
+    }
+    if (!/^(?:236|214|[1-9])(?:EX|[ABCF])$/.test(input)) {
+      throw new Error(`No supported grounded whiff recipe for ${input}.`);
+    }
+    seen.add(id);
+    return { id, input };
+  });
+  return { variant, facing, queue };
+}
+
+async function reconcileAutomaticMoveRun() {
+  const run = loadAutomaticMoveRun();
+  if (run?.status !== "paused") return publicAutomaticMoveRun();
+  const completedByMove = new Map();
+  for (const filePath of await findRecordingFiles(run.obsSetup.recordDirectory)) {
+    let manifest;
+    try {
+      manifest = JSON.parse(
+        await fs.promises.readFile(recordingManifestPathForVideo(filePath), "utf8"),
+      );
+    } catch {
+      continue;
+    }
+    const take = readMoveTake(manifest.moveTake);
+    if (
+      take?.captureRunId !== run.runId ||
+      take.status !== "captured" ||
+      take.storageError ||
+      manifest.stopReason !== "automatic-move-capture" ||
+      manifest.capture?.fpsNumerator !== 60 ||
+      manifest.capture?.fpsDenominator !== 1
+    ) {
+      continue;
+    }
+    const previous = completedByMove.get(take.moveId);
+    if (!previous || String(manifest.stoppedAt) > String(previous.stoppedAt)) {
+      completedByMove.set(take.moveId, {
+        moveId: take.moveId,
+        outputPath: filePath,
+        manifestPath: recordingManifestPathForVideo(filePath),
+        stoppedAt: manifest.stoppedAt,
+      });
+    }
+  }
+  const completed = [];
+  for (const item of run.queue) {
+    const saved = completedByMove.get(item.id);
+    if (!saved) break;
+    completed.push({
+      moveId: saved.moveId,
+      outputPath: saved.outputPath,
+      manifestPath: saved.manifestPath,
+    });
+  }
+  if (completed.length !== run.index || completed.length !== run.completed.length) {
+    // A recording may have finalized before a transient state-file write failed.
+    // The paused runner still has its old index; rebuild it from the manifests.
+    automaticMoveRunner = null;
+    return publishAutomaticMoveRun({ index: completed.length, completed });
+  }
+  return publicAutomaticMoveRun();
+}
+
+function automaticMoveRunnerForCurrentRun() {
+  if (automaticMoveRunner) return automaticMoveRunner;
+  automaticMoveRunner = createAutomaticMoveRunner({
+    reset: async () => {
+      const client = await getAutomaticMoveInput();
+      await client.send({ kind: "reset" });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    },
+    move: async (item) => {
+      const client = await getAutomaticMoveInput();
+      await client.send({ kind: "move", notation: item.input, facing: automaticMoveRun.facing });
+    },
+    arm: async (item) => {
+      armMoveCapture({
+        characterId: automaticMoveRun.variantId,
+        moveId: item.id,
+        moveInput: item.input,
+        isStance: false,
+        isCharged: false,
+        outcome: "whiff",
+      });
+      armedMoveCapture.captureMethod = "automated";
+      armedMoveCapture.captureRunId = automaticMoveRun.runId;
+      armedMoveCapture.captureRecipe = {
+        notation: item.input,
+        facing: automaticMoveRun.facing,
+        reset: "Back/Select tap",
+        neutralPreRollMs: 500,
+        tailMs: 2000,
+      };
+      sendMoveCaptureState();
+    },
+    startRecord: async () => {
+      await requireDevBlackoutCapture();
+      return startObsRecording(null, automaticMoveRun.obsSetup, {
+        manual: true,
+        moveTake: publicArmedMoveCapture(),
+        reusePreparedProfile: true,
+      });
+    },
+    stopRecord: async ({ interrupted }) =>
+      stopObsRecording(interrupted ? "automatic-move-interrupted" : "automatic-move-capture"),
+    verifySaved: async ({ move: item, recording }) => {
+      if (!recording?.outputPath || !recording?.manifestPath || recording.manifestError)
+        return false;
+      const stat = await fs.promises.stat(recording.outputPath).catch(() => null);
+      if (!stat?.isFile() || stat.size === 0) return false;
+      const manifest = JSON.parse(await fs.promises.readFile(recording.manifestPath, "utf8"));
+      const take = readMoveTake(manifest.moveTake);
+      return (
+        take?.captureRunId === automaticMoveRun.runId &&
+        take.moveId === item.id &&
+        take.status === "captured" &&
+        !take.storageError &&
+        manifest.capture?.fpsNumerator === 60 &&
+        manifest.capture?.fpsDenominator === 1
+      );
+    },
+    persist: async ({ move: item, recording }) => {
+      automaticMoveRun.completed.push({
+        moveId: item.id,
+        outputPath: recording.outputPath,
+        manifestPath: recording.manifestPath,
+      });
+      saveAutomaticMoveRun();
+    },
+    onState: (state) => {
+      publishAutomaticMoveRun({
+        status: state.status === "complete" ? "completed" : state.status,
+        index: state.index,
+        phase: state.phase ?? "",
+        error: state.error,
+      });
+      if (state.status === "complete" || state.status === "cancelled") {
+        armedMoveCapture = null;
+        sendMoveCaptureState();
+        void closeAutomaticMoveInput().catch(() => undefined);
+      }
+    },
+  });
+  return automaticMoveRunner;
+}
+
+function launchAutomaticMoveRun(resume = false) {
+  const run = loadAutomaticMoveRun();
+  if (!run) throw new Error("There is no automatic capture run.");
+  publishAutomaticMoveRun({ status: "countdown", phase: "focus-game", error: null });
+  automaticMoveCountdown = setTimeout(() => {
+    automaticMoveCountdown = null;
+    if (automaticMoveRun?.status !== "countdown") return;
+    const runner = automaticMoveRunnerForCurrentRun();
+    const task =
+      resume && runner.status().status === "paused"
+        ? runner.resume()
+        : runner.start(run.queue, { index: run.index });
+    void task.catch((error) => {
+      publishAutomaticMoveRun({ status: "paused", phase: "", error: obsErrorMessage(error) });
+    });
+  }, 5000);
+  return publicAutomaticMoveRun();
+}
+
+async function startAutomaticMoveRun(request = {}) {
+  await requireDevBlackoutCapture();
+  const existing = loadAutomaticMoveRun();
+  if (existing && ["running", "countdown", "paused"].includes(existing.status)) {
+    throw new Error("Pause, resume, or cancel the existing capture pass first.");
+  }
+  if (obsState.status !== "connected" || obsState.recording.active || activeObsRecording) {
+    throw new Error("Connect OBS and stop any active recording before starting the pass.");
+  }
+  const { variant, facing, queue } = validateAutomaticMoveQueue(request);
+  const gameRoot = getReplayFolder();
+  if (!gameRoot || !fs.existsSync(path.join(gameRoot, "data", "button_config.ini"))) {
+    throw new Error("Select the game installation folder with Player 1 controls in Settings.");
+  }
+  const settings = getObsSettings();
+  const queuedIds = new Set(queue.map((item) => item.id));
+  for (const filePath of await findRecordingFiles(settings.recordDirectory)) {
+    const manifestPath = recordingManifestPathForVideo(filePath);
+    let take;
+    try {
+      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+      take = readMoveTake(manifest.moveTake);
+    } catch {
+      continue;
+    }
+    if (
+      take?.characterId === variant.id &&
+      take.outcome === "whiff" &&
+      queuedIds.has(take.moveId) &&
+      ["active", "pending"].includes(take.evidenceStatus)
+    ) {
+      throw new Error(`A whiff take for ${take.moveLabel} already exists. Refresh the queue.`);
+    }
+  }
+  const obsSetup = { profileName: settings.profileName, recordDirectory: settings.recordDirectory };
+  await prepareObsProfile(obsSetup);
+  if (obsState.videoSettings?.fpsNumerator !== 60 || obsState.videoSettings?.fpsDenominator !== 1) {
+    throw new Error("The managed OBS profile must report 60 fps before move capture.");
+  }
+  automaticMoveRunner = null;
+  automaticMoveRun = {
+    runId: randomUUID(),
+    variantId: variant.id,
+    gameRoot,
+    facing,
+    queue,
+    completed: [],
+    index: 0,
+    status: "countdown",
+    phase: "focus-game",
+    error: null,
+    obsSetup,
+  };
+  saveAutomaticMoveRun();
+  return launchAutomaticMoveRun();
+}
+
+async function pauseAutomaticMoveRun() {
+  const run = loadAutomaticMoveRun();
+  if (automaticMoveCountdown) {
+    clearTimeout(automaticMoveCountdown);
+    automaticMoveCountdown = null;
+    return publishAutomaticMoveRun({ status: "paused", phase: "" });
+  }
+  if (automaticMoveRunner && run?.status === "running") await automaticMoveRunner.pause();
+  return publicAutomaticMoveRun();
+}
+
+async function resumeAutomaticMoveRun() {
+  await requireDevBlackoutCapture();
+  await reconcileAutomaticMoveRun();
+  const run = loadAutomaticMoveRun();
+  if (run?.status !== "paused") throw new Error("There is no paused capture pass.");
+  if (run.index >= run.queue.length) {
+    return publishAutomaticMoveRun({ status: "completed", phase: "", error: null });
+  }
+  if (obsState.status !== "connected" || obsState.recording.active || activeObsRecording) {
+    throw new Error("Connect OBS and stop any active recording before resuming.");
+  }
+  await prepareObsProfile(run.obsSetup);
+  return launchAutomaticMoveRun(true);
+}
+
+async function cancelAutomaticMoveRun() {
+  if (!automaticMoveRunIsOpen()) return publicAutomaticMoveRun();
+  if (automaticMoveCountdown) {
+    clearTimeout(automaticMoveCountdown);
+    automaticMoveCountdown = null;
+  }
+  if (automaticMoveRunner && ["running", "paused"].includes(loadAutomaticMoveRun()?.status)) {
+    await automaticMoveRunner.cancel();
+  } else {
+    publishAutomaticMoveRun({ status: "cancelled", phase: "", error: null });
+  }
+  armedMoveCapture = null;
+  sendMoveCaptureState();
+  await closeAutomaticMoveInput();
+  return publicAutomaticMoveRun();
+}
+
 function createRecordingMoveTake(armed) {
   if (!armed) return null;
   return {
@@ -687,6 +1076,12 @@ function createRecordingMoveTake(armed) {
     evidenceStatus: "pending",
     evidenceReason: null,
     reviewedAt: null,
+    captureMethod: armed.captureMethod === "automated" ? "automated" : null,
+    captureRunId: typeof armed.captureRunId === "string" ? armed.captureRunId : null,
+    captureRecipe: armed.captureRecipe ?? null,
+    captureReviewStatus: armed.captureMethod === "automated" ? "awaiting-video-review" : null,
+    captureReviewReason: null,
+    captureReviewedAt: null,
     validation: {
       status: "unprocessed",
       message: "Processing has not yet compared this take with its expected input.",
@@ -745,6 +1140,11 @@ async function archiveEarlierPendingMoveTakes(currentPath, take) {
     manifest.moveTake.evidenceStatus = "archived";
     manifest.moveTake.evidenceReason = `Superseded by pending take ${take.id}.`;
     manifest.moveTake.reviewedAt = new Date().toISOString();
+    if (manifest.moveTake.captureReviewStatus === "awaiting-video-review") {
+      manifest.moveTake.captureReviewStatus = "rejected";
+      manifest.moveTake.captureReviewReason = manifest.moveTake.evidenceReason;
+      manifest.moveTake.captureReviewedAt = manifest.moveTake.reviewedAt;
+    }
     await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
   }
 }
@@ -1308,15 +1708,33 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
       durationMs: Date.now() - startedAtMs,
     });
   } catch (error) {
-    activeObsRecording = null;
-    sendMoveCaptureState();
     if (reusePreparedProfile) invalidatePreparedObsProfile();
+    let recoveryError = null;
+    try {
+      const status = await client.call("GetRecordStatus");
+      if (status.outputActive) {
+        await stopObsRecording("start-acknowledgment-failed");
+      } else {
+        activeObsRecording = null;
+        sendMoveCaptureState();
+      }
+    } catch (statusOrStopError) {
+      recoveryError = statusOrStopError;
+      // Keep the take context so a later OBS stop can still finalize its manifest.
+    }
     logRecordingDiagnostic("obs-start-record-failed", {
       source,
       matchId: metadata?.matchId ?? null,
       durationMs: Date.now() - startedAtMs,
       error: obsErrorMessage(error),
+      recoveryError: recoveryError ? obsErrorMessage(recoveryError) : null,
     });
+    if (recoveryError) {
+      throw new AggregateError(
+        [error, recoveryError],
+        `OBS start failed and recording status could not be recovered: ${obsErrorMessage(recoveryError)}`,
+      );
+    }
     throw error;
   }
   setObsState({
@@ -1327,6 +1745,10 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
 }
 
 async function startManualObsRecording(setup = {}) {
+  if (automaticMoveRunIsOpen()) {
+    throw new Error("Finish or cancel the automatic move capture pass first.");
+  }
+  if (publicArmedMoveCapture() || devCaptureTabActive) await requireDevBlackoutCapture();
   return startObsRecording(null, setup, { manual: true, moveTake: publicArmedMoveCapture() });
 }
 
@@ -2366,6 +2788,9 @@ function saveCaptureSettings(nextSettings) {
 }
 
 async function toggleLabatarCapture(trigger = "hotkey") {
+  if (automaticMoveRunIsOpen()) {
+    throw new Error("The F9 recording shortcut is unavailable during automatic move capture.");
+  }
   if (captureTogglePromise) return captureTogglePromise;
   captureTogglePromise = (async () => {
     if (activeObsRecording) {
@@ -2474,6 +2899,205 @@ function getReplayFolder() {
   const savedFolder = readSettings().replaysFolder;
   if (typeof savedFolder === "string" && savedFolder.trim()) return savedFolder;
   return fs.existsSync(defaultReplaysFolder) ? defaultReplaysFolder : null;
+}
+
+function blackoutBackupRoot() {
+  return path.join(app.getPath("userData"), "blackout-game-backups");
+}
+
+function blackoutSourceRoot() {
+  return path.resolve(__dirname, "..", ".dev", "installer", "black-stage");
+}
+
+async function startBlackoutWatcher(session) {
+  if (blackoutWatcherStarting?.backupDir === session.backupDir) {
+    return blackoutWatcherStarting.promise;
+  }
+  const watcherLock = path.join(blackoutBackupRoot(), "watcher.lock");
+  const watcherLockStat = fs.existsSync(watcherLock) ? fs.statSync(watcherLock) : null;
+  if (watcherLockStat && Date.now() - watcherLockStat.mtimeMs < 15_000) return;
+  const promise = (async () => {
+    await execFileAsync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        path.join(__dirname, "start-blackout-watcher.ps1"),
+        process.execPath,
+        path.join(__dirname, "dev-blackout-game.cjs"),
+        blackoutBackupRoot(),
+      ],
+      { windowsHide: true },
+    );
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(watcherLock)) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("The blackout restore watcher did not start.");
+  })();
+  blackoutWatcherStarting = { backupDir: session.backupDir, promise };
+  try {
+    await promise;
+  } finally {
+    blackoutWatcherStarting = null;
+  }
+}
+
+async function devBlackoutStatus() {
+  if (!isDev)
+    return {
+      available: false,
+      gameRunning: false,
+      active: false,
+      busy: false,
+      restorePending: false,
+      error: "Development build only.",
+    };
+  const running = await blackoutGameRunning();
+  let current = readBlackoutSession(blackoutBackupRoot());
+  const selectedRoot = getReplayFolder();
+  if (
+    current?.phase === "restoring" &&
+    running &&
+    !blackoutRecoveryBusy &&
+    selectedRoot &&
+    path.resolve(current.gameRoot) === path.resolve(selectedRoot) &&
+    !fs.existsSync(path.join(blackoutBackupRoot(), "restore.lock"))
+  ) {
+    blackoutRecoveryBusy = true;
+    try {
+      if (
+        (await verifyBlackoutInstalled(current)) &&
+        (await Promise.all(current.files.map((file) => sha256BlackoutFile(file.backup)))).every(
+          (hash, index) => hash === current.files[index].originalHash,
+        ) &&
+        (await blackoutGameRunning())
+      ) {
+        current.phase = "active";
+        current.activeAt = Date.now();
+        writeBlackoutSession(blackoutBackupRoot(), current);
+        await startBlackoutWatcher(current);
+      }
+    } finally {
+      blackoutRecoveryBusy = false;
+    }
+  }
+  const restoreLog = path.join(blackoutBackupRoot(), "restore-error.log");
+  const restoreErrorStat = current ? await fs.promises.stat(restoreLog).catch(() => null) : null;
+  const restoreFailed = Boolean(
+    current && !running && restoreErrorStat && restoreErrorStat.mtimeMs >= current.createdAt,
+  );
+  const active = Boolean(
+    current?.phase === "active" &&
+    running &&
+    selectedRoot &&
+    path.resolve(current.gameRoot) === path.resolve(selectedRoot) &&
+    (await verifyBlackoutInstalled(current)),
+  );
+  if (active) await startBlackoutWatcher(current);
+  return {
+    available: true,
+    gameRunning: running,
+    active,
+    busy: blackoutBusy || Boolean(current && !running),
+    restorePending: Boolean(current && !running),
+    error: restoreFailed
+      ? "Automatic restoration failed. Use Retry restore after checking the game is closed."
+      : current && running && !active
+        ? "The game is open, but its blackout files could not be verified."
+        : null,
+  };
+}
+
+async function retryDevBlackoutRestore() {
+  if (!isDev) throw new Error("Blackout restoration is available only in development builds.");
+  if (blackoutBusy) throw new Error("Blackout setup is already running.");
+  if (await blackoutGameRunning())
+    throw new Error("Close the game before restoring original assets.");
+  const restored = await restoreBlackoutSession(blackoutBackupRoot());
+  if (!restored && readBlackoutSession(blackoutBackupRoot())) {
+    throw new Error("The restore watcher is still working. Try again shortly.");
+  }
+  return devBlackoutStatus();
+}
+
+async function requireDevBlackoutCapture() {
+  const status = await devBlackoutStatus();
+  if (!status.active) {
+    throw new Error(
+      "Start the game in blackout mode from Dev-only capture before recording move data.",
+    );
+  }
+}
+
+async function startDevBlackoutGame() {
+  if (!isDev) throw new Error("Blackout game launch is available only in development builds.");
+  if (blackoutBusy) throw new Error("Blackout setup is already running.");
+  blackoutBusy = true;
+  let session = null;
+  try {
+    if (readBlackoutSession(blackoutBackupRoot())) {
+      throw new Error(
+        "The previous blackout session must be restored before starting another game.",
+      );
+    }
+    if (await blackoutGameRunning())
+      throw new Error("Close the already open game before starting blackout mode.");
+    const gameRoot = getReplayFolder();
+    if (!gameRoot) throw new Error("Select the game installation folder in Settings first.");
+    session = await prepareBlackoutSession({
+      gameRoot: path.resolve(gameRoot),
+      sourceRoot: blackoutSourceRoot(),
+      backupRoot: blackoutBackupRoot(),
+    });
+    await startBlackoutWatcher(session);
+    await installBlackoutSession(session);
+    if (!(await verifyBlackoutInstalled(session)))
+      throw new Error("Blackout installation could not be verified.");
+    if (await blackoutGameRunning()) {
+      throw new Error("The game opened during blackout setup. Close it to restore the originals.");
+    }
+    const child = spawn(path.join(session.gameRoot, "Atla.exe"), [], {
+      cwd: session.gameRoot,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+    });
+    let launchError = null;
+    child.on("error", (error) => {
+      launchError = error;
+    });
+    child.unref();
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      if (launchError) throw launchError;
+      if (await blackoutGameRunning()) break;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    if (!(await blackoutGameRunning())) throw new Error("The game did not open within 20 seconds.");
+    session.phase = "active";
+    session.activeAt = Date.now();
+    writeBlackoutSession(blackoutBackupRoot(), session);
+    return devBlackoutStatus();
+  } catch (error) {
+    if (session && !(await blackoutGameRunning().catch(() => true))) {
+      try {
+        await restoreBlackoutSession(blackoutBackupRoot());
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          `Game launch failed and original assets could not be restored: ${obsErrorMessage(restoreError)}`,
+        );
+      }
+    }
+    throw error;
+  } finally {
+    blackoutBusy = false;
+  }
 }
 
 async function getGameFolderStatus() {
@@ -2710,6 +3334,9 @@ ipcMain.handle("capture:set-chapter-settings", (_, request) => {
   }
 });
 ipcMain.handle("capture:toggle", async () => toggleLabatarCapture("labatar"));
+ipcMain.handle("capture:set-dev-tab-active", (_, active) => {
+  devCaptureTabActive = isDev && active === true;
+});
 ipcMain.handle("capture:add-chapter", async () => addRecordingChapter("labatar"));
 ipcMain.handle("capture:set-auto-game-chapters", (_, request) => {
   if (typeof request?.enabled !== "boolean") throw new Error("Invalid game chapter setting.");
@@ -2779,17 +3406,22 @@ ipcMain.handle("obs:set-scene", async (_, sceneName) => {
   return publicObsState();
 });
 ipcMain.handle("obs:start-recording", async (_, request) => {
+  if (devCaptureTabActive) await requireDevBlackoutCapture();
   return startObsRecording(request?.metadata, request?.setup ?? {});
 });
 ipcMain.handle("obs:start-manual-recording", async (_, request) => {
   return startManualObsRecording(request?.setup ?? {});
 });
 ipcMain.handle("obs:stop-recording", async () => {
+  if (automaticMoveRunIsOpen()) {
+    throw new Error("Pause or cancel the automatic move capture pass to stop its recording.");
+  }
   return stopObsRecording("labatar");
 });
-ipcMain.handle("obs:set-automatic-recording", async (_, enabled) =>
-  setAutomaticRecordingEnabled(Boolean(enabled)),
-);
+ipcMain.handle("obs:set-automatic-recording", async (_, enabled) => {
+  if (enabled && devCaptureTabActive) await requireDevBlackoutCapture();
+  return setAutomaticRecordingEnabled(Boolean(enabled));
+});
 
 function formatSupport(character, supportId) {
   if (!supportId || supportId === "0") return "None";
@@ -4096,6 +4728,31 @@ async function deleteRecording(request = {}) {
   return { id: recordingId };
 }
 
+async function deletePendingMoveRecording(request = {}) {
+  if (automaticMoveRunIsOpen()) {
+    throw new Error("Finish or cancel the automatic capture pass before deleting a move video.");
+  }
+  const recordingId = String(request.recordingId ?? "");
+  const currentPath = resolveRecordingPath(recordingId);
+  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
+  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+  let manifest;
+  try {
+    manifest = JSON.parse(
+      await fs.promises.readFile(recordingManifestPathForVideo(currentPath), "utf8"),
+    );
+  } catch {
+    throw new Error("The move recording metadata could not be read.");
+  }
+  const take = readMoveTake(manifest.moveTake);
+  if (take?.status !== "captured" || take.evidenceStatus !== "pending" || manifest.analysis) {
+    throw new Error("Only captured, pending, unprocessed move recordings can be deleted here.");
+  }
+  const result = await deleteRecording({ recordingId });
+  if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+  return result;
+}
+
 async function setRecordingTags(request = {}) {
   const recordingId = String(request.recordingId ?? "");
   const currentPath = resolveRecordingPath(recordingId);
@@ -4177,6 +4834,12 @@ async function saveRecordingAnalysis(request = {}) {
       ? [...manifest.analysisHistory, manifest.analysis]
       : [manifest.analysis];
   }
+  if (
+    manifest.moveTake?.captureMethod === "automated" &&
+    manifest.moveTake.captureReviewStatus !== "approved-for-processing"
+  ) {
+    throw new Error("Review and approve this automated video before processing it.");
+  }
   manifest.analysis = analysis;
   if (manifest.moveTake && typeof manifest.moveTake === "object") {
     manifest.moveTake.validation = validateMoveTake(manifest.moveTake, analysis);
@@ -4197,6 +4860,12 @@ async function setMoveTakeEvidence(request = {}) {
   const take = readMoveTake(manifest.moveTake);
   if (!take) throw new Error("This recording is not a move take.");
   if (action === "accept") {
+    if (
+      take.captureMethod === "automated" &&
+      take.captureReviewStatus !== "approved-for-processing"
+    ) {
+      throw new Error("Review and approve this automated video before accepting evidence.");
+    }
     if (!manifest.analysis) throw new Error("Process this take before accepting its evidence.");
     if (
       !take.validation.matchedAnalysisMoveId ||
@@ -4235,6 +4904,38 @@ async function setMoveTakeEvidence(request = {}) {
   manifest.moveTake.evidenceReason =
     action === "archive" ? String(request.reason ?? "Retake requested.").trim() : null;
   manifest.moveTake.reviewedAt = new Date().toISOString();
+  await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  return getRecordedVideoForPath(currentPath);
+}
+
+async function reviewAutomaticMoveVideo(request = {}) {
+  const recordingId = String(request.recordingId ?? "");
+  const action = String(request.action ?? "");
+  if (action !== "approve" && action !== "reject") throw new Error("Invalid video review action.");
+  const currentPath = resolveRecordingPath(recordingId);
+  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
+  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+  const manifestPath = recordingManifestPathForVideo(currentPath);
+  const manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+  const take = readMoveTake(manifest.moveTake);
+  if (take?.captureMethod !== "automated") {
+    throw new Error("This is not an automated move video.");
+  }
+  if (take.evidenceStatus !== "pending") {
+    throw new Error("Only pending automated videos can be reviewed here.");
+  }
+  if (action === "reject") {
+    const reason = String(request.reason ?? "").trim();
+    if (!reason) throw new Error("Give a reason before rejecting the video.");
+    manifest.moveTake.captureReviewStatus = "rejected";
+    manifest.moveTake.captureReviewReason = reason;
+    manifest.moveTake.evidenceStatus = "archived";
+    manifest.moveTake.evidenceReason = `Video review: ${reason}`;
+  } else {
+    manifest.moveTake.captureReviewStatus = "approved-for-processing";
+    manifest.moveTake.captureReviewReason = null;
+  }
+  manifest.moveTake.captureReviewedAt = new Date().toISOString();
   await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
   return getRecordedVideoForPath(currentPath);
 }
@@ -4300,6 +5001,22 @@ function readMoveTake(value) {
       : "pending",
     evidenceReason: typeof value.evidenceReason === "string" ? value.evidenceReason : null,
     reviewedAt: typeof value.reviewedAt === "string" ? value.reviewedAt : null,
+    captureMethod: value.captureMethod === "automated" ? "automated" : null,
+    captureRunId: typeof value.captureRunId === "string" ? value.captureRunId : null,
+    captureRecipe:
+      value.captureRecipe && typeof value.captureRecipe === "object" ? value.captureRecipe : null,
+    captureReviewStatus:
+      value.captureMethod === "automated" &&
+      ["awaiting-video-review", "approved-for-processing", "rejected"].includes(
+        value.captureReviewStatus,
+      )
+        ? value.captureReviewStatus
+        : value.captureMethod === "automated"
+          ? "awaiting-video-review"
+          : null,
+    captureReviewReason:
+      typeof value.captureReviewReason === "string" ? value.captureReviewReason : null,
+    captureReviewedAt: typeof value.captureReviewedAt === "string" ? value.captureReviewedAt : null,
     validation: {
       status: validationStatus,
       message:
@@ -5123,14 +5840,32 @@ ipcMain.handle("recordings:open-youtube-video", async (_, request) => {
 ipcMain.handle("recordings:set-tags", async (_, request) => setRecordingTags(request));
 ipcMain.handle("recordings:save-analysis", async (_, request) => saveRecordingAnalysis(request));
 ipcMain.handle("recordings:set-move-evidence", async (_, request) => setMoveTakeEvidence(request));
+ipcMain.handle("recordings:review-capture", async (_, request) =>
+  reviewAutomaticMoveVideo(request),
+);
 ipcMain.handle("move-catalog:load", () => moveCatalogStore().load());
 ipcMain.handle("move-catalog:known-variants", () => knownMoveCaptureVariants());
 ipcMain.handle("move-catalog:save", (_, request) =>
   moveCatalogStore().save(request?.catalog, request?.expectedRevision),
 );
 ipcMain.handle("move-capture:get-state", () => publicMoveCaptureState());
-ipcMain.handle("move-capture:arm", (_, request) => armMoveCapture(request));
-ipcMain.handle("move-capture:disarm", () => disarmMoveCapture());
+ipcMain.handle("move-capture:arm", async (_, request) => {
+  if (automaticMoveRunIsOpen()) throw new Error("Finish or cancel the automatic pass first.");
+  await requireDevBlackoutCapture();
+  return armMoveCapture(request);
+});
+ipcMain.handle("move-capture:disarm", () => {
+  if (automaticMoveRunIsOpen()) throw new Error("Finish or cancel the automatic pass first.");
+  return disarmMoveCapture();
+});
+ipcMain.handle("move-capture:automatic-start", (_, request) => startAutomaticMoveRun(request));
+ipcMain.handle("move-capture:automatic-status", () => reconcileAutomaticMoveRun());
+ipcMain.handle("move-capture:automatic-pause", () => pauseAutomaticMoveRun());
+ipcMain.handle("move-capture:automatic-resume", () => resumeAutomaticMoveRun());
+ipcMain.handle("move-capture:automatic-cancel", () => cancelAutomaticMoveRun());
+ipcMain.handle("dev-blackout:status", () => devBlackoutStatus());
+ipcMain.handle("dev-blackout:start", () => startDevBlackoutGame());
+ipcMain.handle("dev-blackout:restore", () => retryDevBlackoutRestore());
 ipcMain.handle("processing-config:load", () => processingConfigurationStore().load());
 ipcMain.handle("processing-config:save", (_, request) =>
   processingConfigurationStore().save(request.configuration, request.expectedRevision),
@@ -5157,6 +5892,9 @@ ipcMain.handle("processing-config:import", async (_, request) => {
   return processingConfigurationStore().restore(configuration, request.expectedRevision);
 });
 ipcMain.handle("recordings:delete", async (_, request) => deleteRecording(request));
+ipcMain.handle("recordings:delete-pending-move", async (_, request) =>
+  deletePendingMoveRecording(request),
+);
 ipcMain.on("recordings:start-drag", async (event, request) => {
   try {
     const filePath = resolveRecordingPath(String(request?.recordingId ?? ""));
@@ -5505,6 +6243,20 @@ void app.whenReady().then(() => {
     console.warn(`Global chapter shortcut unavailable: ${obsErrorMessage(error)}`);
   }
   createWindow();
+  if (isDev) {
+    try {
+      const existingBlackout = readBlackoutSession(blackoutBackupRoot());
+      if (existingBlackout)
+        void startBlackoutWatcher(existingBlackout).catch((error) =>
+          startupDiagnostic("blackout-watcher-start-failed", { error: obsErrorMessage(error) }),
+        );
+    } catch (error) {
+      startupDiagnostic("blackout-recovery-failed", { error: obsErrorMessage(error) });
+    }
+    void devBlackoutStatus().catch((error) =>
+      startupDiagnostic("blackout-recovery-failed", { error: obsErrorMessage(error) }),
+    );
+  }
   startupDiagnostic("window-created");
   configureAutoUpdater();
   if (!isDev) setTimeout(() => void checkForUpdates(), 4000);
@@ -5525,6 +6277,15 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   startupDiagnostic("before-quit");
+  if (automaticMoveCountdown) clearTimeout(automaticMoveCountdown);
+  if (["running", "countdown"].includes(automaticMoveRun?.status)) {
+    publishAutomaticMoveRun({
+      status: "paused",
+      phase: "",
+      error: "Labatar closed during capture.",
+    });
+  }
+  void closeAutomaticMoveInput().catch(() => undefined);
   if (captureShortcut) globalShortcut.unregister(captureShortcut);
   if (chapterShortcut) globalShortcut.unregister(chapterShortcut);
   for (const sessionId of recordingFrameReaders.keys()) closeRecordingFrameReader(sessionId);

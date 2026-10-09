@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     setSettings: (request) => ipcRenderer.invoke("capture:set-settings", request),
     setChapterSettings: (request) => ipcRenderer.invoke("capture:set-chapter-settings", request),
     toggle: () => ipcRenderer.invoke("capture:toggle"),
+    setDevTabActive: (active) => ipcRenderer.invoke("capture:set-dev-tab-active", active),
     addChapter: () => ipcRenderer.invoke("capture:add-chapter"),
     setAutoGameChapters: (enabled) =>
       ipcRenderer.invoke("capture:set-auto-game-chapters", { enabled }),
@@ -127,7 +128,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     setTags: (request) => ipcRenderer.invoke("recordings:set-tags", request),
     saveAnalysis: (request) => ipcRenderer.invoke("recordings:save-analysis", request),
     setMoveEvidence: (request) => ipcRenderer.invoke("recordings:set-move-evidence", request),
+    reviewCapture: (request) => ipcRenderer.invoke("recordings:review-capture", request),
     deleteRecording: (request) => ipcRenderer.invoke("recordings:delete", request),
+    deletePendingMove: (request) => ipcRenderer.invoke("recordings:delete-pending-move", request),
     startDrag: (request) => ipcRenderer.send("recordings:start-drag", request),
   },
   artwork: {
@@ -149,11 +152,26 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getState: () => ipcRenderer.invoke("move-capture:get-state"),
     arm: (request) => ipcRenderer.invoke("move-capture:arm", request),
     disarm: () => ipcRenderer.invoke("move-capture:disarm"),
+    automaticStart: (request) => ipcRenderer.invoke("move-capture:automatic-start", request),
+    automaticStatus: () => ipcRenderer.invoke("move-capture:automatic-status"),
+    automaticPause: () => ipcRenderer.invoke("move-capture:automatic-pause"),
+    automaticResume: () => ipcRenderer.invoke("move-capture:automatic-resume"),
+    automaticCancel: () => ipcRenderer.invoke("move-capture:automatic-cancel"),
+    onAutomaticState: (listener) => {
+      const handler = (_, state) => listener(state);
+      ipcRenderer.on("move-capture:automatic-state", handler);
+      return () => ipcRenderer.removeListener("move-capture:automatic-state", handler);
+    },
     onState: (listener) => {
       const handler = (_, state) => listener(state);
       ipcRenderer.on("move-capture:state", handler);
       return () => ipcRenderer.removeListener("move-capture:state", handler);
     },
+  },
+  devBlackout: {
+    status: () => ipcRenderer.invoke("dev-blackout:status"),
+    start: () => ipcRenderer.invoke("dev-blackout:start"),
+    restore: () => ipcRenderer.invoke("dev-blackout:restore"),
   },
   processingConfiguration: {
     load: () => ipcRenderer.invoke("processing-config:load"),

@@ -1,6 +1,6 @@
 # Move capture plan
 
-Status: implemented capture workflow with review and source-linked measurements; remaining detector checks are listed below.
+Status: implemented manual capture workflow with review and source-linked measurements. A scripted standard-move whiff runner and separate pre-processing video-review gate are implemented but await the live reset/OBS check described in `AUTOMATIC_MOVE_PROCESSING_PLAN.md`.
 
 ## Goal
 
@@ -28,6 +28,12 @@ Each applicable move has exactly one active take in each slot:
 The grounded/airborne distinction describes the **opponent at impact**, independently of the attacker's state. A take counts for a slot only when its observed outcome is confirmed. The situation selected before recording is capture intent, not proof of the outcome. One video may support several values within its slot, and each value should retain a link to its relevant frames.
 
 ## Capture workflow
+
+The steps below describe the manual workflow. The new automated whiff pass is
+limited to validated recipes while its reset and OBS integration are tested.
+It resets, records, executes, waits two seconds, resets, and finalizes one video
+per eligible move. The user reviews those videos before choosing which to
+process; final evidence acceptance still follows processing.
 
 1. Select a character/support variant and a gather situation. Show the current move and the next move in the queue.
 2. Start recording, perform the move, and stop recording. Once the video is finalized, save it as that slot's pending take, immediately select and arm the next move, and leave recording stopped. The user repeats the same start/stop action for the next move. Processing and review never interrupt this capture pass.

@@ -71,6 +71,18 @@ export type RecordingMoveTake = ArmedMoveCapture & {
   evidenceStatus: "pending" | "active" | "archived";
   evidenceReason?: string | null;
   reviewedAt?: string | null;
+  captureMethod?: "manual" | "automated";
+  captureReviewStatus?: "awaiting-video-review" | "approved-for-processing" | "rejected";
+  captureReviewReason?: string | null;
+  captureReviewedAt?: string | null;
+  captureRunId?: string | null;
+  captureRecipe?: {
+    notation: string;
+    facing: "Right" | "Left";
+    reset: string;
+    neutralPreRollMs: number;
+    tailMs: number;
+  } | null;
   validation: MoveTakeValidation;
 };
 

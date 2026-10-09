@@ -15,6 +15,9 @@ export type TechMove = {
   isStanceParent: boolean;
   /** This catalog entry is the held/charged version and owns separate capture data. */
   isCharged: boolean;
+  /** Excluded from automated capture; the move remains available for manual capture. */
+  nonstandard?: boolean;
+  nonstandardNote?: string;
   flowCancellable: boolean;
   notApplicable?: Partial<Record<MoveTakeOutcome, string>>;
   stanceFollowupPattern: TechStanceFollowupPattern | null;

@@ -108,6 +108,8 @@ const measuredFields: Array<{ key: TechMeasuredField; label: string }> = [
 
 type MoveDraft = {
   input: string;
+  nonstandard: boolean;
+  nonstandardNote: string;
   notApplicable: Partial<Record<MoveTakeOutcome, string>>;
   flowCancellable: boolean | null;
   isStanceParent: boolean;
@@ -136,6 +138,8 @@ type ComboDraft = {
 
 const emptyMoveDraft: MoveDraft = {
   input: "",
+  nonstandard: false,
+  nonstandardNote: "",
   notApplicable: {},
   flowCancellable: null,
   isStanceParent: false,
@@ -206,6 +210,8 @@ function loadTechCatalog(): TechCatalog {
             input: normalizedInput ?? move.input,
             isStanceParent: move.isStanceParent === true || legacyMove.isRekka === true,
             isCharged: move.isCharged === true,
+            nonstandard: move.nonstandard === true,
+            nonstandardNote: typeof move.nonstandardNote === "string" ? move.nonstandardNote : "",
             flowCancellable:
               typeof move.flowCancellable === "boolean"
                 ? move.flowCancellable
@@ -446,6 +452,9 @@ function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMov
                       <span>{move.input}</span>
                       {move.isStanceParent && <Chip label="Stance" size="small" color="primary" />}
                       {move.isCharged && <Chip label="Charged" size="small" color="warning" />}
+                      {move.nonstandard && (
+                        <Chip label="Nonstandard" size="small" color="default" />
+                      )}
                       {move.dependsOnMoveId && (
                         <Chip label="Followup" size="small" color="secondary" />
                       )}
@@ -468,6 +477,9 @@ function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMov
                         : null,
                       move.isStanceParent && move.stanceMinimumDuration != null
                         ? `Stance minimum ${move.stanceMinimumDuration}`
+                        : null,
+                      move.nonstandardNote?.trim()
+                        ? `Nonstandard: ${move.nonstandardNote.trim()}`
                         : null,
                     ]
                       .filter(Boolean)
@@ -940,6 +952,8 @@ export function TechSection() {
       input:
         normalizeMoveNotation(move.input, { allowDirectionless: Boolean(move.dependsOnMoveId) }) ??
         move.input,
+      nonstandard: move.nonstandard === true,
+      nonstandardNote: move.nonstandardNote ?? "",
       isStanceParent: move.isStanceParent,
       notApplicable: move.notApplicable ?? {},
       flowCancellable: move.flowCancellable,
@@ -991,6 +1005,8 @@ export function TechSection() {
     const moveValues = {
       character,
       input,
+      nonstandard: moveDraft.nonstandard,
+      nonstandardNote: moveDraft.nonstandardNote.trim(),
       isStanceParent: moveDraft.isStanceParent,
       notApplicable: Object.fromEntries(
         Object.entries(moveDraft.notApplicable)
@@ -1382,6 +1398,34 @@ export function TechSection() {
                     If a capture situation cannot occur for this move, enter a reason. That
                     situation will be skipped in gather mode.
                   </Typography>
+                  <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={moveDraft.nonstandard}
+                          onChange={(event) =>
+                            setMoveDraft((current) => ({
+                              ...current,
+                              nonstandard: event.target.checked,
+                            }))
+                          }
+                        />
+                      }
+                      label="Nonstandard (manual capture only)"
+                    />
+                    <TextField
+                      label="Nonstandard note"
+                      size="small"
+                      value={moveDraft.nonstandardNote}
+                      onChange={(event) =>
+                        setMoveDraft((current) => ({
+                          ...current,
+                          nonstandardNote: event.target.value,
+                        }))
+                      }
+                      sx={{ minWidth: 240 }}
+                    />
+                  </Stack>
                   <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
                     {moveTakeOutcomes.map((slot) => (
                       <TextField
