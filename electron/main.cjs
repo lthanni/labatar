@@ -15,6 +15,7 @@ const readline = require("node:readline");
 const { createHash, randomUUID } = require("node:crypto");
 const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
+const { performance } = require("node:perf_hooks");
 const { deflateSync } = require("node:zlib");
 const { autoUpdater } = require("electron-updater");
 const { OBSWebSocket } = require("obs-websocket-js");
@@ -46,12 +47,14 @@ const { createAutomaticMoveRunner } = require("./automatic-move-runner.cjs");
 const { createTrainingInputClient } = require("./training-input-client.cjs");
 const {
   gameRunning: blackoutGameRunning,
+  waitForStableGame: waitForBlackoutGame,
   sha256: sha256BlackoutFile,
   readSession: readBlackoutSession,
   writeSession: writeBlackoutSession,
   prepareSession: prepareBlackoutSession,
   installSession: installBlackoutSession,
   verifyInstalled: verifyBlackoutInstalled,
+  verifyInstalledAssets: verifyBlackoutAssets,
   restoreSession: restoreBlackoutSession,
 } = require("./dev-blackout-game.cjs");
 const { createOpponentSetHistory } = require("./opponent-set-history.cjs");
@@ -801,8 +804,8 @@ function validateAutomaticMoveQueue(request = {}) {
     if (!/^[a-z0-9][a-z0-9-]*$/i.test(id) || seen.has(id)) {
       throw new Error("The automatic capture queue has an invalid or repeated move ID.");
     }
-    if (!/^(?:236|214|[1-9])(?:EX|[ABCF])$/.test(input)) {
-      throw new Error(`No supported grounded whiff recipe for ${input}.`);
+    if (!/^(?:J\.)?(?:236|214|[1-9])(?:EX|[ABCF])$/.test(input)) {
+      throw new Error(`No supported whiff recipe for ${input}.`);
     }
     seen.add(id);
     return { id, input };
@@ -2961,7 +2964,7 @@ async function devBlackoutStatus() {
   let current = readBlackoutSession(blackoutBackupRoot());
   const selectedRoot = getReplayFolder();
   if (
-    current?.phase === "restoring" &&
+    (current?.phase === "restoring" || current?.phase === "launching") &&
     running &&
     !blackoutRecoveryBusy &&
     selectedRoot &&
@@ -2992,13 +2995,18 @@ async function devBlackoutStatus() {
     current && !running && restoreErrorStat && restoreErrorStat.mtimeMs >= current.createdAt,
   );
   const active = Boolean(
-    current?.phase === "active" &&
     running &&
     selectedRoot &&
-    path.resolve(current.gameRoot) === path.resolve(selectedRoot) &&
-    (await verifyBlackoutInstalled(current)),
+    (current
+      ? current.phase === "active" &&
+        path.resolve(current.gameRoot) === path.resolve(selectedRoot) &&
+        (await verifyBlackoutInstalled(current))
+      : await verifyBlackoutAssets({
+          gameRoot: path.resolve(selectedRoot),
+          sourceRoot: blackoutSourceRoot(),
+        })),
   );
-  if (active) await startBlackoutWatcher(current);
+  if (active && current) await startBlackoutWatcher(current);
   return {
     available: true,
     gameRunning: running,
@@ -3018,6 +3026,13 @@ async function retryDevBlackoutRestore() {
   if (blackoutBusy) throw new Error("Blackout setup is already running.");
   if (await blackoutGameRunning())
     throw new Error("Close the game before restoring original assets.");
+  const session = readBlackoutSession(blackoutBackupRoot());
+  if (
+    session?.phase === "launching" &&
+    Date.now() - (session.launchAt ?? session.createdAt) < 60_000
+  ) {
+    throw new Error("The game is still launching. Wait before restoring its original assets.");
+  }
   const restored = await restoreBlackoutSession(blackoutBackupRoot());
   if (!restored && readBlackoutSession(blackoutBackupRoot())) {
     throw new Error("The restore watcher is still working. Try again shortly.");
@@ -3028,9 +3043,7 @@ async function retryDevBlackoutRestore() {
 async function requireDevBlackoutCapture() {
   const status = await devBlackoutStatus();
   if (!status.active) {
-    throw new Error(
-      "Start the game in blackout mode from Dev-only capture before recording move data.",
-    );
+    throw new Error("Run the game with verified blackout assets before recording move data.");
   }
 }
 
@@ -3039,6 +3052,8 @@ async function startDevBlackoutGame() {
   if (blackoutBusy) throw new Error("Blackout setup is already running.");
   blackoutBusy = true;
   let session = null;
+  let launchAttempted = false;
+  let launchStartedAt = null;
   try {
     if (readBlackoutSession(blackoutBackupRoot())) {
       throw new Error(
@@ -3061,6 +3076,11 @@ async function startDevBlackoutGame() {
     if (await blackoutGameRunning()) {
       throw new Error("The game opened during blackout setup. Close it to restore the originals.");
     }
+    session.phase = "launching";
+    session.launchAt = Date.now();
+    writeBlackoutSession(blackoutBackupRoot(), session);
+    launchAttempted = true;
+    launchStartedAt = performance.now();
     const child = spawn(path.join(session.gameRoot, "Atla.exe"), [], {
       cwd: session.gameRoot,
       detached: true,
@@ -3072,18 +3092,42 @@ async function startDevBlackoutGame() {
       launchError = error;
     });
     child.unref();
-    const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline) {
-      if (launchError) throw launchError;
-      if (await blackoutGameRunning()) break;
-      await new Promise((resolve) => setTimeout(resolve, 300));
+    let processCheckError = null;
+    const confirmed = await waitForBlackoutGame(blackoutGameRunning, {
+      checkAbort: () => launchError,
+      onCheckError: (error) => {
+        processCheckError = error;
+      },
+    });
+    if (!confirmed) {
+      throw new Error(
+        processCheckError
+          ? `Could not confirm the game opened: ${obsErrorMessage(processCheckError)}`
+          : "The game did not open within 30 seconds.",
+      );
     }
-    if (!(await blackoutGameRunning())) throw new Error("The game did not open within 20 seconds.");
     session.phase = "active";
     session.activeAt = Date.now();
     writeBlackoutSession(blackoutBackupRoot(), session);
     return devBlackoutStatus();
   } catch (error) {
+    startupDiagnostic("blackout-launch-failed", {
+      phase: session?.phase ?? null,
+      launchAttempted,
+      elapsedMs: launchStartedAt == null ? null : Math.round(performance.now() - launchStartedAt),
+      error: obsErrorMessage(error),
+    });
+    if (session && launchAttempted) {
+      if (await blackoutGameRunning().catch(() => false)) {
+        session.phase = "active";
+        session.activeAt = Date.now();
+        writeBlackoutSession(blackoutBackupRoot(), session);
+        return devBlackoutStatus();
+      }
+      throw new Error(
+        `Game launch could not be confirmed: ${obsErrorMessage(error).replace(/[.!?]+$/, "")}. Blackout files will be restored if the game does not open.`,
+      );
+    }
     if (session && !(await blackoutGameRunning().catch(() => true))) {
       try {
         await restoreBlackoutSession(blackoutBackupRoot());
@@ -4926,7 +4970,7 @@ async function reviewAutomaticMoveVideo(request = {}) {
   }
   if (action === "reject") {
     const reason = String(request.reason ?? "").trim();
-    if (!reason) throw new Error("Give a reason before rejecting the video.");
+    // if (!reason) throw new Error("Give a reason before rejecting the video.");
     manifest.moveTake.captureReviewStatus = "rejected";
     manifest.moveTake.captureReviewReason = reason;
     manifest.moveTake.evidenceStatus = "archived";

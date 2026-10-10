@@ -53,7 +53,7 @@ export type AutomatedWhiffEligibility =
         | "already-attempted";
     };
 
-/** Grounded recipes the input worker can send. Captured takes still require video review. */
+/** Recipes the input worker can send. A j. prefix adds jump before the input. */
 export function automatedWhiffEligibility(
   move: TechMove,
   recordings: RecordedVideo[],
@@ -104,12 +104,12 @@ export function automatedWhiffEligibility(
     move.isCharged ||
     move.dependsOnMoveId ||
     move.isStanceParent ||
-    !/^(?:236|214|[1-9])(?:EX|[ABCF])$/.test(input)
+    !/^(?:J\.)?(?:236|214|[1-9])(?:EX|[ABCF])$/.test(input)
   ) {
     return {
       eligible: false,
       kind: "unsupported",
-      reason: "No supported grounded whiff recipe for this input.",
+      reason: "No supported whiff recipe for this input.",
     };
   }
   return {

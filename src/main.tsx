@@ -1425,6 +1425,7 @@ function App() {
       {developerTabsAvailable && mountedTabs.capture && (
         <Box sx={{ display: tab === captureTabIndex ? "block" : "none" }}>
           <MoveCapturePanel
+            active={tab === captureTabIndex}
             blackoutStatus={blackoutStatus}
             refreshBlackoutStatus={refreshBlackoutStatus}
           />

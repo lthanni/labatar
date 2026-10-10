@@ -384,10 +384,14 @@ export function RecordingViewer({
   active = true,
   refreshToken = 0,
   mode = "recordings",
+  panelOnly = false,
+  selectedRecordingId = null,
 }: {
   active?: boolean;
   refreshToken?: number;
   mode?: "recordings" | "nerd-processing";
+  panelOnly?: boolean;
+  selectedRecordingId?: string | null;
 }) {
   const {
     state: obsState,
@@ -527,7 +531,7 @@ export function RecordingViewer({
       });
       if (generation !== loadGeneration.current) return;
       const tabRecordings =
-        mode === "recordings"
+        mode === "recordings" && !panelOnly
           ? result.recordings.filter(
               (recording) => !recording.moveTake && !recording.id.startsWith("moves/"),
             )
@@ -537,7 +541,9 @@ export function RecordingViewer({
       setSelectedId((current) =>
         tabRecordings.some((recording) => recording.id === current)
           ? current
-          : (tabRecordings[0]?.id ?? null),
+          : panelOnly
+            ? null
+            : (tabRecordings[0]?.id ?? null),
       );
     } catch (loadError) {
       if (generation === loadGeneration.current) {
@@ -546,7 +552,7 @@ export function RecordingViewer({
     } finally {
       if (generation === loadGeneration.current) setLoading(false);
     }
-  }, [mode]);
+  }, [mode, panelOnly]);
 
   useEffect(() => {
     if (active) void loadRecordings();
@@ -703,12 +709,14 @@ export function RecordingViewer({
 
   const visibleRecordings = useMemo(
     () =>
-      mode === "recordings"
-        ? recordings.filter(
-            (recording) => recordingLibraryTab(recording, recordingById) === recordingListTab,
-          )
-        : recordings,
-    [mode, recordings, recordingById, recordingListTab],
+      panelOnly
+        ? []
+        : mode === "recordings"
+          ? recordings.filter(
+              (recording) => recordingLibraryTab(recording, recordingById) === recordingListTab,
+            )
+          : recordings,
+    [mode, panelOnly, recordings, recordingById, recordingListTab],
   );
 
   const tagFilteredRecordings = useMemo(
@@ -817,6 +825,7 @@ export function RecordingViewer({
   useEffect(() => {
     const syncTechCatalog = () => setTechCatalog(readTechCatalog());
     const handleTechRecordingSelection = (event: Event) => {
+      if (panelOnly) return;
       const recordingId = (event as CustomEvent<string>).detail;
       if (typeof recordingId !== "string") return;
       if (recordings.some((recording) => recording.id === recordingId)) {
@@ -835,9 +844,10 @@ export function RecordingViewer({
       window.removeEventListener("storage", syncTechCatalog);
       window.removeEventListener(techSelectRecordingEvent, handleTechRecordingSelection);
     };
-  }, [recordings, selectRecording]);
+  }, [panelOnly, recordings, selectRecording]);
 
   useEffect(() => {
+    if (panelOnly) return;
     const pendingRecordingId = localStorage.getItem(techSelectedRecordingStorageKey);
     if (
       !pendingRecordingId ||
@@ -848,7 +858,21 @@ export function RecordingViewer({
     setSelectedTagFilters(emptyRecordingTags);
     selectRecording(pendingRecordingId);
     localStorage.removeItem(techSelectedRecordingStorageKey);
-  }, [recordings, selectRecording]);
+  }, [panelOnly, recordings, selectRecording]);
+
+  useEffect(() => {
+    if (!panelOnly) return;
+    if (!selectedRecordingId) {
+      if (selectedId) setSelectedId(null);
+      return;
+    }
+    if (
+      selectedId !== selectedRecordingId &&
+      recordings.some((item) => item.id === selectedRecordingId)
+    ) {
+      selectRecording(selectedRecordingId);
+    }
+  }, [panelOnly, recordings, selectRecording, selectedId, selectedRecordingId]);
 
   useEffect(() => {
     if (!focusPlayerAfterSelection.current || !selectedId) return;
@@ -862,10 +886,19 @@ export function RecordingViewer({
 
   useEffect(() => {
     if (!active || loading || recordings.length === 0) return;
+    if (panelOnly) return;
     if (selectedId && visibleRecordings.some((recording) => recording.id === selectedId)) return;
     if (visibleRecordings[0]) selectRecording(visibleRecordings[0].id);
     else if (selectedId) setSelectedId(null);
-  }, [active, loading, recordings.length, selectRecording, selectedId, visibleRecordings]);
+  }, [
+    active,
+    loading,
+    panelOnly,
+    recordings.length,
+    selectRecording,
+    selectedId,
+    visibleRecordings,
+  ]);
 
   const exportClip = useCallback(async () => {
     if (!window.electronAPI?.recordings || !selectedRecording || clipRange[1] <= clipRange[0]) {
@@ -1938,7 +1971,7 @@ export function RecordingViewer({
 
       <Stack
         direction={{ xs: "column", md: "row" }}
-        spacing={2}
+        spacing={panelOnly ? 0 : 2}
         sx={{ flex: 1, minHeight: 0, minWidth: 0, alignItems: "stretch", overflow: "hidden" }}
       >
         <Paper
@@ -1946,7 +1979,7 @@ export function RecordingViewer({
           sx={{
             width: { xs: "100%", md: 660 },
             flexShrink: 0,
-            display: { xs: "block", md: "flex" },
+            display: panelOnly ? "none" : { xs: "block", md: "flex" },
             flexDirection: "column",
             minHeight: 0,
           }}

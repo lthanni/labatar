@@ -9,18 +9,23 @@ isolation test.
 ## Dev-only blackout launch
 
 The Dev-only capture tab now offers **Start game in blackout mode** when
-`Atla.exe` is closed. It verifies the selected game's three shipped PAK hashes,
+`Atla.exe` is closed. It verifies the selected game's four shipped PAK hashes,
 copies and verifies originals under the dev user-data `blackout-game-backups`
 directory, installs the previously tested Water Tribe, Korra/Naga, and HUD
-replacement PAKs, then launches `Atla.exe`. A detached watcher restores the
+replacement PAKs, plus a targeted `hitspark.pak` shadow replacement, then launches `Atla.exe`. A detached watcher restores the
 original PAKs after the game exits; the backup copies remain available. A
 saved session manifest lets a later app launch recover an interrupted install
 or restore. Changed game versions fail the hash check before installation.
 
 Manual move arming, manual move recording, automatic move capture, and recording
-starts from the Dev-only tab are disabled unless the running game has a verified
-blackout session. An already open game disables the launch button. Reviewing
-and processing saved move videos remains available after the game closes. The
+starts from the Dev-only tab require a running game with all four installed
+PAKs matching the blackout replacements, plus an OBS connection. The asset
+check works whether Labatar launched the game or the matching PAKs were installed
+before opening it. Labatar restores originals automatically only for sessions
+it prepared and backed up. An already open game disables the launch button.
+An active blackout hides that button. An automatic pass, an active recording, or
+OBS work locks conflicting manual controls and explains the reason in the panel.
+Reviewing and processing saved move videos remains available after the game closes. The
 PAK installation and restoration have temp-folder tests. On 2026-10-09, the
 user confirmed the launched game was visually blacked out, but the verifier
 rejected its session after an early transition to `restoring`. The installed
@@ -30,6 +35,17 @@ the watcher waits through startup and launches independently of the dev app.
 After the game closed in that test, the three originals were restored and
 their hashes verified. The revised watcher, in-game reset, and OBS pass still
 need a live check.
+
+## Capture review layout
+
+Dev-only capture keeps character, move, and take selection on the left. Capture,
+Review & process, and Move evidence are separate tabs below those selectors. A
+video player occupies the right 60% on desktop and moves below the controls on
+smaller windows. Selecting a saved take plays it there, including recordings
+awaiting manual approval after an automatic pass. This is the full player panel
+from the recordings tab, with its playback, timeline, chapter, clip, and exact
+frame review controls. The recording library sidebar is hidden on the capture
+page.
 
 ## Goal
 
@@ -75,12 +91,15 @@ frames, recovery, contact, or hitbox geometry.
 The first implementation has the nonstandard catalog tag, recipe queue
 preview, packaged Windows input worker, Electron capture runner, persisted
 pause/resume state, one-MP4-per-move manifest, and video approval gate. The UI
-queues grounded `1`–`9`, `236`, and `214` followed by `A`, `B`, `C`, `F`, or
-`EX` (`A+B`). Player 1's keyboard bindings determine the physical keys;
+queues `1`–`9`, `236`, and `214`, optionally prefixed with `j.`, followed by
+`A`, `B`, `C`, `F`, or `EX` (`A+B`). For `j.` moves, the input worker presses
+jump, releases it, pauses briefly, then sends the listed input. Player 1's
+keyboard bindings determine the physical keys;
 directions are relative to the selected facing. Only `5A` and right-facing
 `236A` have been confirmed in game. Other recipes need video review, and their
-timing is not frame accurate. Airborne, charged, stance, dependent, and other
-unimplemented inputs remain visible with skip reasons.
+timing is not frame accurate. Charged, stance, dependent, and other
+unimplemented inputs remain visible with skip reasons. The jump delay and
+airborne input recognition still need in-game validation.
 
 The command **Gather whiff data for all moves** runs against the selected
 character/support variant. The user first sets the training position, facing,
@@ -113,16 +132,20 @@ nonstandard move can still have a whiff evidence slot and can still be recorded
 manually. The user can set or clear the tag at any time; the automated queue
 always skips tagged moves and shows them in a manual-capture list.
 
-An untagged move enters the automated queue when it has a supported grounded
-recipe and its selected evidence slot is missing or needs redo. Supported
-recipes are `1`–`9`, `236`, and `214` with `A`, `B`, `C`, `F`, or `EX`.
+An untagged move enters the automated queue when it has a supported recipe
+and its selected evidence slot is missing or needs redo. Supported recipes are
+`1`–`9`, `236`, and `214` with `A`, `B`, `C`, `F`, or `EX`, with an optional
+`j.` prefix for jump attacks. Jump attacks use the same grounded reset point;
+the worker sends jump before the motion or attack.
 The runner sends `EX` by pressing the configured `A` and `B` keys together.
-It skips charged/held inputs, airborne moves, stance entries and followups,
+It skips charged/held inputs, stance entries and followups,
 `SUP`/`X`, and any notation without a recipe. Record a skip reason for each,
 without silently changing its `nonstandard` tag. The user can still record
 those moves through the existing manual gather controls. A supported recipe
 does not guarantee the move whiffs from the chosen position; video review
-checks the result before processing.
+checks the result before processing. A `j.` clip also needs review to confirm
+the attack occurred in the air. Airborne move recognition and frame-data
+processing can be refined after these captures are tested.
 
 One starting distance cannot guarantee a whiff for every move, especially
 long-range attacks or projectiles. The queue preview must make that setup
@@ -246,6 +269,45 @@ their SHA-256 hashes matched the saved originals:
 The visual test establishes that the mod loads and hides the selected art. It
 does not yet establish that all move effects, collision visuals, or timing are
 equivalent to an ordinary training session.
+
+## Support shadow and collision overlay investigation
+
+A blackout recording still showed a soft oval at center stage. The shipped
+`hitspark.pak` contains `blob_shadow/frames/circle.munged`, a matching soft
+oval image. The blackout builder now makes a separate `hitspark.pak` copy with
+only that image transparent; all other effects remain byte-identical. The
+launcher includes this fourth PAK in its hash-checked backup, install, and
+restore flow. The asset-level comparison showed that only this image changed.
+The user confirmed in game that the oval disappeared while the frame meter
+and hit/hurtbox overlays remained visible.
+After that test, Windows briefly locked `hitspark.pak` during automatic restore.
+The verified backup restored it on retry, and all four installed PAKs matched
+their original hashes. The watcher now retries a transient `EBUSY` lock.
+
+A later launch exposed a separate startup race: Labatar began restoring the
+PAKs one second before its newly spawned game process appeared. Water Tribe
+was restored while Korra, HUD, and hitspark remained patched, producing a
+colored stage in otherwise isolated training. After the game closed, the
+watcher restored and verified all four originals. Launch now writes a
+`launching` phase before spawning the game, gives that phase a one-minute
+recovery grace period, and treats temporary process-check failures as
+unconfirmed rather than immediately restoring assets. A subsequent launch
+reported a timeout even though the game log began three seconds later. The
+launch deadline and watcher grace periods now use monotonic elapsed time;
+the launch confirmation window is 30 seconds. The next test showed the
+actual false timeout: one process check briefly saw the game and exited the
+wait loop, but a second immediate check did not see it. That produced a
+"30 seconds" error after only 337 ms, while all four PAKs remained patched
+and the game started shortly afterward. Launch confirmation now requires two
+successive process sightings and has a regression test for that sequence.
+
+The PAK directory scan found no named training hitbox or hurtbox frame asset.
+`hitspark.pak` does contain three `graze_box` images, and the character
+`.sprbin` contains strings such as `RingHitboxActive`. This suggests some
+collision behavior is represented in serialized animation data, but the
+box geometry and training overlay rendering have not been decoded. The
+visible training boxes should continue to be measured from recorded frames
+unless that format is established.
 
 ## Capture design
 

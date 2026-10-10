@@ -48,11 +48,12 @@ function Send-Tap([string]$key) {
 }
 
 function Invoke-Move($request, [bool]$dryRun = $false) {
-  $match = [regex]::Match([string]$request.notation, '^(236|214|[1-9])(EX|[ABCF])$')
-  if (-not $match.Success) { throw 'Move notation must be 1-9, 236, or 214 followed by A, B, C, F, or EX.' }
+  $match = [regex]::Match([string]$request.notation, '^(j\.)?(236|214|[1-9])(EX|[ABCF])$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  if (-not $match.Success) { throw 'Move notation must be 1-9, 236, or 214 followed by A, B, C, F, or EX, optionally prefixed with j.' }
   $facing = if ($request.facing) { [string]$request.facing } else { 'Right' }
   if ($facing -notin @('Right','Left')) { throw 'Facing must be Right or Left.' }
-  $motion = $match.Groups[1].Value; $button = $match.Groups[2].Value
+  $jump = $match.Groups[1].Success
+  $motion = $match.Groups[2].Value; $button = $match.Groups[3].Value.ToUpperInvariant()
   $attackActions = @{ A=@('Atk1'); B=@('Atk2'); C=@('Atk3'); F=@('Atk4'); EX=@('Atk1','Atk2') }[$button]
   $forward = if($facing -eq 'Right'){'Right'}else{'Left'}; $away = if($forward -eq 'Right'){'Left'}else{'Right'}
   $keys = @{}
@@ -72,9 +73,14 @@ function Invoke-Move($request, [bool]$dryRun = $false) {
   }
   $requiredActions = @($attackActions)
   if($motion -ne '5') { $requiredActions += @($directionActions) }
+  if($jump) { $requiredActions += 'Up' }
   foreach($action in $requiredActions) { if(-not $keys.ContainsKey($action)) { throw "No Player 1 keyboard binding for $action." } }
   $attackKeys = @($attackActions | ForEach-Object { $keys[$_] })
   $steps = [System.Collections.Generic.List[object]]::new()
+  if($jump) {
+    $steps.Add(@{Keys=@($keys.Up);Ms=50})
+    $steps.Add(@{Keys=@();Ms=100})
+  }
   if($motion -eq '236' -or $motion -eq '214') {
     $dir=if($motion -eq '236'){$forward}else{$away}
     $steps.Add(@{Keys=@($keys.Down);Ms=50});$steps.Add(@{Keys=@($keys.Down,$keys[$dir]);Ms=50});$steps.Add(@{Keys=@($keys[$dir]);Ms=50});$steps.Add(@{Keys=@($keys[$dir]) + $attackKeys;Ms=50})

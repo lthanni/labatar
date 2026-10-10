@@ -135,10 +135,12 @@ function transparentMunged(raw) {
   return Buffer.concat(parts);
 }
 
+const BLOB_SHADOW_ENTRY = "srcdata/munged/frames/sprites~hitspark~blob_shadow~frames~circle.munged";
+
 function buildHiddenImagesPak(source, destination) {
   const packageName = path.basename(source).toLowerCase();
-  if (packageName !== "korra.pak" && packageName !== "hud.pak") {
-    throw new Error("This builder only accepts the Korra or fight HUD package.");
+  if (packageName !== "korra.pak" && packageName !== "hud.pak" && packageName !== "hitspark.pak") {
+    throw new Error("This builder only accepts the Korra, fight HUD, or hitspark package.");
   }
   if (path.resolve(source).toLowerCase() === path.resolve(destination).toLowerCase()) {
     throw new Error("Source and destination must differ.");
@@ -159,7 +161,10 @@ function buildHiddenImagesPak(source, destination) {
     const imageTypes = { 3: 0, 6: 0 };
     for (const entry of entries) {
       const sourceBytes = readAt(sourceFd, entry.bytes, entry.offset);
-      const replace = entry.name.endsWith(".munged");
+      const replace =
+        packageName === "hitspark.pak"
+          ? entry.name === BLOB_SHADOW_ENTRY
+          : entry.name.endsWith(".munged");
       const bytes = replace ? transparentMunged(sourceBytes) : sourceBytes;
       if (replace) {
         changed++;
@@ -206,7 +211,7 @@ if (require.main === module) {
   const [source, destination] = process.argv.slice(2);
   if (!source || !destination) {
     process.stderr.write(
-      "Usage: node scripts/build-capture-isolation.cjs <korra.pak|hud.pak> <output.pak>\n",
+      "Usage: node scripts/build-capture-isolation.cjs <korra.pak|hud.pak|hitspark.pak> <output.pak>\n",
     );
     process.exitCode = 2;
   } else {

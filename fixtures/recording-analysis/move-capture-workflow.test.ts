@@ -70,6 +70,12 @@ describe("automated whiff eligibility", () => {
       eligible: true,
       validation: "needs-validation",
     });
+    for (const input of ["j.5A", "j.236A", "j.214EX"]) {
+      expect(automatedWhiffEligibility({ ...moves[0], input }, [], "aang-gyatso")).toEqual({
+        eligible: true,
+        validation: "needs-validation",
+      });
+    }
     for (const input of ["1A", "2B", "3C", "4F", "5EX", "6A", "7B", "8C", "9F", "236EX", "214EX"]) {
       expect(automatedWhiffEligibility({ ...moves[0], input }, [], "aang-gyatso")).toEqual({
         eligible: true,
@@ -87,14 +93,12 @@ describe("automated whiff eligibility", () => {
     ).toEqual({ eligible: true, validation: "needs-validation" });
   });
 
-  it("queues every grounded common move when its whiff slot is empty", () => {
+  it("queues every common move, including jump attacks, when its whiff slot is empty", () => {
     const catalog = withCommonTechMoves("Aang", []);
     const eligible = catalog.filter(
       (move) => automatedWhiffEligibility(move, [], "aang-gyatso").eligible,
     );
-    expect(eligible.map((move) => move.input)).toEqual(
-      catalog.filter((move) => !move.input.startsWith("j.")).map((move) => move.input),
-    );
+    expect(eligible.map((move) => move.input)).toEqual(catalog.map((move) => move.input));
   });
 
   it("reports explicit manual, unsupported, not-applicable, and existing-take skips", () => {
@@ -111,7 +115,7 @@ describe("automated whiff eligibility", () => {
       reason: "Tagged nonstandard: Range varies",
     });
     expect(
-      automatedWhiffEligibility({ ...move, input: "j.236A" }, [], "aang-gyatso"),
+      automatedWhiffEligibility({ ...move, input: "j.236SUP" }, [], "aang-gyatso"),
     ).toMatchObject({ eligible: false, kind: "unsupported" });
     expect(
       automatedWhiffEligibility(

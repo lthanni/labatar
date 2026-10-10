@@ -78,6 +78,10 @@ marker, so retrying only fills gaps. Clip manifests retain the source recording
 and marker time; encoding runs in the background and may take time or use
 substantial disk space. Individual failures are reported in the manual action
 or recording diagnostic log, while successfully created clips remain available.
+Clip export seeks to the requested start time before opening the source and
+uses accurate seek while re-encoding. This avoids decoding from time zero for
+every late chapter while retaining frame-accurate clip boundaries. Stream copy
+is avoided because cutting only at keyframes can shift the clip start.
 
 Optional automatic game-start chapters are separate from F10. When enabled in
 Capture configuration, Labatar waits for replay linking after an automatic

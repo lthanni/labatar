@@ -3,17 +3,20 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
+const { performance } = require("node:perf_hooks");
 
 const execFileAsync = promisify(execFile);
 const originals = {
   "watertribe.pak": "2138e9227a2948fe19fe77cc4bfc1b34c6a9265525b757a856db6f911a98ba78",
   "korra.pak": "b2241aac58acd890026c084e6f2e8e677e995a3bdf3f9c3701ebe0cc338f6559",
   "hud.pak": "24b0d04eb5288f28a9e0d28b6b22985e7e81f3a6ea611ef9f6f192acac0e1ce1",
+  "hitspark.pak": "968d716ac1f14ff00544712e5e1ab768ca32d4b50ec2b0a7ca4a085fa6cc2aa8",
 };
 const replacements = {
   "watertribe.pak": "watertribe-no-visuals-no-shadow.pak",
   "korra.pak": "korra-hidden.pak",
   "hud.pak": "hud-hidden.pak",
+  "hitspark.pak": "hitspark-no-blob-shadow.pak",
 };
 
 async function sha256(filePath) {
@@ -32,6 +35,27 @@ async function gameRunning() {
   return /^"Atla\.exe",/im.test(stdout);
 }
 
+async function waitForStableGame(
+  checkRunning,
+  { timeoutMs = 30_000, pollMs = 300, checkAbort = () => null, onCheckError = () => {} } = {},
+) {
+  const deadline = performance.now() + timeoutMs;
+  let consecutiveChecks = 0;
+  do {
+    const abortError = checkAbort();
+    if (abortError) throw abortError;
+    try {
+      consecutiveChecks = (await checkRunning()) ? consecutiveChecks + 1 : 0;
+      if (consecutiveChecks >= 2) return true;
+    } catch (error) {
+      consecutiveChecks = 0;
+      onCheckError(error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  } while (performance.now() < deadline);
+  return false;
+}
+
 function sessionPath(backupRoot) {
   return path.join(backupRoot, "active-session.json");
 }
@@ -40,7 +64,11 @@ function readSession(backupRoot) {
   const filePath = sessionPath(backupRoot);
   if (!fs.existsSync(filePath)) return null;
   const session = JSON.parse(fs.readFileSync(filePath, "utf8"));
-  if (session.version !== 1 || !Array.isArray(session.files) || session.files.length !== 3) {
+  if (
+    session.version !== 1 ||
+    !Array.isArray(session.files) ||
+    (session.files.length !== 3 && session.files.length !== 4)
+  ) {
     throw new Error(
       "The blackout recovery manifest is invalid; installed files were left untouched.",
     );
@@ -120,6 +148,20 @@ async function verifyInstalled(session) {
   return true;
 }
 
+async function verifyInstalledAssets({ gameRoot, sourceRoot }) {
+  for (const [name, replacementName] of Object.entries(replacements)) {
+    const target = path.join(gameRoot, "data_packages", name);
+    const source = path.join(sourceRoot, replacementName);
+    try {
+      const [targetHash, sourceHash] = await Promise.all([sha256(target), sha256(source)]);
+      if (targetHash !== sourceHash) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 async function restoreSession(backupRoot, checkRunning = gameRunning) {
   let session = readSession(backupRoot);
   if (!session) return false;
@@ -159,7 +201,7 @@ async function restoreSession(backupRoot, checkRunning = gameRunning) {
       if ((await sha256(file.backup)) !== file.originalHash) {
         throw new Error(`The saved original ${file.name} failed verification; recovery stopped.`);
       }
-      if (session.phase === "active") {
+      if (session.phase === "active" || session.phase === "launching") {
         const currentHash = await sha256(file.target);
         if (currentHash !== file.originalHash && currentHash !== file.replacementHash) {
           throw new Error(
@@ -187,7 +229,13 @@ async function restoreSession(backupRoot, checkRunning = gameRunning) {
   }
 }
 
-async function watchAndRestore(backupRoot, checkRunning = gameRunning, delayMs = 1500) {
+async function watchAndRestore(
+  backupRoot,
+  checkRunning = gameRunning,
+  delayMs = 1500,
+  restore = restoreSession,
+  graceMs = { installing: 60_000, launching: 60_000, active: 20_000 },
+) {
   const watcherLock = path.join(backupRoot, "watcher.lock");
   try {
     await fs.promises.mkdir(watcherLock);
@@ -200,18 +248,22 @@ async function watchAndRestore(backupRoot, checkRunning = gameRunning, delayMs =
   }
   try {
     let stoppedChecks = 0;
+    let observedPhase = null;
+    let phaseStartedAt = performance.now();
     while (true) {
       const now = new Date();
       await fs.promises.utimes(watcherLock, now, now);
       const session = readSession(backupRoot);
       if (!session) return;
-      if (session.phase === "installing" && Date.now() - session.createdAt < 60_000) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-        continue;
+      const phase = `${session.backupDir}:${session.phase}`;
+      if (phase !== observedPhase) {
+        observedPhase = phase;
+        phaseStartedAt = performance.now();
+        stoppedChecks = 0;
       }
       if (
-        session.phase === "active" &&
-        Date.now() - (session.activeAt ?? session.createdAt) < 20_000
+        Object.hasOwn(graceMs, session.phase) &&
+        performance.now() - phaseStartedAt < graceMs[session.phase]
       ) {
         stoppedChecks = 0;
         await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -221,7 +273,14 @@ async function watchAndRestore(backupRoot, checkRunning = gameRunning, delayMs =
         stoppedChecks = 0;
       } else {
         stoppedChecks += 1;
-        if (stoppedChecks >= 5 && (await restoreSession(backupRoot, checkRunning))) return;
+        if (stoppedChecks >= 5) {
+          try {
+            if (await restore(backupRoot, checkRunning)) return;
+          } catch (error) {
+            // Windows may keep a PAK handle briefly after Atla.exe exits.
+            if (error.code !== "EBUSY") throw error;
+          }
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
@@ -245,12 +304,14 @@ module.exports = {
   replacements,
   sha256,
   gameRunning,
+  waitForStableGame,
   sessionPath,
   readSession,
   writeSession,
   prepareSession,
   installSession,
   verifyInstalled,
+  verifyInstalledAssets,
   restoreSession,
   watchAndRestore,
 };
