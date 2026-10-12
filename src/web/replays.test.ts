@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
-import { rescanReplayFolder, type ReplayFolderSelection } from "./replays";
+import {
+  combineReplaySubfolder,
+  normalizeDirectoryInputFiles,
+  rescanReplayFolder,
+  type ReplayFolderSelection,
+} from "./replays";
 
 function replay(fields: Record<string, string>) {
   return new Blob([
@@ -10,6 +15,52 @@ function replay(fields: Record<string, string>) {
 }
 
 describe("browser replay scanning", () => {
+  it("keeps text and PAK files from separately chosen folder inputs", () => {
+    const inputFile = (relativePath: string) =>
+      Object.assign(new Blob(["local"]), { webkitRelativePath: relativePath }) as File;
+    expect(
+      normalizeDirectoryInputFiles(
+        [inputFile("logs/match.txt"), inputFile("logs/ignore.bin")],
+        "logs",
+      ).map((file) => file.relativePath),
+    ).toEqual(["match.txt"]);
+    expect(
+      normalizeDirectoryInputFiles([inputFile("data_packages/a.pak")], "data_packages").map(
+        (file) => file.relativePath,
+      ),
+    ).toEqual(["a.pak"]);
+  });
+
+  it("combines separately selected game folders under their expected paths", async () => {
+    const replayFile = replay({ ReplayInfo_P1Name: "A", ReplayInfo_P2Name: "B" });
+    const replays = combineReplaySubfolder(null, "replays", {
+      name: "replays",
+      files: [{ relativePath: "nested/2025-04-03 10-11-12.dlr", file: replayFile }],
+    });
+    const withLogs = combineReplaySubfolder(replays, "logs", {
+      name: "logs",
+      files: [{ relativePath: "match.txt", file: new Blob(["optional log"]) }],
+    });
+    const withArtwork = combineReplaySubfolder(withLogs, "data_packages", {
+      name: "data_packages",
+      files: [{ relativePath: "characters.pak", file: new Blob(["pak"]) }],
+    });
+    const result = await rescanReplayFolder(withArtwork);
+    expect(result.games).toHaveLength(1);
+    expect(result.games[0].id).toBe("replays/nested/2025-04-03 10-11-12.dlr");
+    expect(result.files.map((file) => file.relativePath)).toEqual([
+      "data_packages/characters.pak",
+      "logs/match.txt",
+      "replays/nested/2025-04-03 10-11-12.dlr",
+    ]);
+    const replaced = combineReplaySubfolder(withArtwork, "logs", {
+      name: "new logs",
+      files: [{ relativePath: "later.txt", file: new Blob(["new"]) }],
+    });
+    expect(replaced.files.map((file) => file.relativePath)).toContain("logs/later.txt");
+    expect(replaced.files.map((file) => file.relativePath)).not.toContain("logs/match.txt");
+  });
+
   it("recursively scans the selected files, maps fields, and counts duplicate contents once", async () => {
     const bytes = replay({
       ReplayInfo_P1Name: "User@@Alice",

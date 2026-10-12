@@ -26,11 +26,13 @@ import { AvatarGrid, type ReplayRow } from "./AvatarGrid";
 import { OPPONENT_CHARACTER_ROSTER, type AnalysisSummary } from "./AnalyticsSection";
 import { extractWebArtwork, type WebArtworkLibrary, type WebArtworkProgress } from "./web/artwork";
 import {
+  combineReplaySubfolder,
   rescanReplayFolder,
   selectReplayFolder,
   type ReplayFolderSelection,
   type ReplayScanProgress,
   type ReplayScanResult,
+  type ReplaySubfolderKind,
 } from "./web/replays";
 
 const theme = createTheme({
@@ -118,7 +120,6 @@ function WebApp() {
   const [result, setResult] = useState<ReplayScanResult | null>(null);
   const [artwork, setArtwork] = useState<WebArtworkLibrary | null>(null);
   const [selecting, setSelecting] = useState(false);
-  const [alternatePickerAvailable, setAlternatePickerAvailable] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [extractingArtwork, setExtractingArtwork] = useState(false);
   const [scanProgress, setScanProgress] = useState<ReplayScanProgress | null>(null);
@@ -234,14 +235,48 @@ function WebApp() {
     setError(null);
     try {
       const selected = await selectReplayFolder(useFileInput);
-      setAlternatePickerAvailable(false);
       setFolder(selected);
       void scan(selected, true);
     } catch (pickError) {
       if (!isAbort(pickError)) {
-        setAlternatePickerAvailable(true);
         setError(
-          `Could not select a folder: ${pickError instanceof Error ? pickError.message : String(pickError)}. Try the alternate folder picker.`,
+          `Could not select a folder: ${pickError instanceof Error ? pickError.message : String(pickError)}. Select the game subfolders below.`,
+        );
+      }
+    } finally {
+      setSelecting(false);
+    }
+  };
+
+  const chooseSubfolder = async (kind: ReplaySubfolderKind) => {
+    setSelecting(true);
+    setError(null);
+    try {
+      const chosen = await selectReplayFolder(true, kind);
+      const selected = combineReplaySubfolder(folder, kind, chosen);
+      controller.current?.abort();
+      controller.current = null;
+      runNumber.current += 1;
+      artworkRef.current?.dispose();
+      artworkRef.current = null;
+      setArtwork(null);
+      setResult(null);
+      setSummary(EMPTY_SUMMARY);
+      setScanProgress(null);
+      setArtworkProgress(null);
+      setArtworkIssue(null);
+      setScanning(false);
+      setExtractingArtwork(false);
+      setPlayerOverride(null);
+      setDateFromOverride(null);
+      setDateToOverride(null);
+      setRankedOnly(false);
+      setRankAffectingOnly(false);
+      setFolder(selected);
+    } catch (pickError) {
+      if (!isAbort(pickError)) {
+        setError(
+          `Could not select the ${kind} folder: ${pickError instanceof Error ? pickError.message : String(pickError)}`,
         );
       }
     } finally {
@@ -338,29 +373,22 @@ function WebApp() {
           </Typography>
           <Typography variant="body2" color="text.secondary">
             {folder
-              ? `Game folder: ${folder.name}`
+              ? `${folder.subfolders ? "Game folders" : "Game folder"}: ${folder.name}`
               : "Choose your game folder to browse local replays."}
           </Typography>
         </Box>
         <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
-          <Button variant="contained" onClick={() => void chooseFolder()} disabled={selecting}>
+          <Button variant="contained" onClick={() => void chooseFolder(true)} disabled={selecting}>
             {folder ? "Change folder" : "Choose game folder"}
           </Button>
-          {alternatePickerAvailable && (
-            <Button variant="outlined" onClick={() => void chooseFolder(true)} disabled={selecting}>
-              Alternate folder picker
-            </Button>
-          )}
-          {folder && (
+          <Button variant="outlined" onClick={() => void chooseFolder()} disabled={selecting}>
+            Folder picker with rescan
+          </Button>
+          {folder?.directory && (
             <Button
               variant="outlined"
               onClick={() => void scan(folder, false)}
-              disabled={scanBusy || selecting || !folder.directory}
-              title={
-                folder.directory
-                  ? undefined
-                  : "Choose the folder again to refresh this browser snapshot."
-              }
+              disabled={scanBusy || selecting}
             >
               Rescan
             </Button>
@@ -372,10 +400,54 @@ function WebApp() {
           )}
         </Stack>
       </Stack>
-      {!folder && (
+      {(!folder || folder.subfolders) && (
         <Alert severity="info" sx={{ mb: 1.5, textAlign: "left" }}>
-          Select the Avatar Legends installation folder. Labatar reads replays, optional rating
-          logs, and portraits from its PAK files in this browser; your files are not uploaded.
+          Choose the game folder, or select its replays folder here and optionally add logs and
+          data_packages. The rescan picker may block game installs under Program Files. Files are
+          read locally and are not uploaded.
+          <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap", gap: 1 }}>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => void chooseSubfolder("replays")}
+              disabled={selecting}
+            >
+              {folder?.subfolders?.replays ? "Replace replays" : "Choose replays"}
+            </Button>
+            {folder?.subfolders && (
+              <>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => void chooseSubfolder("logs")}
+                  disabled={selecting}
+                >
+                  {folder.subfolders.logs ? "Replace logs" : "Add logs"}
+                </Button>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => void chooseSubfolder("data_packages")}
+                  disabled={selecting}
+                >
+                  {folder.subfolders.data_packages ? "Replace data_packages" : "Add data_packages"}
+                </Button>
+                <Button
+                  size="small"
+                  variant="contained"
+                  onClick={() => void scan(folder, !result)}
+                  disabled={selecting || scanBusy || !folder.subfolders.replays}
+                >
+                  {result ? "Scan selected files" : "Load match history"}
+                </Button>
+              </>
+            )}
+          </Stack>
+          {folder?.subfolders && (
+            <Typography variant="caption" sx={{ display: "block", mt: 1 }}>
+              To include newly created files, choose that subfolder again before scanning.
+            </Typography>
+          )}
         </Alert>
       )}
       {error && (

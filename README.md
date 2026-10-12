@@ -12,7 +12,7 @@ Run the `.exe` installer and launch Labatar from the Start menu. Windows may sho
 
 ### Browser version
 
-The browser version runs Match History without installing the Windows app. Choose the Avatar Legends game folder to scan `.dlr` replays recursively, read available rating logs, and load portraits from local `.pak` files. Files stay in your browser session and are not uploaded. A selected `replays` folder also works, without sibling logs or portraits. Use **Rescan** after new matches when your browser supports persistent folder access; otherwise choose the folder again.
+The browser version runs Match History without installing the Windows app. Choose the Avatar Legends game folder to scan `.dlr` replays recursively, read available rating logs, and load portraits from local `.pak` files. Files stay in your browser session and are not uploaded. If your browser blocks the installation folder, choose `replays` first, then optionally add `logs` and `data_packages` in the page. Choose a folder again to include newly created files. The optional **Folder picker with rescan** supports direct rescans where the browser permits persistent folder access; Chromium blocks that picker under Windows Program Files.
 
 To run it locally:
 

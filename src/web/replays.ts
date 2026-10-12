@@ -33,10 +33,18 @@ export type WebReplayRow = {
 };
 
 export type ReplayInputFile = { relativePath: string; file: Blob };
+export type ReplaySubfolderKind = "replays" | "logs" | "data_packages";
+export type ReplaySubfolder = {
+  name: string;
+  directory?: FileSystemDirectoryHandle;
+  files: ReplayInputFile[];
+};
 export type ReplayFolderSelection = {
   name: string;
   /** Present when selected with showDirectoryPicker; supports a fresh rescan. */
   directory?: FileSystemDirectoryHandle;
+  /** Individually selected game folders when the browser blocks the installation root. */
+  subfolders?: Partial<Record<ReplaySubfolderKind, ReplaySubfolder>>;
   /** Snapshot from the fallback input, or the most recent directory scan. */
   files: ReplayInputFile[];
 };
@@ -77,6 +85,20 @@ function isRelevant(path: string) {
   );
 }
 
+export function normalizeDirectoryInputFiles(
+  selected: readonly File[],
+  prefix = "",
+): ReplayInputFile[] {
+  return selected
+    .flatMap((file) => {
+      const localPath = file.webkitRelativePath?.split("/").slice(1).join("/");
+      return localPath && isRelevant(prefix ? `${prefix}/${localPath}` : localPath)
+        ? [{ relativePath: localPath, file }]
+        : [];
+    })
+    .sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+}
+
 async function walkDirectory(
   directory: FileSystemDirectoryHandle,
   prefix = "",
@@ -108,7 +130,7 @@ async function walkDirectory(
   return files;
 }
 
-function pickWithDirectoryInput(): Promise<ReplayFolderSelection> {
+function pickWithDirectoryInput(prefix = ""): Promise<ReplayFolderSelection> {
   return new Promise((resolve, reject) => {
     const input = document.createElement("input") as DirectoryInput;
     input.type = "file";
@@ -128,7 +150,7 @@ function pickWithDirectoryInput(): Promise<ReplayFolderSelection> {
       window.setTimeout(() => {
         if (!settled && input.files?.length === 0)
           finish(() => reject(new DOMException("Folder selection cancelled.", "AbortError")));
-      }, 2000);
+      }, 10_000);
     input.addEventListener(
       "change",
       () => {
@@ -141,14 +163,7 @@ function pickWithDirectoryInput(): Promise<ReplayFolderSelection> {
           (selected[0] as File & { webkitRelativePath?: string }).webkitRelativePath?.split(
             "/",
           )[0] ?? "Selected folder";
-        const files = selected
-          .flatMap((file) => {
-            const relativePath = (file as File & { webkitRelativePath?: string })
-              .webkitRelativePath;
-            const localPath = relativePath?.split("/").slice(1).join("/");
-            return localPath && isRelevant(localPath) ? [{ relativePath: localPath, file }] : [];
-          })
-          .sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+        const files = normalizeDirectoryInputFiles(selected, prefix);
         finish(() => resolve({ name: root, files }));
       },
       { once: true },
@@ -162,13 +177,39 @@ function pickWithDirectoryInput(): Promise<ReplayFolderSelection> {
 }
 
 /** Opens a user-gesture folder picker, with a one-shot webkitdirectory fallback. */
-export async function selectReplayFolder(useFileInput = false): Promise<ReplayFolderSelection> {
+export async function selectReplayFolder(
+  useFileInput = false,
+  prefix = "",
+): Promise<ReplayFolderSelection> {
   const picker = (window as PickerWindow).showDirectoryPicker;
   if (picker && !useFileInput) {
     const directory = await picker.call(window, { mode: "read" });
     return { name: directory.name, directory, files: [] };
   }
-  return pickWithDirectoryInput();
+  return pickWithDirectoryInput(prefix);
+}
+
+export function combineReplaySubfolder(
+  existing: ReplayFolderSelection | null,
+  kind: ReplaySubfolderKind,
+  chosen: ReplayFolderSelection,
+): ReplayFolderSelection {
+  const subfolders = {
+    ...existing?.subfolders,
+    [kind]: {
+      name: chosen.name,
+      directory: chosen.directory,
+      files: chosen.files.map(({ relativePath, file }) => ({
+        relativePath: `${kind}/${relativePath}`,
+        file,
+      })),
+    },
+  };
+  return {
+    name: Object.keys(subfolders).join(" + "),
+    subfolders,
+    files: Object.values(subfolders).flatMap((source) => source.files),
+  };
 }
 
 function decodeAsciiFields(bytes: Uint8Array) {
@@ -432,11 +473,30 @@ export async function rescanReplayFolder(
 ): Promise<ReplayScanResult> {
   abortIfNeeded(options.signal);
   options.onProgress?.({ phase: "discovery", completed: 0, total: 0 });
-  const files = selection.directory
-    ? await walkDirectory(selection.directory, "", options.signal, (completed) => {
-        options.onProgress?.({ phase: "discovery", completed, total: 0 });
-      })
-    : [...selection.files];
+  let files: ReplayInputFile[];
+  if (selection.subfolders) {
+    files = [];
+    for (const kind of ["replays", "logs", "data_packages"] as const) {
+      const source = selection.subfolders[kind];
+      if (!source) continue;
+      source.files = source.directory
+        ? await walkDirectory(source.directory, kind, options.signal, (completed) => {
+            options.onProgress?.({
+              phase: "discovery",
+              completed: files.length + completed,
+              total: 0,
+            });
+          })
+        : [...source.files];
+      files.push(...source.files);
+    }
+  } else {
+    files = selection.directory
+      ? await walkDirectory(selection.directory, "", options.signal, (completed) => {
+          options.onProgress?.({ phase: "discovery", completed, total: 0 });
+        })
+      : [...selection.files];
+  }
   files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
   selection.files = files;
   const replayFiles = files.filter(({ relativePath }) =>
