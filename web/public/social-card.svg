@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Labatar Match History</title>
+  <desc id="desc">A dark blue preview card with Labatar branding and a sample match history panel.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101318"/>
+      <stop offset="1" stop-color="#1d2734"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#90caf9"/>
+      <stop offset="1" stop-color="#8de3dc"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#263341"/>
+      <stop offset="1" stop-color="#19232f"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#8bb3cf" stroke-opacity=".06" stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="24" stdDeviation="28" flood-color="#03070d" flood-opacity=".45"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#background)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <circle cx="1037" cy="78" r="272" fill="#5ea8dd" opacity=".08"/>
+  <circle cx="1110" cy="588" r="280" fill="#7dd6d1" opacity=".06"/>
+  <rect x="0" y="0" width="11" height="630" fill="url(#accent)"/>
+
+  <rect x="68" y="67" width="55" height="55" rx="15" fill="url(#accent)"/>
+  <path d="M85 82v25h20" fill="none" stroke="#10212c" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="141" y="105" fill="#f4f8fc" font-family="Segoe UI, Arial, sans-serif" font-size="29" font-weight="700" letter-spacing="4">LABATAR</text>
+
+  <rect x="68" y="176" width="204" height="35" rx="17.5" fill="#243b4b" stroke="#426c82" stroke-width="1"/>
+  <text x="88" y="199" fill="#a7d9f5" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" letter-spacing="2">MATCH HISTORY</text>
+  <text x="64" y="300" fill="#f7fbff" font-family="Segoe UI, Arial, sans-serif" font-size="72" font-weight="700">Your matches,</text>
+  <text x="64" y="382" fill="#f7fbff" font-family="Segoe UI, Arial, sans-serif" font-size="72" font-weight="700">all in one place.</text>
+  <rect x="68" y="413" width="130" height="5" rx="2.5" fill="url(#accent)"/>
+  <text x="68" y="469" fill="#b6c7d7" font-family="Segoe UI, Arial, sans-serif" font-size="23">Browse local Avatar Legends replays</text>
+  <text x="68" y="502" fill="#b6c7d7" font-family="Segoe UI, Arial, sans-serif" font-size="23">in your browser.</text>
+  <text x="68" y="580" fill="#83a9c0" font-family="Segoe UI, Arial, sans-serif" font-size="17" letter-spacing="1">lthanni.github.io/labatar</text>
+
+  <g filter="url(#shadow)">
+    <rect x="729" y="110" width="415" height="430" rx="22" fill="url(#panel)" stroke="#476174" stroke-width="2"/>
+    <text x="766" y="162" fill="#f0f7fd" font-family="Segoe UI, Arial, sans-serif" font-size="23" font-weight="700">Recent sets</text>
+    <rect x="1051" y="135" width="53" height="25" rx="12.5" fill="#284e58"/>
+    <text x="1057" y="153" fill="#9ce5d7" font-family="Segoe UI, Arial, sans-serif" font-size="13" font-weight="700">LOCAL</text>
+
+    <rect x="752" y="185" width="369" height="93" rx="14" fill="#1b2935" stroke="#355064"/>
+    <circle cx="797" cy="231" r="24" fill="#355a6e"/>
+    <text x="789" y="239" fill="#d4efff" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">A</text>
+    <text x="836" y="223" fill="#f1f7fc" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="600">Recent matchup</text>
+    <text x="836" y="247" fill="#87a3b7" font-family="Segoe UI, Arial, sans-serif" font-size="15">Set of 3 games</text>
+    <rect x="1046" y="207" width="49" height="40" rx="10" fill="#245a4e"/>
+    <text x="1056" y="234" fill="#9be6c9" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="700">2-1</text>
+
+    <rect x="752" y="290" width="369" height="93" rx="14" fill="#1b2935" stroke="#355064"/>
+    <circle cx="797" cy="336" r="24" fill="#575070"/>
+    <text x="789" y="344" fill="#e5dfff" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">K</text>
+    <text x="836" y="328" fill="#f1f7fc" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="600">Ranked set</text>
+    <text x="836" y="352" fill="#87a3b7" font-family="Segoe UI, Arial, sans-serif" font-size="15">MMR and round scores</text>
+    <rect x="1046" y="312" width="49" height="40" rx="10" fill="#5b3e4a"/>
+    <text x="1057" y="339" fill="#ffc3cb" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="700">1-2</text>
+
+    <rect x="752" y="395" width="369" height="93" rx="14" fill="#1b2935" stroke="#355064"/>
+    <circle cx="797" cy="441" r="24" fill="#3a6260"/>
+    <text x="789" y="449" fill="#d2f8ed" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Z</text>
+    <text x="836" y="433" fill="#f1f7fc" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="600">Match history</text>
+    <text x="836" y="457" fill="#87a3b7" font-family="Segoe UI, Arial, sans-serif" font-size="15">Local replays, private by default</text>
+    <rect x="1046" y="417" width="49" height="40" rx="10" fill="#245a4e"/>
+    <text x="1056" y="444" fill="#9be6c9" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="700">3-0</text>
+  </g>
+</svg>
