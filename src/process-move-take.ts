@@ -4,6 +4,14 @@ import type { RecordedVideo } from "./recording-types";
 export async function processMoveTake(recording: RecordedVideo): Promise<RecordedVideo> {
   const recordingsApi = window.electronAPI?.recordings;
   if (!recordingsApi) throw new Error("Recording processing requires the desktop app.");
+  const take = recording.moveTake;
+  if (!take) throw new Error("This recording is not a move take.");
+  if (
+    take.captureMethod === "automated" &&
+    take.captureReviewStatus !== "approved-for-processing"
+  ) {
+    throw new Error("Review and approve this automated video before processing it.");
+  }
   const reader = await recordingsApi.openFrameReader({ recordingId: recording.id });
   try {
     const provider: RecordingFrameProvider = {
@@ -24,7 +32,14 @@ export async function processMoveTake(recording: RecordedVideo): Promise<Recorde
         return createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
       },
     };
-    const analysis = await processRecording(recording.url, undefined, undefined, provider);
+    const analysis = await processRecording(
+      recording.url,
+      undefined,
+      undefined,
+      provider,
+      undefined,
+      take.moveLabel,
+    );
     return await recordingsApi.saveAnalysis({ recordingId: recording.id, analysis });
   } finally {
     await recordingsApi.closeFrameReader({ sessionId: reader.sessionId });

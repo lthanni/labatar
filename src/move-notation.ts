@@ -1,4 +1,4 @@
-export const MOVE_BUTTONS = ["A", "B", "C", "F", "EX", "SUP", "X"] as const;
+export const MOVE_BUTTONS = ["A", "AA", "B", "C", "F", "EX", "SUP", "X"] as const;
 
 export type MoveButton = (typeof MOVE_BUTTONS)[number];
 
@@ -15,7 +15,7 @@ export type ParsedMoveNotation = {
 export type MoveNotationResult = ({ ok: true } & ParsedMoveNotation) | { ok: false; error: string };
 
 const INVALID_MOVE_NOTATION_MESSAGE =
-  "Use j.1-9, 1-9, 214, 236, or 22 followed by A, B, C, F, EX, SUP, or X; charged buttons use brackets, such as 5[C].";
+  "Use j.1-9, 1-9, 214, 236, or 22 followed by A, AA, B, C, F, EX, SUP, or X; charged buttons use brackets, such as 5[C].";
 
 export type MoveNotationOptions = {
   /** Bare buttons are only valid as stance followups. */
@@ -36,7 +36,7 @@ export function parseMoveNotation(
   options: MoveNotationOptions = {},
 ): MoveNotationResult {
   const compact = compactMoveInput(input);
-  const match = /^(j\.)?(214|236|22|[1-9])?(\[(?:EX|SUP|A|B|C|F|X)\]|EX|SUP|A|B|C|F|X)$/i.exec(
+  const match = /^(j\.)?(214|236|22|[1-9])?(\[(?:EX|SUP|A|B|C|F|X)\]|EX|SUP|AA|A|B|C|F|X)$/i.exec(
     compact,
   );
   if (!match) {
@@ -107,6 +107,7 @@ export function classifyMoveInput(
   const parsed = parseMoveNotation(input, options);
   if (!parsed.ok || !["A", "B", "C"].includes(parsed.button)) return null;
   if (parsed.isAirborne) {
+    if (!parsed.isDirectional && parsed.prefix !== "") return "other";
     return parsed.prefix === "" || parsed.prefix === "5" ? "normal" : "command-normal";
   }
   if (parsed.prefix === "2" || parsed.prefix === "5") return "normal";

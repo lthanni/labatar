@@ -72,8 +72,7 @@ export type RecordingMoveTake = ArmedMoveCapture & {
   evidenceReason?: string | null;
   reviewedAt?: string | null;
   captureMethod?: "manual" | "automated";
-  captureReviewStatus?: "awaiting-video-review" | "approved-for-processing" | "rejected";
-  captureReviewReason?: string | null;
+  captureReviewStatus?: "awaiting-video-review" | "approved-for-processing";
   captureReviewedAt?: string | null;
   captureRunId?: string | null;
   captureRecipe?: {
@@ -82,6 +81,7 @@ export type RecordingMoveTake = ArmedMoveCapture & {
     reset: string;
     neutralPreRollMs: number;
     tailMs: number;
+    chargeHoldMs?: number;
   } | null;
   validation: MoveTakeValidation;
 };

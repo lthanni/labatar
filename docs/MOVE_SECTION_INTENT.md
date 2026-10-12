@@ -8,7 +8,7 @@ Users can add character-specific moves and edit the entries in Tech. The Tech ca
 
 Each move has an editable flow-cancellable property. Command normals start with this property enabled, but the saved toggle value takes precedence over that assumption.
 
-A move with a charged version keeps its standard entry and gets a separate bracketed entry, such as `5C` and `5[C]`. Each entry links to the other by ID and has independent frame data and capture takes. A visible button input alone does not verify hold duration, so a charged take remains unresolved until that evidence is reviewed.
+A move with a charged version keeps its standard entry and gets a separate bracketed entry, such as `5C` and `5[C]`. Each entry links to the other by ID and has independent frame data and capture takes. Automatic capture can hold the bracketed button for a configurable duration and records that duration in the take's recipe. The video still needs review to confirm the charged move activated.
 
 A stance is a parent move with followups. A followup can use a bare button such as `A` when it depends on a stance parent; this bare input only applies in that stance sequence. The older global bare-button stance matching is no longer used. Previously saved rekka parents are read as stance parents; older bare-button entries without a parent remain stored but must be assigned to a stance before capture can select them.
 

@@ -17,7 +17,7 @@ import type {
 } from "./processing-config-types";
 
 export const recordingProcessorVersion = "recording-processor/2";
-export const currentCalibrationProfileVersion = 2;
+export const currentCalibrationProfileVersion = 6;
 declare const __RECORDING_PROCESSOR_FINGERPRINT__: string;
 export const recordingProcessorFingerprint = __RECORDING_PROCESSOR_FINGERPRINT__;
 let loading: Promise<ProcessingConfigurationResult> | null = null;
@@ -127,7 +127,7 @@ async function upgradeStoredProcessingConfiguration(result: ProcessingConfigurat
     expectedRevision: result.configuration.revision,
   });
   upgraded.warnings.push(
-    "Upgraded the framebar calibration profile with the verified bright-startup color sample.",
+    "Upgraded the framebar calibration profile with colors sampled from blackout captures.",
   );
   return upgraded;
 }

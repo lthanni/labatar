@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 const { createMoveCatalogStore } = createRequire(import.meta.url)(
   "../../electron/move-catalog.cjs",
 );
-const { validateMoveTake } = createRequire(import.meta.url)(
+const { validateMoveTake, validateCapturedMoveTake } = createRequire(import.meta.url)(
   "../../electron/move-take-validation.cjs",
 );
 
@@ -170,5 +170,60 @@ describe("move take validation", () => {
 
     expect(result.status).toBe("ambiguous");
     expect(result.matchedAnalysisMoveId).toBeNull();
+  });
+});
+
+describe("reviewed capture association", () => {
+  it("links a single framebar episode even when legacy input data disagrees", () => {
+    const result = validateCapturedMoveTake(
+      { ...take, isCharged: true },
+      {
+        moves: [{ id: "move-1", notation: "2B", observedNotation: "2B" }],
+        inputEvents: [{ id: "input-1", notation: "2B" }],
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "verified",
+      matchedAnalysisMoveId: "move-1",
+      observedInputs: [],
+    });
+    expect(result.message).toContain("Input history was not read");
+  });
+
+  it("does not link a take with no framebar episode", () => {
+    const result = validateCapturedMoveTake(take, { moves: [] });
+    expect(result.status).toBe("unresolved");
+    expect(result.matchedAnalysisMoveId).toBeNull();
+  });
+
+  it("does not choose between multiple framebar episodes", () => {
+    const result = validateCapturedMoveTake(take, {
+      moves: [{ id: "move-1" }, { id: "move-2" }],
+    });
+    expect(result.status).toBe("ambiguous");
+    expect(result.matchedAnalysisMoveId).toBeNull();
+  });
+
+  it("links the second episode of an approved AA take and retains the base A episode", () => {
+    for (const direction of ["2", "5"]) {
+      const result = validateCapturedMoveTake(
+        { expectedInputs: [`${direction}AA`], moveLabel: `${direction}AA` },
+        { moves: [{ id: "base-a" }, { id: "followup-aa" }] },
+      );
+      expect(result).toMatchObject({
+        status: "verified",
+        matchedAnalysisMoveId: "followup-aa",
+      });
+      expect(result.message).toContain(`${direction}A`);
+    }
+  });
+
+  it("requires both framebar episodes before linking an AA followup", () => {
+    const result = validateCapturedMoveTake(
+      { expectedInputs: ["5AA"], moveLabel: "5AA" },
+      { moves: [{ id: "one-episode" }] },
+    );
+    expect(result).toMatchObject({ status: "ambiguous", matchedAnalysisMoveId: null });
   });
 });

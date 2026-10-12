@@ -48,7 +48,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
     setSettings: (request) => ipcRenderer.invoke("capture:set-settings", request),
     setChapterSettings: (request) => ipcRenderer.invoke("capture:set-chapter-settings", request),
     toggle: () => ipcRenderer.invoke("capture:toggle"),
-    setDevTabActive: (active) => ipcRenderer.invoke("capture:set-dev-tab-active", active),
     addChapter: () => ipcRenderer.invoke("capture:add-chapter"),
     setAutoGameChapters: (enabled) =>
       ipcRenderer.invoke("capture:set-auto-game-chapters", { enabled }),
@@ -131,6 +130,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     reviewCapture: (request) => ipcRenderer.invoke("recordings:review-capture", request),
     deleteRecording: (request) => ipcRenderer.invoke("recordings:delete", request),
     deletePendingMove: (request) => ipcRenderer.invoke("recordings:delete-pending-move", request),
+    deleteMoveTake: (request) => ipcRenderer.invoke("recordings:delete-move-take", request),
     startDrag: (request) => ipcRenderer.send("recordings:start-drag", request),
   },
   artwork: {
@@ -170,7 +170,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   devBlackout: {
     status: () => ipcRenderer.invoke("dev-blackout:status"),
-    start: () => ipcRenderer.invoke("dev-blackout:start"),
+    start: (request) => ipcRenderer.invoke("dev-blackout:start", request),
     restore: () => ipcRenderer.invoke("dev-blackout:restore"),
   },
   processingConfiguration: {

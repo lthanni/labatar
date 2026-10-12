@@ -34,6 +34,32 @@ intact, the update creates a new revision, and saved analysis snapshots remain
 unchanged. The recent `new 5a block` capture uses this brighter green; the
 older `5A block` fixture uses the original darker green.
 
+Calibration profile version 3 adds `RGB(65,132,191)` as `recovery-bright`,
+sampled from the visible recovery cells in the 2560x1440 blackout 5A capture.
+The earlier dark recovery sample remains available for older recordings. Saved
+version 2 configurations gain the new sample on load; previous analysis
+snapshots remain unchanged and need reprocessing to use it.
+
+Calibration profile version 4 adds `RGB(210,0,18)` as `active-bright`, sampled
+from 214B's red framebar cells through the processor's JPEG decoding path.
+Those cells sit near the old active reference's distance limit and can flicker
+between `active` and `Unmapped`. The old sample remains for older recordings;
+saved version 3 configurations gain the new one on load.
+
+Calibration profile version 5 adds `RGB(229,176,43)` as `multihit-gap`, sampled
+from the seven orange framebar cells in Aang's 5B blackout whiff recording.
+Orange gaps separate active windows within one move; they count as neither
+active nor recovery. The 5B framebar shows two six-frame active windows with
+a seven-frame gap. The processor labels those windows `5B(1)` and `5B(2)`;
+the saved 5B analysis needs reprocessing to use this calibration. Individual
+hit contact and advantage still require hit or block evidence.
+
+Calibration profile version 6 adds `RGB(46,192,202)` as `flow-stance`, sampled
+from the cyan framebar cells in Aang's 2F, 4F, and 6F blackout captures through
+the FFmpeg JPEG frame path. The color is recognized as its own move state, not
+as startup, active, or recovery. Saved configurations gain it on load; existing
+analyses need reprocessing to use the new calibration.
+
 ## Saves and recovery
 
 The main process validates configuration before saving. Writes use a temporary

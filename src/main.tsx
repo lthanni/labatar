@@ -76,6 +76,7 @@ type AutomaticMoveRunState = {
   phase: string;
   error: string | null;
   runId?: string;
+  outcome?: MoveTakeOutcome;
 };
 
 declare global {
@@ -100,7 +101,6 @@ declare global {
         setSettings: (request: { hotkey: string }) => Promise<CaptureState>;
         setChapterSettings: (request: { hotkey: string }) => Promise<CaptureState>;
         toggle: () => Promise<{ outputPath?: string | null }>;
-        setDevTabActive: (active: boolean) => Promise<void>;
         addChapter: () => Promise<{ at: string }>;
         setAutoGameChapters: (enabled: boolean) => Promise<CaptureState>;
         setAutoClipManualChapters: (enabled: boolean) => Promise<CaptureState>;
@@ -213,7 +213,7 @@ declare global {
           recordingId: string;
           startTime: number;
           endTime: number;
-        }) => Promise<{ recording: RecordedVideo; backupPath: string; backupManifestPath: string }>;
+        }) => Promise<{ recording: RecordedVideo }>;
         createF10Clips: (request: { recordingId: string }) => Promise<{
           total: number;
           created: number;
@@ -244,10 +244,10 @@ declare global {
         reviewCapture: (request: {
           recordingId: string;
           action: "approve" | "reject";
-          reason?: string;
-        }) => Promise<RecordedVideo>;
+        }) => Promise<RecordedVideo | { id: string }>;
         deleteRecording: (request: { recordingId: string }) => Promise<{ id: string }>;
         deletePendingMove: (request: { recordingId: string }) => Promise<{ id: string }>;
+        deleteMoveTake: (request: { recordingId: string }) => Promise<{ id: string }>;
         startDrag: (request: { recordingId: string }) => void;
       };
       artwork: {
@@ -294,6 +294,8 @@ declare global {
           variantId: string;
           moves: Array<{ id: string; input: string }>;
           facing: "Right" | "Left";
+          outcome: MoveTakeOutcome;
+          chargeHoldMs: number;
         }) => Promise<AutomaticMoveRunState>;
         automaticStatus: () => Promise<AutomaticMoveRunState>;
         automaticPause: () => Promise<AutomaticMoveRunState>;
@@ -304,7 +306,7 @@ declare global {
       };
       devBlackout: {
         status: () => Promise<DevBlackoutStatus>;
-        start: () => Promise<DevBlackoutStatus>;
+        start: (request: { testedCharacter: string }) => Promise<DevBlackoutStatus>;
         restore: () => Promise<DevBlackoutStatus>;
       };
     };
@@ -944,6 +946,7 @@ function App() {
     active: false,
     busy: false,
     restorePending: false,
+    testedCharacter: null,
     error: null,
   });
   const refreshBlackoutStatus = useCallback(async () => {
@@ -958,15 +961,14 @@ function App() {
         active: false,
         busy: false,
         restorePending: false,
+        testedCharacter: null,
         error: error instanceof Error ? error.message : String(error),
       });
     }
   }, []);
   useEffect(() => {
     if (!developerTabsAvailable) return;
-    const active = tab === captureTabIndex;
-    void window.electronAPI?.capture.setDevTabActive(active);
-    if (!active) return;
+    if (tab !== captureTabIndex) return;
     void refreshBlackoutStatus();
     const timer = window.setInterval(() => void refreshBlackoutStatus(), 4000);
     return () => window.clearInterval(timer);
@@ -1232,10 +1234,7 @@ function App() {
           spacing={1}
           sx={{ alignItems: "center", justifySelf: { xs: "center", lg: "end" }, minWidth: 0 }}
         >
-          <ObsRecordingControls
-            onOpenSettings={() => openSettings("obs")}
-            disableCaptureStart={tab === captureTabIndex && !blackoutStatus.active}
-          />
+          <ObsRecordingControls onOpenSettings={() => openSettings("obs")} />
           {appVersion && (
             <Typography variant="caption" color="text.secondary">
               v{appVersion}

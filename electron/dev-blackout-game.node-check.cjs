@@ -6,6 +6,9 @@ const path = require("node:path");
 const { performance } = require("node:perf_hooks");
 const {
   replacements,
+  characterPackages,
+  replacementPlan,
+  sessionMatchesProfile,
   sha256,
   waitForStableGame,
   readSession,
@@ -14,11 +17,12 @@ const {
   installSession,
   verifyInstalled,
   verifyInstalledAssets,
+  detectInstalledProfile,
   restoreSession,
   watchAndRestore,
 } = require("./dev-blackout-game.cjs");
 
-async function fixture(t) {
+async function fixture(t, testedCharacter = "Aang") {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "labatar-blackout-test-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const gameRoot = path.join(root, "game");
@@ -28,13 +32,13 @@ async function fixture(t) {
   await fs.mkdir(sourceRoot);
   await fs.writeFile(path.join(gameRoot, "Atla.exe"), "test executable");
   const expectedOriginals = {};
-  for (const [name, replacementName] of Object.entries(replacements)) {
+  for (const [name, replacementName] of Object.entries(replacementPlan(testedCharacter))) {
     const target = path.join(gameRoot, "data_packages", name);
     await fs.writeFile(target, `original ${name}`);
     await fs.writeFile(path.join(sourceRoot, replacementName), `blackout ${name}`);
     expectedOriginals[name] = await sha256(target);
   }
-  return { gameRoot, sourceRoot, backupRoot, expectedOriginals };
+  return { gameRoot, sourceRoot, backupRoot, expectedOriginals, testedCharacter };
 }
 
 void test("launch confirmation waits through a transient process sighting", async () => {
@@ -65,6 +69,7 @@ void test("launch confirmation tolerates a failed process check", async () => {
 void test("installs verified blackout files, keeps backups, and restores all originals", async (t) => {
   const setup = await fixture(t);
   const session = await prepareSession(setup);
+  assert.equal(sessionMatchesProfile(session), true);
   await installSession(session, async () => false);
   assert.equal(await verifyInstalled(session), true);
   assert.equal(await verifyInstalledAssets(setup), true);
@@ -82,6 +87,24 @@ void test("installs verified blackout files, keeps backups, and restores all ori
   }
 });
 
+void test("reuses verified original backups across blackout sessions", async (t) => {
+  const setup = await fixture(t);
+  const first = await prepareSession(setup);
+  await installSession(first, async () => false);
+  assert.equal(await restoreSession(setup.backupRoot, async () => false), true);
+  const second = await prepareSession(setup);
+  assert.equal(second.backupDir, first.backupDir);
+  assert.deepEqual(
+    second.files.map((file) => file.backup),
+    first.files.map((file) => file.backup),
+  );
+  await fs.writeFile(second.files[0].backup, "damaged backup");
+  await assert.rejects(
+    restoreSession(setup.backupRoot, async () => false),
+    /failed verification/,
+  );
+});
+
 void test("recognizes matching blackout assets without a launcher session", async (t) => {
   const setup = await fixture(t);
   assert.equal(await verifyInstalledAssets(setup), false);
@@ -93,14 +116,52 @@ void test("recognizes matching blackout assets without a launcher session", asyn
   }
   assert.equal(readSession(setup.backupRoot), null);
   assert.equal(await verifyInstalledAssets(setup), true);
+  assert.equal(await detectInstalledProfile(setup), "Aang");
   await fs.writeFile(path.join(setup.gameRoot, "data_packages", "hud.pak"), "different HUD");
   assert.equal(await verifyInstalledAssets(setup), false);
+});
+
+void test("Korra profile preserves Zuko's fighter art while hiding both support sets", async (t) => {
+  const plan = replacementPlan("Korra");
+  assert.equal(plan["korra.pak"], "korra-supports-hidden.pak");
+  assert.equal(plan["zuko.pak"], "zuko-supports-hidden.pak");
+  assert.equal(Object.keys(plan).length, Object.keys(characterPackages).length + 3);
+  for (const packageName of Object.values(characterPackages)) {
+    if (packageName === "korra.pak" || packageName === "zuko.pak") continue;
+    assert.equal(plan[packageName], `${path.basename(packageName, ".pak")}-all-hidden.pak`);
+  }
+  const setup = await fixture(t, "Korra");
+  const session = await prepareSession(setup);
+  assert.equal(session.testedCharacter, "Korra");
+  await installSession(session, async () => false);
+  assert.equal(await verifyInstalledAssets(setup), true);
+  assert.equal(await detectInstalledProfile(setup), "Korra");
+  assert.equal(await restoreSession(setup.backupRoot, async () => false), true);
+  for (const [name, expectedHash] of Object.entries(setup.expectedOriginals)) {
+    assert.equal(await sha256(path.join(setup.gameRoot, "data_packages", name)), expectedHash);
+  }
+});
+
+void test("other fighter profiles hide every unselected fighter and support", () => {
+  for (const [testedCharacter, testedPackage] of Object.entries(characterPackages)) {
+    if (testedCharacter === "Korra") continue;
+    const plan = replacementPlan(testedCharacter);
+    assert.equal(Object.keys(plan).length, Object.keys(characterPackages).length + 3);
+    for (const packageName of Object.values(characterPackages)) {
+      const suffix = packageName === testedPackage ? "supports" : "all";
+      assert.equal(plan[packageName], `${path.basename(packageName, ".pak")}-${suffix}-hidden.pak`);
+    }
+  }
 });
 
 void test("restores a three-PAK session created before the shadow patch", async (t) => {
   const setup = await fixture(t);
   const session = await prepareSession(setup);
-  session.files = session.files.filter((file) => file.name !== "hitspark.pak");
+  session.files = session.files.filter((file) =>
+    ["watertribe.pak", "korra.pak", "hud.pak"].includes(file.name),
+  );
+  delete session.testedCharacter;
+  assert.equal(sessionMatchesProfile(session), false);
   writeSession(setup.backupRoot, session);
   await installSession(session, async () => false);
   session.phase = "active";

@@ -2,7 +2,9 @@ import type { TechMove } from "./tech-types";
 import { isFlowCancellableByDefault } from "./move-notation";
 
 export const commonMoveInputs = [
-  ...["2", "5"].flatMap((direction) => ["A", "B", "C"].map((button) => `${direction}${button}`)),
+  ...["2", "5"].flatMap((direction) =>
+    ["A", "AA", "B", "C"].map((button) => `${direction}${button}`),
+  ),
   ...["2", "4", "6"].map((direction) => `${direction}F`),
   ...["236", "214"].flatMap((motion) =>
     ["A", "B", "C", "EX"].map((button) => `${motion}${button}`),

@@ -30,8 +30,13 @@ import { framebarColorMap, findClosestFramebarColor } from "../../src/framebar-c
 import {
   calculateOnBlock,
   calculateOnHit,
+  airborneAttackTimeline,
+  scanFramebar,
   countPostHitpauseActiveFrames,
   resolveFramebarSampleSpacing,
+  splitFramebarHitWindows,
+  summarizeFramePhases,
+  summarizeMoveFramebarTimeline,
 } from "../../src/framebar-detector";
 import {
   findInputForFramebarStart,
@@ -154,9 +159,11 @@ describe("recording-analysis fixture contract", () => {
   });
 
   it("accepts the canonical move notation used by the fixture", () => {
-    for (const notation of ["236C", "2C", "j.2C", "j.5F", "j.B"]) {
+    for (const notation of ["236C", "2C", "2AA", "5AA", "j.2C", "j.5F", "j.B"]) {
       expect(parseMoveNotation(notation), notation).toMatchObject({ ok: true });
     }
+    expect(parseMoveNotation("5AA")).toMatchObject({ button: "AA", notation: "5AA" });
+    expect(parseMoveNotation("5[AA]").ok).toBe(false);
     expect(parseMoveNotation("5S").ok).toBe(false);
   });
 
@@ -192,6 +199,9 @@ describe("recording-analysis fixture contract", () => {
     expect(classifyMoveInput("6A")).toBe("command-normal");
     expect(classifyMoveInput("j.2C")).toBe("command-normal");
     expect(classifyMoveInput("236A")).toBe("other");
+    expect(classifyMoveInput("j.236A")).toBe("other");
+    expect(classifyMoveInput("j.214B")).toBe("other");
+    expect(isFlowCancellableByDefault("j.236A")).toBe(false);
     expect(isFlowCancellableByDefault("6A")).toBe(true);
     expect(isFlowCancellableByDefault("j.2C")).toBe(true);
     expect(isFlowCancellableByDefault("5A")).toBe(false);
@@ -397,8 +407,199 @@ describe("recording-analysis fixture contract", () => {
     expect(findClosestFramebarColor(33, 78, 104, framebarColorMap)?.name).toBe("recovery");
     expect(findClosestFramebarColor(68, 46, 121, framebarColorMap)?.name).toBe("blockstun");
     expect(findClosestFramebarColor(76, 76, 73, framebarColorMap)?.name).toBe("hitpause");
-    expect(resolveFramebarSampleSpacing(1009, 4, 63, 8)).toBeCloseTo(16.2, 1);
+    expect(resolveFramebarSampleSpacing(1009, 4, 63, 8)).toBeCloseTo(15.95, 1);
     expect(resolveFramebarSampleSpacing(1009, 4, 63, 16)).toBe(16);
+  });
+
+  it("samples the centers of scaled framebar cells, away from dark borders", () => {
+    const states = [
+      ...Array(26).fill("recovery-bright"),
+      ...Array(12).fill("startup-bright"),
+      ...Array(15).fill("active-bright"),
+      ...Array(10).fill("recovery-bright"),
+    ];
+    const colors: Record<string, [number, number, number]> = {
+      "recovery-bright": [65, 132, 191],
+      "startup-bright": [94, 186, 107],
+      "active-bright": [210, 0, 18],
+    };
+    const scan = scanFramebar({
+      config: {
+        ...defaultDetectorConfig,
+        sampleStartOffset: 3.5,
+        sampleSpacing: 8,
+        sampleCount: 63,
+      },
+      sampleWidth: 1009,
+      sampleHeight: 65,
+      readPixel: (x) => {
+        const cell = Math.min(62, Math.floor(x / 16));
+        const [red, green, blue] = x % 16 < 4 ? [195, 196, 207] : colors[states[cell]];
+        return { red, green, blue };
+      },
+      getMappedColor: (red, green, blue) =>
+        findClosestFramebarColor(red, green, blue, framebarColorMap),
+    });
+    expect(scan.sampleStartOffset).toBeCloseTo(8, 1);
+    expect(summarizeFramePhases(scan.groups)).toEqual({
+      startup: 12,
+      active: 15,
+      recovery: 36,
+      other: 0,
+    });
+  });
+
+  it("excludes jump frames from an airborne attack's measured phases", () => {
+    const sample = (timestamp: number, jump: number, recovery: number) => {
+      const groups = [
+        { state: "recovery-bright", start: 0, length: jump },
+        { state: "startup-bright", start: jump, length: 12 },
+        { state: "active-bright", start: jump + 12, length: 15 },
+        { state: "recovery-bright", start: jump + 27, length: recovery },
+      ];
+      return {
+        timestamp,
+        player1: "",
+        player1Groups: groups,
+        player2: "",
+        player1Phases: summarizeFramePhases(groups),
+      };
+    };
+    const jumpOnly = sample(0.45, 26, 0);
+    jumpOnly.player1Groups = [{ state: "recovery-bright", start: 0, length: 26 }];
+    jumpOnly.player1Phases = summarizeFramePhases(jumpOnly.player1Groups);
+    const attack = airborneAttackTimeline([jumpOnly, sample(1.6, 26, 10), sample(1.8, 9, 27)]);
+    expect(attack[0].timestamp).toBe(1.6);
+    expect(summarizeMoveFramebarTimeline(attack)?.player1Phases).toMatchObject({
+      startup: 12,
+      active: 15,
+      recovery: 27,
+    });
+  });
+
+  it("keeps j.236EX startup at its first contiguous 22 cells after the meter rolls", () => {
+    const snapshot = (
+      timestamp: number,
+      jump: number,
+      recovery: number,
+      trailingStartup: number,
+    ) => {
+      const groups = [
+        { state: "recovery-bright", start: 0, length: jump },
+        { state: "startup-bright", start: jump, length: 12 },
+        { state: "startup", start: jump + 12, length: 10 },
+        { state: "active-bright", start: jump + 22, length: 8 },
+        { state: "recovery-bright", start: jump + 30, length: recovery },
+        ...(trailingStartup
+          ? [{ state: "startup-bright", start: jump + 30 + recovery, length: trailingStartup }]
+          : []),
+      ];
+      return {
+        timestamp,
+        player1: "",
+        player1Groups: groups,
+        player2: "",
+        player1Phases: summarizeFramePhases(groups),
+      };
+    };
+    const attack = airborneAttackTimeline([snapshot(1.48, 22, 10, 0), snapshot(1.65, 14, 11, 8)]);
+    expect(summarizeMoveFramebarTimeline(attack)?.player1Phases).toMatchObject({
+      startup: 22,
+      active: 8,
+      recovery: 11,
+    });
+    expect(attack[1].player1Phases.other).toBe(8);
+  });
+
+  it("retains early phases when 214EX recovery rolls the meter left", () => {
+    const beforeRoll = {
+      timestamp: 1.55,
+      player1: "",
+      player1Groups: [
+        { state: "startup-bright", start: 0, length: 12 },
+        { state: "active-bright", start: 12, length: 3 },
+        { state: "multihit-gap", start: 15, length: 13 },
+        { state: "active-bright", start: 28, length: 5 },
+        { state: "multihit-gap", start: 33, length: 12 },
+        { state: "active-bright", start: 45, length: 1 },
+        { state: "multihit-gap", start: 46, length: 2 },
+        { state: "active-bright", start: 48, length: 4 },
+        { state: "recovery-bright", start: 52, length: 1 },
+      ],
+      player2: "",
+      player1Phases: { startup: 12, active: 13, recovery: 1, other: 37 },
+    };
+    const afterRoll = {
+      ...beforeRoll,
+      timestamp: 2.07,
+      player1Groups: [
+        { state: "multihit-gap", start: 0, length: 7 },
+        { state: "active-bright", start: 7, length: 10 },
+        { state: "recovery-bright", start: 17, length: 32 },
+      ],
+      player1Phases: { startup: 0, active: 10, recovery: 32, other: 21 },
+    };
+    const summary = summarizeMoveFramebarTimeline([beforeRoll, afterRoll]);
+    expect(summary?.player1Phases).toMatchObject({ startup: 12, active: 13, recovery: 32 });
+    expect(summary?.player1Groups).toBe(beforeRoll.player1Groups);
+    expect(splitFramebarHitWindows(summary?.player1Groups ?? [])).toHaveLength(4);
+  });
+
+  it("separates 5B's two active windows across its seven orange cells", () => {
+    const groups = [
+      { state: "startup-bright", start: 0, length: 11 },
+      { state: "active-bright", start: 11, length: 6 },
+      { state: "multihit-gap", start: 17, length: 7 },
+      { state: "active-bright", start: 24, length: 6 },
+      { state: "recovery-bright", start: 30, length: 21 },
+    ];
+    expect(splitFramebarHitWindows(groups)).toEqual([
+      { activeStart: 11, activeFrames: 6, gapBeforeFrames: 0 },
+      { activeStart: 24, activeFrames: 6, gapBeforeFrames: 7 },
+    ]);
+    expect(summarizeFramePhases(groups)).toEqual({
+      startup: 11,
+      active: 12,
+      recovery: 21,
+      other: 7,
+    });
+    expect(
+      splitFramebarHitWindows([
+        { state: "active", start: 0, length: 3 },
+        { state: "Unmapped", start: 3, length: 2 },
+        { state: "active", start: 5, length: 3 },
+      ]),
+    ).toEqual([{ activeStart: 0, activeFrames: 6, gapBeforeFrames: 0 }]);
+  });
+
+  it("counts j.236B's three orange waiting cells between recovery groups as recovery", () => {
+    const groups = [
+      { state: "recovery-bright", start: 0, length: 19 }, // Jump lead-in.
+      { state: "startup-bright", start: 19, length: 27 },
+      { state: "active-bright", start: 46, length: 7 },
+      { state: "recovery-bright", start: 53, length: 10 },
+      { state: "multihit-gap", start: 63, length: 3 },
+      { state: "recovery-bright", start: 66, length: 12 },
+    ];
+    const attack = airborneAttackTimeline([
+      {
+        timestamp: 1.8,
+        player1: "",
+        player1Groups: groups,
+        player2: "",
+        player1Phases: summarizeFramePhases(groups),
+      },
+    ]);
+    expect(summarizeMoveFramebarTimeline(attack)?.player1Phases).toMatchObject({
+      startup: 27,
+      active: 7,
+      recovery: 25,
+    });
+    expect(splitFramebarHitWindows(attack[0].player1Groups)).toHaveLength(1);
+
+    const secondHit = [...groups, { state: "active-bright", start: 78, length: 4 }];
+    expect(summarizeFramePhases(secondHit).recovery).toBe(41);
+    expect(summarizeFramePhases(secondHit).other).toBe(3);
   });
 
   it("calculates on-block advantage from recovery and purple blockstun", () => {

@@ -39,14 +39,16 @@ void test("runs the documented capture order and advances only after verified sa
     "move:jab",
     "release",
     "sleep:2000",
-    "reset:after",
     "stop:jab",
     "verify:jab",
     "persist:jab",
     "reset:before",
     "arm:special",
     "start:special",
+    "sleep:300",
   ]);
+  assert.equal(log.filter((line) => line === "reset:after").length, 0);
+  assert.equal(log.filter((line) => line === "reset:before").length, 2);
   assert.equal(log.filter((line) => line === "persist:jab").length, 1);
 });
 
@@ -146,6 +148,35 @@ void test("pause during save verification waits for commit, then pauses before t
     log.some((line) => line.includes(":kick")),
     false,
   );
+});
+
+void test("cancel during final save verification never reports the pass as complete", async () => {
+  const log = [];
+  let enteredVerify;
+  const verifying = new Promise((resolve) => {
+    enteredVerify = resolve;
+  });
+  let finishVerify;
+  const runner = createAutomaticMoveRunner(
+    deps(log, {
+      verifySaved: async () => {
+        enteredVerify();
+        await new Promise((resolve) => {
+          finishVerify = resolve;
+        });
+        return true;
+      },
+      sleep: async () => {},
+    }),
+  );
+  const runTask = runner.start([{ id: "jab" }]);
+  await verifying;
+  const cancelTask = runner.cancel();
+  finishVerify();
+  await Promise.all([runTask, cancelTask]);
+  assert.equal(runner.status().status, "cancelled");
+  assert.equal(runner.status().index, 1);
+  assert.equal(log.filter((line) => line === "persist:jab").length, 1);
 });
 
 void test("start can resume from a supplied index in the original queue snapshot", async () => {

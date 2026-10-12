@@ -89,7 +89,7 @@ describe("persistent processing calibration", () => {
     });
     expect(profile.digitTemplates[0].id).toBe("one");
     expect(profile.trainingMeter.thresholds.enterThreshold).toBe(0.6);
-    expect(profile.calibrationProfileVersion).toBe(2);
+    expect(profile.calibrationProfileVersion).toBe(6);
     expect(legacy.size).toBe(4);
   });
 
@@ -100,7 +100,7 @@ describe("persistent processing calibration", () => {
       (color) => color.name !== "startup-bright",
     );
     const upgraded = upgradeProcessingConfigurationProfile(legacyProfile);
-    expect(upgraded.calibrationProfileVersion).toBe(2);
+    expect(upgraded.calibrationProfileVersion).toBe(6);
     expect(upgraded.framebar.colors).toContainEqual({
       name: "startup-bright",
       red: 94,
@@ -113,6 +113,111 @@ describe("persistent processing calibration", () => {
       green: 120,
       blue: 75,
     });
+  });
+
+  it("adds the blackout recovery sample to saved version 2 profiles", () => {
+    const savedProfile = configuration();
+    savedProfile.calibrationProfileVersion = 2;
+    savedProfile.framebar.colors = savedProfile.framebar.colors.filter(
+      (color) => color.name !== "recovery-bright",
+    );
+    const upgraded = upgradeProcessingConfigurationProfile(savedProfile);
+    expect(upgraded.calibrationProfileVersion).toBe(6);
+    expect(upgraded.framebar.colors).toContainEqual({
+      name: "recovery-bright",
+      red: 65,
+      green: 132,
+      blue: 191,
+    });
+    expect(upgraded.framebar.colors).toContainEqual({
+      name: "recovery",
+      red: 40,
+      green: 78,
+      blue: 108,
+    });
+    expect(findClosestFramebarColor(63, 133, 192, upgraded.framebar.colors)?.name).toBe(
+      "recovery-bright",
+    );
+  });
+
+  it("adds the 214B active sample to saved version 3 profiles", () => {
+    const savedProfile = configuration();
+    savedProfile.calibrationProfileVersion = 3;
+    savedProfile.framebar.colors = savedProfile.framebar.colors.filter(
+      (color) => color.name !== "active-bright",
+    );
+    const upgraded = upgradeProcessingConfigurationProfile(savedProfile);
+    expect(upgraded.calibrationProfileVersion).toBe(6);
+    expect(upgraded.framebar.colors).toContainEqual({
+      name: "active-bright",
+      red: 210,
+      green: 0,
+      blue: 18,
+    });
+    expect(upgraded.framebar.colors).toContainEqual({
+      name: "active",
+      red: 145,
+      green: 0,
+      blue: 3,
+    });
+    for (const red of [208, 209, 210, 211, 212]) {
+      expect(findClosestFramebarColor(red, 0, 18, upgraded.framebar.colors)?.name).toBe(
+        "active-bright",
+      );
+    }
+  });
+
+  it("adds the orange interhit sample to saved version 4 profiles", () => {
+    const savedProfile = configuration();
+    savedProfile.calibrationProfileVersion = 4;
+    savedProfile.framebar.colors = savedProfile.framebar.colors.filter(
+      (color) => color.name !== "multihit-gap",
+    );
+    const upgraded = upgradeProcessingConfigurationProfile(savedProfile);
+    expect(upgraded.calibrationProfileVersion).toBe(6);
+    expect(upgraded.framebar.colors).toContainEqual({
+      name: "multihit-gap",
+      red: 229,
+      green: 176,
+      blue: 43,
+    });
+    for (const orange of [
+      [232, 175, 44],
+      [229, 177, 42],
+      [227, 177, 44],
+    ]) {
+      expect(
+        findClosestFramebarColor(orange[0], orange[1], orange[2], upgraded.framebar.colors)?.name,
+      ).toBe("multihit-gap");
+    }
+  });
+
+  it("adds the flow stance sample to saved version 5 profiles", () => {
+    const savedProfile = configuration();
+    savedProfile.calibrationProfileVersion = 5;
+    savedProfile.framebar.colors = savedProfile.framebar.colors.filter(
+      (color) => color.name !== "flow-stance",
+    );
+    const upgraded = upgradeProcessingConfigurationProfile(savedProfile);
+    expect(upgraded.calibrationProfileVersion).toBe(6);
+    expect(upgraded.framebar.colors).toContainEqual({
+      name: "flow-stance",
+      red: 46,
+      green: 192,
+      blue: 202,
+    });
+    for (const [red, green, blue] of [
+      [76, 205, 210], // 2F, with the cyan glow over the meter.
+      [47, 191, 202], // 4F.
+      [45, 192, 200], // 6F.
+    ]) {
+      expect(findClosestFramebarColor(red, green, blue, upgraded.framebar.colors)?.name).toBe(
+        "flow-stance",
+      );
+    }
+    expect(findClosestFramebarColor(65, 132, 191, upgraded.framebar.colors)?.name).toBe(
+      "recovery-bright",
+    );
   });
 
   it("uses disk after restart even when browser calibration disappears", async () => {
@@ -293,6 +398,56 @@ describe("persistent processing calibration", () => {
     ).rejects.toThrow("existing analysis was preserved");
   });
 
+  it("does not sample or require input history when processing a move take", async () => {
+    class Video extends EventTarget {
+      duration = 1 / 60;
+      videoWidth = 2560;
+      videoHeight = 1440;
+      load() {
+        this.dispatchEvent(new Event("loadedmetadata"));
+      }
+      removeAttribute() {}
+    }
+    let canvasCount = 0;
+    vi.stubGlobal("document", {
+      createElement: (tag: string) => {
+        if (tag === "video") return new Video();
+        canvasCount += 1;
+        const canvas = {
+          width: 0,
+          height: 0,
+          getContext: () => ({
+            drawImage() {},
+            getImageData: () => ({
+              data: new Uint8ClampedArray(canvas.width * canvas.height * 4),
+            }),
+          }),
+        };
+        return canvas;
+      },
+    });
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const profile = configuration();
+    profile.inputDisplayProfile.colorRules[0].redMin = 200;
+    const analysis = await processRecording(
+      "test.mp4",
+      undefined,
+      undefined,
+      {
+        frameRate: 60,
+        readFrame: async () =>
+          ({ width: 2560, height: 1440, close() {} }) as unknown as ImageBitmap,
+      },
+      profile,
+      "5A",
+    );
+
+    expect(canvasCount).toBe(3);
+    expect(analysis.processingMode).toBe("move-take");
+    expect(analysis.inputEvents).toEqual([]);
+    expect(analysis.diagnostics?.[0].inputSignature).toBe("");
+  });
+
   it("retains calibrated startup/active colors and leaves unmatched pixels unknown", () => {
     const profile = configuration();
     const scan = scanFramebar({
@@ -323,6 +478,37 @@ describe("persistent processing calibration", () => {
     });
     expect(scan.meterPresence.mappedScore).toBeCloseTo(2 / 3);
     expect(scan.unmappedColors.get("255,255,0")).toBe(1);
+  });
+
+  it("reads 32 recovery cells despite a dark upper edge and keeps a pink stripe separate", () => {
+    const scan = scanFramebar({
+      config: {
+        ...defaultDetectorConfig,
+        sampleCount: 63,
+        sampleStartOffset: 3.5,
+        sampleSpacing: 8,
+      },
+      sampleWidth: 1009,
+      sampleHeight: 65,
+      readPixel: (x, y) => {
+        const cell = Math.min(62, Math.floor(x / 16));
+        if (cell >= 31) {
+          return y <= 3 && cell >= 60
+            ? { red: 0, green: 0, blue: 19 }
+            : { red: 65, green: 132, blue: 191 };
+        }
+        return y >= 8 && y <= 10
+          ? { red: 239, green: 7, blue: 252 }
+          : { red: 94, green: 186, blue: 107 };
+      },
+      getMappedColor: (r, g, b) =>
+        findClosestFramebarColor(r, g, b, configuration().framebar.colors),
+    });
+    expect(scan.rawStates.slice(0, 31).every((state) => state.startsWith("startup"))).toBe(true);
+    expect(scan.rawStates.slice(31).every((state) => state.startsWith("recovery"))).toBe(true);
+    expect(summarizeFramePhases(scan.groups).recovery).toBe(32);
+    expect(scan.pinkStripeStates.slice(0, 31).every(Boolean)).toBe(true);
+    expect(scan.pinkStripeStates.slice(31).some(Boolean)).toBe(false);
   });
 
   it("recognizes the bright startup cells from the latest 5A block capture", () => {

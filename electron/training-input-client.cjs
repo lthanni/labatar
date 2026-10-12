@@ -79,10 +79,15 @@ async function createTrainingInputClient({
     });
   }
   return {
-    send({ kind, notation, facing } = {}) {
+    send({ kind, notation, facing, chargeHoldMs } = {}) {
       if (kind !== "reset" && kind !== "move")
         return Promise.reject(new Error("kind must be 'reset' or 'move'."));
-      return request({ kind, ...(notation ? { notation } : {}), ...(facing ? { facing } : {}) });
+      return request({
+        kind,
+        ...(notation ? { notation } : {}),
+        ...(facing ? { facing } : {}),
+        ...(chargeHoldMs !== undefined ? { chargeHoldMs } : {}),
+      });
     },
     async close() {
       if (!closed) {

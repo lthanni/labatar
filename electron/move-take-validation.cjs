@@ -8,7 +8,7 @@ function normalizedNotation(value) {
 function stanceInputMatches(expectedInput, observedInput) {
   const expected = normalizedNotation(expectedInput).replaceAll("[", "").replaceAll("]", "");
   const observed = normalizedNotation(observedInput);
-  const match = /^([1-9])(EX|SUP|A|B|C|F|X)$/.exec(observed);
+  const match = /^([1-9])(EX|SUP|AA|A|B|C|F|X)$/.exec(observed);
   return Boolean(match && match[2] === expected);
 }
 
@@ -99,4 +99,60 @@ function validateMoveTake(moveTake, analysis) {
   };
 }
 
-module.exports = { validateMoveTake };
+/** Link a reviewed take to its framebar episode without consulting input detection. */
+function validateCapturedMoveTake(moveTake, analysis) {
+  const moves = Array.isArray(analysis?.moves) ? analysis.moves : [];
+  const expectedInputs = Array.isArray(moveTake?.expectedInputs)
+    ? moveTake.expectedInputs.filter((input) => typeof input === "string" && input.trim())
+    : [];
+  const base = {
+    expectedInputs,
+    observedInputs: [],
+    matchedAnalysisMoveId: null,
+    processedAt: new Date().toISOString(),
+  };
+  if (moves.length === 0) {
+    return {
+      ...base,
+      status: "unresolved",
+      message:
+        "No framebar move episode was detected in this take. Review the clip and calibration.",
+    };
+  }
+  const aaMatch = /^(2|5)AA$/.exec(normalizedNotation(moveTake?.moveLabel));
+  if (aaMatch) {
+    if (
+      moves.length !== 2 ||
+      moves.some((move) => typeof move?.id !== "string" || !move.id.trim())
+    ) {
+      return {
+        ...base,
+        status: "ambiguous",
+        message: `Expected separate ${aaMatch[1]}A and ${aaMatch[1]}AA framebar episodes. Review the clip.`,
+      };
+    }
+    return {
+      ...base,
+      status: "verified",
+      message: `The second framebar move episode was linked to the selected ${aaMatch[1]}AA take; the first remains ${aaMatch[1]}A. Input history was not read.`,
+      matchedAnalysisMoveId: moves[1].id,
+    };
+  }
+  if (moves.length !== 1 || typeof moves[0]?.id !== "string" || !moves[0].id.trim()) {
+    return {
+      ...base,
+      status: "ambiguous",
+      message:
+        "The take did not contain exactly one identifiable framebar move episode. Review the clip.",
+    };
+  }
+  return {
+    ...base,
+    status: "verified",
+    message:
+      "One framebar move episode was linked to the selected capture. Input history was not read.",
+    matchedAnalysisMoveId: moves[0].id,
+  };
+}
+
+module.exports = { validateMoveTake, validateCapturedMoveTake };

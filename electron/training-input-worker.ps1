@@ -48,13 +48,20 @@ function Send-Tap([string]$key) {
 }
 
 function Invoke-Move($request, [bool]$dryRun = $false) {
-  $match = [regex]::Match([string]$request.notation, '^(j\.)?(236|214|[1-9])(EX|[ABCF])$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
-  if (-not $match.Success) { throw 'Move notation must be 1-9, 236, or 214 followed by A, B, C, F, or EX, optionally prefixed with j.' }
+  $match = [regex]::Match([string]$request.notation, '^(j\.)?(236|214|[1-9])(AA|\[(?:EX|[ABCF])\]|EX|[ABCF])$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  if (-not $match.Success) { throw 'Move notation must be 1-9, 236, or 214 followed by A, B, C, F, or EX; charged buttons use brackets. 2AA and 5AA are also supported.' }
   $facing = if ($request.facing) { [string]$request.facing } else { 'Right' }
   if ($facing -notin @('Right','Left')) { throw 'Facing must be Right or Left.' }
   $jump = $match.Groups[1].Success
-  $motion = $match.Groups[2].Value; $button = $match.Groups[3].Value.ToUpperInvariant()
-  $attackActions = @{ A=@('Atk1'); B=@('Atk2'); C=@('Atk3'); F=@('Atk4'); EX=@('Atk1','Atk2') }[$button]
+  $motion = $match.Groups[2].Value
+  $buttonToken = $match.Groups[3].Value.ToUpperInvariant()
+  $charged = $buttonToken.StartsWith('[')
+  $button = $buttonToken.Trim('[',']')
+  $chargeHoldMs = if ($null -ne $request.chargeHoldMs) { [int]$request.chargeHoldMs } else { 1000 }
+  if ($chargeHoldMs -lt 100 -or $chargeHoldMs -gt 5000) { throw 'Charge hold must be between 100 and 5000 milliseconds.' }
+  $attackMs = if ($charged) { $chargeHoldMs } else { 50 }
+  if ($button -eq 'AA' -and ($jump -or $motion -notin @('2','5'))) { throw 'AA is supported only as 2AA or 5AA.' }
+  $attackActions = @{ A=@('Atk1'); AA=@('Atk1'); B=@('Atk2'); C=@('Atk3'); F=@('Atk4'); EX=@('Atk1','Atk2') }[$button]
   $forward = if($facing -eq 'Right'){'Right'}else{'Left'}; $away = if($forward -eq 'Right'){'Left'}else{'Right'}
   $keys = @{}
   foreach($a in @('Atk1','Atk2','Atk3','Atk4','Up','Down','Left','Right')) { if($script:Bindings.ContainsKey($a)){$keys[$a]=$script:Bindings[$a]} }
@@ -83,11 +90,15 @@ function Invoke-Move($request, [bool]$dryRun = $false) {
   }
   if($motion -eq '236' -or $motion -eq '214') {
     $dir=if($motion -eq '236'){$forward}else{$away}
-    $steps.Add(@{Keys=@($keys.Down);Ms=50});$steps.Add(@{Keys=@($keys.Down,$keys[$dir]);Ms=50});$steps.Add(@{Keys=@($keys[$dir]);Ms=50});$steps.Add(@{Keys=@($keys[$dir]) + $attackKeys;Ms=50})
-  } elseif($motion -eq '5') { $steps.Add(@{Keys=$attackKeys;Ms=50}) }
+    $steps.Add(@{Keys=@($keys.Down);Ms=50});$steps.Add(@{Keys=@($keys.Down,$keys[$dir]);Ms=50});$steps.Add(@{Keys=@($keys[$dir]);Ms=50});$steps.Add(@{Keys=@($keys[$dir]) + $attackKeys;Ms=$attackMs})
+  } elseif($motion -eq '5') {
+    $steps.Add(@{Keys=$attackKeys;Ms=$attackMs})
+    if($button -eq 'AA') { $steps.Add(@{Keys=@();Ms=100});$steps.Add(@{Keys=$attackKeys;Ms=50}) }
+  }
   else {
     $directionKeys = @($directionActions | ForEach-Object { $keys[$_] })
-    $steps.Add(@{Keys=$directionKeys;Ms=50});$steps.Add(@{Keys=$directionKeys + $attackKeys;Ms=50})
+    $steps.Add(@{Keys=$directionKeys;Ms=50});$steps.Add(@{Keys=$directionKeys + $attackKeys;Ms=$attackMs})
+    if($button -eq 'AA') { $steps.Add(@{Keys=$directionKeys;Ms=100});$steps.Add(@{Keys=$directionKeys + $attackKeys;Ms=50}) }
   }
   $steps.Add(@{Keys=@();Ms=0})
   if ($dryRun) { return $steps.ToArray() }
@@ -96,7 +107,13 @@ function Invoke-Move($request, [bool]$dryRun = $false) {
     foreach($step in $steps){ Check-Focus; $next=[System.Collections.Generic.HashSet[string]]::new(); foreach($key in $step.Keys){[void]$next.Add($key)}
       foreach($key in @($held)){if(-not $next.Contains($key)){[LabatarTrainingInputWorker]::SendKey($key,$false);[void]$held.Remove($key)}}
       foreach($key in $step.Keys){if($held.Add($key)){[LabatarTrainingInputWorker]::SendKey($key,$true)}}
-      if($step.Ms){Start-Sleep -Milliseconds $step.Ms}
+      $remaining = [int]$step.Ms
+      while ($remaining -gt 0) {
+        $slice = [Math]::Min(50, $remaining)
+        Start-Sleep -Milliseconds $slice
+        $remaining -= $slice
+        Check-Focus
+      }
     }
   } finally { foreach($key in @($held)){[LabatarTrainingInputWorker]::SendKey($key,$false)} }
 }

@@ -338,7 +338,9 @@ const currentPositionMarkerSx = {
 function debugFramebarColor(state: string | undefined) {
   if (state === "idle") return "#00ccff";
   if (state === "hitpause") return "#ff66ff";
-  if (state === "active") return "#ff0066";
+  if (state === "multihit-gap") return "#e5b02b";
+  if (state === "flow-stance") return "#2ec0ca";
+  if (state?.startsWith("active")) return "#ff0066";
   return "#ffffff";
 }
 
@@ -410,6 +412,7 @@ export function RecordingViewer({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [chapters, setChapters] = useState<RecordingChapter[]>([]);
+  const [chaptersLoadedRecordingId, setChaptersLoadedRecordingId] = useState<string | null>(null);
   const [chapterLoadError, setChapterLoadError] = useState<string | null>(null);
   const [chapterRefreshToken, setChapterRefreshToken] = useState(0);
   const [reviewFrame, setReviewFrame] = useState<ExactReviewFrame | null>(null);
@@ -569,6 +572,7 @@ export function RecordingViewer({
   useEffect(() => {
     let cancelled = false;
     setChapters([]);
+    setChaptersLoadedRecordingId(null);
     setChapterLoadError(null);
     if (
       !active ||
@@ -581,7 +585,10 @@ export function RecordingViewer({
     }
     void window.electronAPI.recordings.getChapters({ recordingId: selectedRecording.id }).then(
       (nextChapters) => {
-        if (!cancelled) setChapters(nextChapters);
+        if (!cancelled) {
+          setChapters(nextChapters);
+          setChaptersLoadedRecordingId(selectedRecording.id);
+        }
       },
       (loadError) => {
         if (!cancelled)
@@ -932,7 +939,7 @@ export function RecordingViewer({
   }, [clipRange, loadRecordings, selectedRecording]);
 
   const trimClip = useCallback(async () => {
-    if (!window.electronAPI?.recordings || !selectedRecording?.clip || trimmingClip) return;
+    if (!window.electronAPI?.recordings || !selectedRecording || trimmingClip) return;
     setConfirmTrim(false);
     setTrimmingClip(true);
     setClipExportNotice(null);
@@ -959,9 +966,7 @@ export function RecordingViewer({
       setClipMode(false);
       setChapterRefreshToken((token) => token + 1);
       await loadRecordings();
-      setClipExportNotice(
-        `Trimmed ${result.recording.name}. Original video and metadata are backed up at ${result.backupPath} and ${result.backupManifestPath}.`,
-      );
+      setClipExportNotice(`Trimmed ${result.recording.name}.`);
     } catch (trimError) {
       setClipExportError(trimError instanceof Error ? trimError.message : String(trimError));
     } finally {
@@ -1242,11 +1247,14 @@ export function RecordingViewer({
           useSavedCalibration
             ? selectedRecording.analysis?.processingSnapshot?.configuration
             : undefined,
+          selectedRecording.moveTake?.moveLabel,
         );
-        const analysisWithOverrides = applyManualInputStateOverrides(
-          analysis,
-          selectedRecording.analysis?.stateOverrides ?? [],
-        );
+        const analysisWithOverrides = selectedRecording.moveTake
+          ? analysis
+          : applyManualInputStateOverrides(
+              analysis,
+              selectedRecording.analysis?.stateOverrides ?? [],
+            );
         const updated = await window.electronAPI.recordings.saveAnalysis({
           recordingId: selectedRecording.id,
           analysis: analysisWithOverrides,
@@ -1378,18 +1386,6 @@ export function RecordingViewer({
     [recordings, selectedRecording],
   );
 
-  const trimUnavailableReason = !selectedRecording?.clip
-    ? ""
-    : linkedClips.length > 0
-      ? "This clip has child clips that would point to the wrong footage after trimming."
-      : selectedRecording.youtubeUrl
-        ? "Remove the YouTube link before trimming this clip."
-        : selectedRecording.analysis || selectedRecording.moveTake
-          ? "This clip has analysis or move evidence linked to its current timing."
-          : clipRange[0] < 0.05 && clipRange[1] >= duration - 0.05
-            ? "Select a shorter range to trim."
-            : "";
-
   const linkedTechCombos = useMemo(
     () =>
       selectedRecording
@@ -1401,6 +1397,33 @@ export function RecordingViewer({
         : [],
     [selectedRecording, techCatalog],
   );
+
+  const canOfferTrim = Boolean(
+    selectedRecording?.clip ||
+    (selectedRecording?.name.toLowerCase().endsWith(".mp4") &&
+      chaptersLoadedRecordingId === selectedRecording.id &&
+      chapters.length === 0),
+  );
+  const trimUnavailableReason = !selectedRecording
+    ? ""
+    : linkedClips.length > 0
+      ? "This recording has child clips that would point to the wrong footage after trimming."
+      : linkedTechCombos.length > 0
+        ? "This recording has linked tech with timestamps that trimming would invalidate."
+        : selectedRecording.youtubeUrl
+          ? "Remove the YouTube link before trimming this recording."
+          : selectedRecording.analysis ||
+              selectedRecording.analysisHistory?.length ||
+              selectedRecording.moveTake ||
+              selectedRecording.metadata ||
+              selectedRecording.games.length > 0 ||
+              selectedRecording.replays.length > 0 ||
+              selectedRecording.replayPath ||
+              selectedRecording.replayFileName
+            ? "This recording has linked match, move, or analysis data."
+            : clipRange[0] < 0.05 && clipRange[1] >= duration - 0.05
+              ? "Select a shorter range to trim."
+              : "";
 
   const selectLinkedCombo = (combo: TechCombo) => {
     localStorage.setItem(techSelectedComboStorageKey, combo.id);
@@ -2538,11 +2561,11 @@ export function RecordingViewer({
         </Dialog>
 
         <Dialog open={confirmTrim} onClose={() => !trimmingClip && setConfirmTrim(false)}>
-          <DialogTitle>Trim and replace this clip?</DialogTitle>
+          <DialogTitle>Trim and replace this recording?</DialogTitle>
           <DialogContent>
             <Typography>
-              This re-encodes the selected range and replaces the clip at its current location. The
-              original MP4 and its metadata will be kept as backup files in the same folder.
+              This re-encodes the selected range and permanently replaces the video and its metadata
+              at their current location.
             </Typography>
           </DialogContent>
           <DialogActions>
@@ -2747,7 +2770,11 @@ export function RecordingViewer({
                         : `${move.onBlock >= 0 ? "+" : ""}${move.onBlock}`}{" "}
                       · on hit{" "}
                       {move.onHit == null ? "?" : `${move.onHit >= 0 ? "+" : ""}${move.onHit}`} Â·
-                      hits {move.hits?.length ?? "?"} Â· hitboxes{" "}
+                      hits {move.hits?.length ?? "?"}
+                      {move.hits && move.hits.length > 1
+                        ? ` (${move.hits.map((hit) => hit.notation ?? hit.index).join(", ")})`
+                        : ""}{" "}
+                      Â· hitboxes{" "}
                       {move.hitboxStatus === "detected"
                         ? "available"
                         : move.hitboxStatus === "not-found"
@@ -3604,28 +3631,35 @@ export function RecordingViewer({
                     ))}
                   </Box>
                 )}
-                {clipMode ? (
-                  <>
+                {clipMode && (
+                  <Box sx={{ px: 0.5 }}>
+                    <Box sx={{ display: "flex", justifyContent: "space-between", px: 0.5 }}>
+                      <Typography variant="caption" color="text.secondary">
+                        Viewer
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {formatVideoTime(currentTime)} / {formatVideoTime(duration)}
+                      </Typography>
+                    </Box>
                     <Slider
-                      aria-label="Clip start and end"
+                      aria-label="Video timeline"
                       size="small"
-                      value={clipRange}
                       marks={duration ? [{ value: Math.min(currentTime, duration) }] : undefined}
                       min={0}
                       max={duration || 0}
                       step={0.01}
-                      disableSwap
-                      valueLabelDisplay="auto"
-                      valueLabelFormat={(value) => formatVideoTime(value)}
+                      value={Math.min(currentTime, duration || 0)}
                       onChange={(_, value) => {
-                        if (!Array.isArray(value)) return;
-                        const [start, end] = value;
-                        if (start == null || end == null) return;
-                        setClipRange([start, end]);
-                        if (start !== clipRange[0]) {
-                          seekTo(start);
-                        } else if (currentTime > end) {
-                          seekTo(end);
+                        scrubbing.current = true;
+                        seekTo(Array.isArray(value) ? value[0] : value);
+                      }}
+                      onChangeCommitted={() => {
+                        scrubbing.current = false;
+                        if (videoRef.current) {
+                          currentFrameIndex.current = frameIndexForTime(
+                            videoRef.current.currentTime,
+                          );
+                          setCurrentTime(videoRef.current.currentTime);
                         }
                       }}
                       sx={{
@@ -3646,6 +3680,51 @@ export function RecordingViewer({
                       }}
                       disabled={!duration}
                     />
+                  </Box>
+                )}
+                {clipMode ? (
+                  <>
+                    <Box sx={{ px: 0.5 }}>
+                      <Box sx={{ display: "flex", justifyContent: "space-between", px: 0.5 }}>
+                        <Typography variant="caption" color="text.secondary">
+                          Clip boundaries
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {formatVideoTime(clipRange[0])} – {formatVideoTime(clipRange[1])}
+                        </Typography>
+                      </Box>
+                      <Slider
+                        aria-label="Clip boundaries"
+                        size="small"
+                        value={clipRange}
+                        marks={duration ? [{ value: Math.min(currentTime, duration) }] : undefined}
+                        min={0}
+                        max={duration || 0}
+                        step={0.01}
+                        disableSwap
+                        valueLabelDisplay="auto"
+                        valueLabelFormat={(value) => formatVideoTime(value)}
+                        onChange={(_, value) => {
+                          if (!Array.isArray(value)) return;
+                          const [start, end] = value;
+                          if (start != null && end != null) setClipRange([start, end]);
+                        }}
+                        sx={{
+                          ...currentPositionMarkerSx,
+                          "& .MuiSlider-rail": {
+                            opacity: 1,
+                            backgroundColor: "action.disabledBackground",
+                            height: 4,
+                          },
+                          "& .MuiSlider-track": {
+                            border: 0,
+                            backgroundColor: "primary.main",
+                            height: 4,
+                          },
+                        }}
+                        disabled={!duration}
+                      />
+                    </Box>
                     <Stack
                       direction={{ xs: "column", sm: "row" }}
                       spacing={1}
@@ -3678,10 +3757,10 @@ export function RecordingViewer({
                       >
                         {exportingClip ? "Exporting..." : "Export clip"}
                       </Button>
-                      {selectedRecording.clip && (
+                      {canOfferTrim && (
                         <Tooltip
                           title={
-                            trimUnavailableReason || "Replace this clip with the selected range."
+                            trimUnavailableReason || "Replace this video with the selected range."
                           }
                         >
                           <span>

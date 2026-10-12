@@ -20,7 +20,7 @@ function validateProcessingConfiguration(value, detectorKeys) {
     value.calibrationProfileVersion !== undefined &&
     (!Number.isSafeInteger(value.calibrationProfileVersion) ||
       value.calibrationProfileVersion < 1 ||
-      value.calibrationProfileVersion > 2)
+      value.calibrationProfileVersion > 6)
   ) {
     fail("calibrationProfileVersion");
   }

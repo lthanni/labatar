@@ -4,5 +4,6 @@ export type DevBlackoutStatus = {
   active: boolean;
   busy: boolean;
   restorePending: boolean;
+  testedCharacter: string | null;
   error: string | null;
 };

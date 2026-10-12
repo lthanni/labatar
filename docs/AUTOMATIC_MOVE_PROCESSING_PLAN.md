@@ -8,21 +8,26 @@ isolation test.
 
 ## Dev-only blackout launch
 
-The Dev-only capture tab now offers **Start game in blackout mode** when
-`Atla.exe` is closed. It verifies the selected game's four shipped PAK hashes,
-copies and verifies originals under the dev user-data `blackout-game-backups`
-directory, installs the previously tested Water Tribe, Korra/Naga, and HUD
-replacement PAKs, plus a targeted `hitspark.pak` shadow replacement, then launches `Atla.exe`. A detached watcher restores the
-original PAKs after the game exits; the backup copies remain available. A
-saved session manifest lets a later app launch recover an interrupted install
-or restore. Changed game versions fail the hash check before installation.
+The Dev-only capture tab offers **Start game in blackout mode** when `Atla.exe`
+is closed. The selected fighter determines the profile. It verifies and backs
+up the original Water Tribe, HUD, hitspark, and all playable fighter PAKs before
+installing their replacements and launching the game. Every support sprite is
+transparent. The selected fighter remains visible. For Korra tests, Zuko also
+remains visible as a target, while his support sprites are transparent. All
+other fighter sprites are transparent, regardless of the Player 2 choice. The training frame
+meter remains in its separate unmodified PAK. A detached watcher restores the
+original PAKs after exit. It reuses one verified original backup set across
+sessions, so each launch does not add another full copy. A saved
+session manifest lets a later app launch recover an interrupted install or
+restore. Changed game versions fail the hash check before installation.
 
-Manual move arming, manual move recording, automatic move capture, and recording
-starts from the Dev-only tab require a running game with all four installed
-PAKs matching the blackout replacements, plus an OBS connection. The asset
-check works whether Labatar launched the game or the matching PAKs were installed
-before opening it. Labatar restores originals automatically only for sessions
-it prepared and backed up. An already open game disables the launch button.
+Manual move arming, move-take recording, and automatic move capture require a
+running game with the selected fighter's verified blackout profile and an OBS
+connection. Ordinary manual and automatic match recording do not depend on the
+current tab or blackout. The asset check works whether Labatar launched the
+game or the matching PAKs were installed before opening it. Labatar restores
+originals automatically only for sessions it prepared and backed up. An
+already open game disables the launch button.
 An active blackout hides that button. An automatic pass, an active recording, or
 OBS work locks conflicting manual controls and explains the reason in the panel.
 Reviewing and processing saved move videos remains available after the game closes. The
@@ -61,11 +66,12 @@ frames, recovery, contact, or hitbox geometry.
 - The existing file reader extracts type-6 portrait images from PAK archives.
   A separate test builder has now produced transparent type-3 and type-6
   `.munged` frames in replacement PAKs that the game accepts.
-- The current move processor reads the visible input history, framebars, and
-  colored overlay boxes. Its Electron frame reader returns 60 as a fixed rate
-  and transcodes decoded frames to JPEG before analysis. The managed OBS profile
-  targets 60 fps. The existing image quality may already be sufficient for
-  reviewable snapshots; timing accuracy still needs validation.
+- Per-move take processing reads the framebars and colored overlay boxes, and
+  takes move identity from the selected capture. It does not read input history.
+  General recording analysis retains input detection for later features. The
+  Electron frame reader returns 60 as a fixed rate and transcodes decoded frames
+  to JPEG before analysis. The managed OBS profile targets 60 fps; timing
+  accuracy still needs validation.
 - A local test confirmed that replacing the shipped `watertribe.pak` with an
   edited copy changes the selectable Water Tribe stage. The character and
   training HUD remained visible when its visual layers and stage sprites were
@@ -86,14 +92,27 @@ frames, recovery, contact, or hitbox geometry.
   started and stopped recording. It processes pending videos before its final
   evidence-acceptance action; it has no separate pre-processing video approval.
 
-## First delivery: automatic whiff capture
+## Automatic move capture by outcome
+
+Dev-only Capture has a data selection: Whiff, Block, Hit grounded, or Hit airborne.
+The selection controls the automatic queue, manual gather, move cards, completion
+count, playback, and Process all. A move leaves the visible list when its selected
+outcome has accepted processed evidence (or is marked not applicable); Show
+completed moves can reveal it again. An existing take blocks automation only
+for the selected outcome. The game training setup still determines whether the
+opponent blocks or is grounded or airborne. Labatar does not control Player 2
+for these passes, so each video needs review before processing.
+
+The capture manifest records the selected outcome. Older saved automatic runs
+without an outcome remain whiff runs when resumed.
 
 The first implementation has the nonstandard catalog tag, recipe queue
 preview, packaged Windows input worker, Electron capture runner, persisted
 pause/resume state, one-MP4-per-move manifest, and video approval gate. The UI
 queues `1`–`9`, `236`, and `214`, optionally prefixed with `j.`, followed by
-`A`, `B`, `C`, `F`, or `EX` (`A+B`). For `j.` moves, the input worker presses
-jump, releases it, pauses briefly, then sends the listed input. Player 1's
+`A`, `B`, `C`, `F`, or `EX` (`A+B`), plus grounded `2AA` and `5AA`. For `j.`
+moves, the input worker presses jump, releases it, pauses briefly, then sends
+the listed input. Player 1's
 keyboard bindings determine the physical keys;
 directions are relative to the selected facing. Only `5A` and right-facing
 `236A` have been confirmed in game. Other recipes need video review, and their
@@ -113,14 +132,14 @@ move data during the capture pass. The user's requested per-move order is:
    `StartRecord` acknowledgment. Leave a short recorded neutral lead-in.
 3. Send the move's input sequence. Release every key, then wait two seconds
    from the final key release.
-4. Send and release training reset again. Stop OBS recording after the reset
-   has registered.
+4. Stop OBS recording before sending another training reset.
 5. Await `StopRecord`, MP4 finalization, move-take manifest creation, and file
-   existence. Record the result, then advance to the next eligible move.
+   existence. Record the result. Before the next eligible move, send and release
+   training reset outside the recording, then start the next clip.
 
 The two-second tail is the first-release default. A move known to have
 animation or recovery longer than that needs a longer recipe or a manual take;
-if a reset cuts off a move, video review rejects the clip. The script schedules
+if recording stops before the move finishes, video review rejects the clip. The script schedules
 inputs by wall-clock time, so the recorded input history and frame meter remain
 the timing evidence. No injected timestamp is treated as a game-frame number.
 
@@ -135,10 +154,16 @@ always skips tagged moves and shows them in a manual-capture list.
 An untagged move enters the automated queue when it has a supported recipe
 and its selected evidence slot is missing or needs redo. Supported recipes are
 `1`–`9`, `236`, and `214` with `A`, `B`, `C`, `F`, or `EX`, with an optional
-`j.` prefix for jump attacks. Jump attacks use the same grounded reset point;
-the worker sends jump before the motion or attack.
+`j.` prefix for jump attacks, plus grounded `2AA` and `5AA`. AA sends two
+separate A taps while holding Down for `2AA`. Its recording contains the base
+`2A` or `5A` episode before the AA follow-up. Processing links the second
+episode to AA only when both episodes are detected. Jump attacks use the same
+grounded reset point; the worker sends jump before the motion or attack.
 The runner sends `EX` by pressing the configured `A` and `B` keys together.
-It skips charged/held inputs, stance entries and followups,
+Bracketed charged inputs (such as `5[C]` or `236[EX]`) hold their attack
+button(s) for the pass's configured 100–5000 ms duration (1000 ms by default).
+The recorded recipe saves that duration; video review must confirm that the
+charged move actually activated. It skips stance entries and followups,
 `SUP`/`X`, and any notation without a recipe. Record a skip reason for each,
 without silently changing its `nonstandard` tag. The user can still record
 those moves through the existing manual gather controls. A supported recipe
@@ -196,16 +221,18 @@ rejected clip stays inspectable in the archive and returns its slot to the
 retry queue. Approval makes the take eligible for **Process approved**; it
 does not write measured values to Tech -> Moves.
 
-Processing then uses the existing input/framebar validation and preserves its
-analysis history. After processing, the existing evidence review can accept
-source-linked measurements or reject an ambiguous take. Legacy/manual takes
-without this new video-review field retain their existing workflow. Do not
-auto-accept a move solely because the scheduled input matches its notation.
+Per-move processing uses the framebar to find a move episode and preserves its
+analysis history. The selected capture supplies the move identity after video
+approval; input OCR and input matching are skipped. Exactly one detected episode
+is required to link measurements. Zero or multiple episodes need review or a
+retake. The existing evidence review still controls when measured values are
+accepted into Tech -> Moves. Manual takes use their selected move identity too.
 
-The Dev-only capture list offers a confirmed **Delete video** action for
-captured, pending move videos that have not been processed, including automated
-videos still awaiting visual approval. It removes the MP4 and its manifest;
-processed or accepted evidence cannot be deleted through this action.
+The Dev-only capture list offers a confirmed **Delete take** action for
+finalized move videos, including processed and accepted takes. It removes the
+MP4 and its manifest and clears Tech measurements sourced from that take.
+Automated videos awaiting visual approval can also be rejected, which deletes
+their MP4 and manifest.
 
 ### Implementation and verification order
 
@@ -218,7 +245,8 @@ processed or accepted evidence cannot be deleted through this action.
    exists, treat the input acknowledgment as delivery only and use the
    one-move clip and later video review to confirm the reset effect.
 3. Implement one-move orchestration in Electron: reset, OBS start, input,
-   two-second tail, reset, OBS stop, saved-manifest check. Confirm a real 60 fps
+   two-second tail, OBS stop, saved-manifest check, reset before the next clip.
+   Confirm a real 60 fps
    recording and correct move-take association.
 4. Add the queue, progress/pause/cancel/resume controls, persistent run state,
    and per-move errors. Test sequencing with a fake input worker and fake OBS
@@ -425,12 +453,13 @@ For one Aang/Gyatso move, use this order:
    mark an OBS recording, execute one catalog move, and leave a long enough
    neutral tail. Save the intended input, actual injected event times, OBS file,
    game version, and isolation-profile hashes together.
-4. Process the recording and verify the observed input and framebar before
-   accepting snapshots or phase counts. Retry or flag ambiguous takes rather
-   than attributing frames to the intended move by schedule alone.
+4. Review the capture, then process its framebar and overlays. Accept snapshots
+   or phase counts only when one episode is linked to the selected move; retry
+   or review clips with zero or multiple episodes.
 5. Expand to a catalog queue only after one move repeats reliably. Charged
-   inputs, airborne moves, meter-dependent moves, stance followups, side
-   reversal, and different hit situations each need explicit setup and checks.
+   inputs now use a configurable button hold but still need video confirmation;
+   airborne moves, meter-dependent moves, stance followups, side reversal, and
+   different hit situations each need explicit setup and checks.
 
 The controller script is an execution aid, not a frame clock. Use the recording
 and visible framebar to measure timing. The normal and isolated takes may need

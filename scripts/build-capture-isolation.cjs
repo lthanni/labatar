@@ -136,11 +136,40 @@ function transparentMunged(raw) {
 }
 
 const BLOB_SHADOW_ENTRY = "srcdata/munged/frames/sprites~hitspark~blob_shadow~frames~circle.munged";
+const CHARACTER_PACKAGES = new Set([
+  "aang.pak",
+  "aang_avchar.pak",
+  "korra.pak",
+  "korra_nightmare.pak",
+  "zuko.pak",
+  "katara.pak",
+  "toph.pak",
+  "sokka.pak",
+  "azula.pak",
+  "kyoshi.pak",
+  "ozai.pak",
+  "zaheer.pak",
+]);
 
-function buildHiddenImagesPak(source, destination) {
+function isSupportImage(name) {
+  return (
+    name.includes("~supportchar~") ||
+    name.includes("~aang~idle~stand~momo_frames~") ||
+    name.includes("~aang~poses~lose~momo~") ||
+    name.includes("~aang~poses~match_win~frames_appa~")
+  );
+}
+
+function buildHiddenImagesPak(source, destination, mode = "default") {
   const packageName = path.basename(source).toLowerCase();
-  if (packageName !== "korra.pak" && packageName !== "hud.pak" && packageName !== "hitspark.pak") {
-    throw new Error("This builder only accepts the Korra, fight HUD, or hitspark package.");
+  if (mode === "default") {
+    if (!["korra.pak", "hud.pak", "hitspark.pak"].includes(packageName)) {
+      throw new Error(
+        "The default builder only accepts the Korra, fight HUD, or hitspark package.",
+      );
+    }
+  } else if (!CHARACTER_PACKAGES.has(packageName) || !["all", "supports"].includes(mode)) {
+    throw new Error("Character isolation requires a supported fighter package and mode.");
   }
   if (path.resolve(source).toLowerCase() === path.resolve(destination).toLowerCase()) {
     throw new Error("Source and destination must differ.");
@@ -162,9 +191,11 @@ function buildHiddenImagesPak(source, destination) {
     for (const entry of entries) {
       const sourceBytes = readAt(sourceFd, entry.bytes, entry.offset);
       const replace =
-        packageName === "hitspark.pak"
-          ? entry.name === BLOB_SHADOW_ENTRY
-          : entry.name.endsWith(".munged");
+        entry.name.endsWith(".munged") &&
+        (mode === "all" ||
+          (mode === "supports" && isSupportImage(entry.name)) ||
+          (mode === "default" &&
+            (packageName !== "hitspark.pak" || entry.name === BLOB_SHADOW_ENTRY)));
       const bytes = replace ? transparentMunged(sourceBytes) : sourceBytes;
       if (replace) {
         changed++;
@@ -208,15 +239,15 @@ function buildHiddenImagesPak(source, destination) {
 }
 
 if (require.main === module) {
-  const [source, destination] = process.argv.slice(2);
+  const [source, destination, mode = "default"] = process.argv.slice(2);
   if (!source || !destination) {
     process.stderr.write(
-      "Usage: node scripts/build-capture-isolation.cjs <korra.pak|hud.pak|hitspark.pak> <output.pak>\n",
+      "Usage: node scripts/build-capture-isolation.cjs <source.pak> <output.pak> [default|all|supports]\n",
     );
     process.exitCode = 2;
   } else {
     try {
-      process.stdout.write(`${JSON.stringify(buildHiddenImagesPak(source, destination))}\n`);
+      process.stdout.write(`${JSON.stringify(buildHiddenImagesPak(source, destination, mode))}\n`);
     } catch (error) {
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
       process.exitCode = 1;
@@ -224,4 +255,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildHiddenImagesPak, pakEntries, solidLz4, transparentMunged };
+module.exports = { buildHiddenImagesPak, pakEntries, solidLz4, transparentMunged, isSupportImage };

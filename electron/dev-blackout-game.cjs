@@ -8,16 +8,70 @@ const { performance } = require("node:perf_hooks");
 const execFileAsync = promisify(execFile);
 const originals = {
   "watertribe.pak": "2138e9227a2948fe19fe77cc4bfc1b34c6a9265525b757a856db6f911a98ba78",
+  "aang.pak": "7dd391498a460b7c17478caf66565bc58f3c0e3e6e7888a655ce564e31a36dca",
+  "aang_avchar.pak": "7f6a32b5b1b1a14eb28132e3ffc8d9e0548f621b24215907bcbd7d9bf6f91e8a",
   "korra.pak": "b2241aac58acd890026c084e6f2e8e677e995a3bdf3f9c3701ebe0cc338f6559",
+  "korra_nightmare.pak": "841110a58e855cdc24723b6c31a43666dceea13bc8f6fd3b357732a925b2f9bd",
+  "zuko.pak": "1eb34e107cefe54ac64d2edf9aeb760020ba981782c7d3fa12902eb64a9c61df",
+  "katara.pak": "20172cab2412a67baca64d0fcc0488f5671da419cb30e70a934631de6b5262fe",
+  "toph.pak": "fa3be37815653520b7e07f711c49e24c8ec03dff9e38887068f7359c57cec547",
+  "sokka.pak": "e7cc1cee06aaf4e52d1f9da20ee485fb2fb076fcbea1ea3407d99d357f6e8205",
+  "azula.pak": "1777db294988fc6c0a34a0a154d5f5d4c630b90d54d6c1b45363cdaa14b35655",
+  "kyoshi.pak": "bc42257f9c888c210cdb00d1e957cc239d74d85cb478eb7ac6c92b9efa9ccf25",
+  "ozai.pak": "fc428470788cbade023dc2763ae6412e4cd8b3b3053800ae68685448a3669f38",
+  "zaheer.pak": "f8fc45e31b39b91426a7f1fbccb02abefaecdbd92c8a138d3343bcf25bff812c",
   "hud.pak": "24b0d04eb5288f28a9e0d28b6b22985e7e81f3a6ea611ef9f6f192acac0e1ce1",
   "hitspark.pak": "968d716ac1f14ff00544712e5e1ab768ca32d4b50ec2b0a7ca4a085fa6cc2aa8",
 };
-const replacements = {
-  "watertribe.pak": "watertribe-no-visuals-no-shadow.pak",
-  "korra.pak": "korra-hidden.pak",
-  "hud.pak": "hud-hidden.pak",
-  "hitspark.pak": "hitspark-no-blob-shadow.pak",
+const characterPackages = {
+  Aang: "aang.pak",
+  "Avatar Aang": "aang_avchar.pak",
+  Korra: "korra.pak",
+  "Nightmare Korra": "korra_nightmare.pak",
+  Zuko: "zuko.pak",
+  Katara: "katara.pak",
+  Toph: "toph.pak",
+  Sokka: "sokka.pak",
+  Azula: "azula.pak",
+  Kyoshi: "kyoshi.pak",
+  Ozai: "ozai.pak",
+  Zaheer: "zaheer.pak",
 };
+
+function replacementPlan(testedCharacter = "Aang") {
+  if (!Object.hasOwn(characterPackages, testedCharacter)) {
+    throw new Error("Select a supported test character before blackout launch.");
+  }
+  const testedPackage = characterPackages[testedCharacter];
+  const plan = {
+    "hud.pak": "hud-hidden.pak",
+  };
+  for (const packageName of Object.values(characterPackages)) {
+    const base = path.basename(packageName, ".pak");
+    const keepFighter =
+      packageName === testedPackage || (testedCharacter === "Korra" && packageName === "zuko.pak");
+    plan[packageName] = `${base}-${keepFighter ? "supports" : "all"}-hidden.pak`;
+  }
+  plan["hitspark.pak"] = "hitspark-no-blob-shadow.pak";
+  plan["watertribe.pak"] = "watertribe-no-visuals-no-shadow.pak";
+  return plan;
+}
+
+const replacements = replacementPlan();
+
+function sessionMatchesProfile(session) {
+  if (!session?.testedCharacter) return false;
+  let plan;
+  try {
+    plan = replacementPlan(session.testedCharacter);
+  } catch {
+    return false;
+  }
+  return (
+    session.files?.length === Object.keys(plan).length &&
+    session.files.every((file) => plan[file.name] === path.basename(file.source))
+  );
+}
 
 async function sha256(filePath) {
   const hash = crypto.createHash("sha256");
@@ -67,7 +121,8 @@ function readSession(backupRoot) {
   if (
     session.version !== 1 ||
     !Array.isArray(session.files) ||
-    (session.files.length !== 3 && session.files.length !== 4)
+    session.files.length < 3 ||
+    session.files.length > Object.keys(originals).length
   ) {
     throw new Error(
       "The blackout recovery manifest is invalid; installed files were left untouched.",
@@ -83,15 +138,21 @@ function writeSession(backupRoot, session) {
   fs.renameSync(temporary, sessionPath(backupRoot));
 }
 
-async function prepareSession({ gameRoot, sourceRoot, backupRoot, expectedOriginals = originals }) {
+async function prepareSession({
+  gameRoot,
+  sourceRoot,
+  backupRoot,
+  testedCharacter = "Aang",
+  expectedOriginals = originals,
+}) {
   if (readSession(backupRoot)) throw new Error("Restore the existing blackout session first.");
   const executable = path.join(gameRoot, "Atla.exe");
   if (!(await fs.promises.stat(executable).catch(() => null))?.isFile()) {
     throw new Error("The selected game folder does not contain Atla.exe.");
   }
-  const backupDir = path.join(backupRoot, `originals-${Date.now()}-${crypto.randomUUID()}`);
+  const backupDir = path.join(backupRoot, "verified-originals");
   const files = [];
-  for (const [name, replacementName] of Object.entries(replacements)) {
+  for (const [name, replacementName] of Object.entries(replacementPlan(testedCharacter))) {
     const target = path.join(gameRoot, "data_packages", name);
     const source = path.join(sourceRoot, replacementName);
     const originalHash = expectedOriginals[name];
@@ -112,7 +173,20 @@ async function prepareSession({ gameRoot, sourceRoot, backupRoot, expectedOrigin
   }
   await fs.promises.mkdir(backupDir, { recursive: true });
   for (const file of files) {
-    await fs.promises.copyFile(file.target, file.backup, fs.constants.COPYFILE_EXCL);
+    if (!(await fs.promises.stat(file.backup).catch(() => null))) {
+      const temporary = `${file.backup}.${crypto.randomUUID()}.tmp`;
+      try {
+        await fs.promises.copyFile(file.target, temporary, fs.constants.COPYFILE_EXCL);
+        if ((await sha256(temporary)) !== file.originalHash) {
+          throw new Error(`Backup verification failed for ${file.name}.`);
+        }
+        if (!(await fs.promises.stat(file.backup).catch(() => null))) {
+          await fs.promises.rename(temporary, file.backup);
+        }
+      } finally {
+        await fs.promises.rm(temporary, { force: true });
+      }
+    }
     if ((await sha256(file.backup)) !== file.originalHash) {
       throw new Error(`Backup verification failed for ${file.name}.`);
     }
@@ -123,6 +197,7 @@ async function prepareSession({ gameRoot, sourceRoot, backupRoot, expectedOrigin
     backupRoot,
     backupDir,
     phase: "installing",
+    testedCharacter,
     createdAt: Date.now(),
     files,
   };
@@ -148,18 +223,50 @@ async function verifyInstalled(session) {
   return true;
 }
 
-async function verifyInstalledAssets({ gameRoot, sourceRoot }) {
-  for (const [name, replacementName] of Object.entries(replacements)) {
+async function matchingReplacementPlan(gameRoot, sourceRoot, plan, hashCache = new Map()) {
+  const cachedHash = async (filePath) => {
+    if (!hashCache.has(filePath)) hashCache.set(filePath, sha256(filePath));
+    return hashCache.get(filePath);
+  };
+  for (const [name, replacementName] of Object.entries(plan)) {
     const target = path.join(gameRoot, "data_packages", name);
     const source = path.join(sourceRoot, replacementName);
     try {
-      const [targetHash, sourceHash] = await Promise.all([sha256(target), sha256(source)]);
+      const [targetStat, sourceStat] = await Promise.all([
+        fs.promises.stat(target),
+        fs.promises.stat(source),
+      ]);
+      if (!targetStat.isFile() || !sourceStat.isFile() || targetStat.size !== sourceStat.size) {
+        return false;
+      }
+      const [targetHash, sourceHash] = await Promise.all([cachedHash(target), cachedHash(source)]);
       if (targetHash !== sourceHash) return false;
     } catch {
       return false;
     }
   }
   return true;
+}
+
+async function verifyInstalledAssets({ gameRoot, sourceRoot, testedCharacter = "Aang" }) {
+  return matchingReplacementPlan(gameRoot, sourceRoot, replacementPlan(testedCharacter));
+}
+
+async function detectInstalledProfile({ gameRoot, sourceRoot }) {
+  const hashCache = new Map();
+  for (const testedCharacter of Object.keys(characterPackages)) {
+    if (
+      await matchingReplacementPlan(
+        gameRoot,
+        sourceRoot,
+        replacementPlan(testedCharacter),
+        hashCache,
+      )
+    ) {
+      return testedCharacter;
+    }
+  }
+  return null;
 }
 
 async function restoreSession(backupRoot, checkRunning = gameRunning) {
@@ -191,7 +298,7 @@ async function restoreSession(backupRoot, checkRunning = gameRunning) {
     }
     for (const file of session.files) {
       if (
-        !(file.name in originals) ||
+        !Object.hasOwn(originals, file.name) ||
         path.basename(file.target) !== file.name ||
         path.resolve(file.target) !== path.resolve(session.gameRoot, "data_packages", file.name) ||
         path.resolve(file.backup) !== path.resolve(session.backupDir, file.name)
@@ -301,6 +408,9 @@ if (require.main === module && process.argv[2] === "--watch") {
 
 module.exports = {
   originals,
+  characterPackages,
+  replacementPlan,
+  sessionMatchesProfile,
   replacements,
   sha256,
   gameRunning,
@@ -312,6 +422,7 @@ module.exports = {
   installSession,
   verifyInstalled,
   verifyInstalledAssets,
+  detectInstalledProfile,
   restoreSession,
   watchAndRestore,
 };

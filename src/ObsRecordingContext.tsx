@@ -448,13 +448,7 @@ export function useObsRecording() {
   return context;
 }
 
-export function ObsRecordingControls({
-  onOpenSettings,
-  disableCaptureStart = false,
-}: {
-  onOpenSettings: () => void;
-  disableCaptureStart?: boolean;
-}) {
+export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () => void }) {
   const {
     busy,
     state,
@@ -466,6 +460,24 @@ export function ObsRecordingControls({
     disarmMoveCapture,
     toggleAutomaticRecording,
   } = useObsRecording();
+  const [automaticMoveRunOpen, setAutomaticMoveRunOpen] = useState(false);
+  useEffect(() => {
+    const api = window.electronAPI?.moveCapture;
+    if (!api?.automaticStatus || !api.onAutomaticState) return;
+    let active = true;
+    const updateRun = (run: { status: string }) => {
+      if (active) setAutomaticMoveRunOpen(["countdown", "running", "paused"].includes(run.status));
+    };
+    const unsubscribe = api.onAutomaticState(updateRun);
+    void api
+      .automaticStatus()
+      .then(updateRun)
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
   const connected = state.status === "connected";
   const recording = state.recording.active;
   const manualRecording = recording && state.recording.source === "manual";
@@ -496,7 +508,9 @@ export function ObsRecordingControls({
             });
           }
         }}
-        disabled={busy || recording || state.status === "connecting"}
+        disabled={
+          busy || recording || state.status === "connecting" || (connected && automaticMoveRunOpen)
+        }
       >
         {state.status === "connecting"
           ? "Connecting..."
@@ -588,7 +602,11 @@ export function ObsRecordingControls({
         </Stack>
       ) : (
         <Tooltip
-          title="Monitors game logs and lets Labatar start and stop OBS recordings automatically when matches begin and end."
+          title={
+            automaticMoveRunOpen
+              ? "Finish or cancel the automatic move capture pass first."
+              : "Monitors game logs and lets Labatar start and stop OBS recordings automatically when matches begin and end."
+          }
           placement="top"
           arrow
         >
@@ -597,7 +615,7 @@ export function ObsRecordingControls({
               size="small"
               variant="contained"
               onClick={() => void toggleAutomaticRecording(true)}
-              disabled={!connected || busy || recording || disableCaptureStart}
+              disabled={!connected || busy || recording || automaticMoveRunOpen}
             >
               Start automatic recording
             </Button>
@@ -606,9 +624,13 @@ export function ObsRecordingControls({
       )}
       <Tooltip
         title={
-          manualRecording
-            ? ""
-            : "Starts an OBS recording immediately. Stop it when you are done; an armed move is saved as a move take."
+          automaticMoveRunOpen
+            ? "Finish or cancel the automatic move capture pass first."
+            : manualRecording
+              ? ""
+              : state.automation.enabled
+                ? "Stop automatic recording before starting a manual recording."
+                : "Starts an OBS recording immediately. Stop it when you are done; an armed move is saved as a move take."
         }
         placement="top"
         arrow
@@ -622,7 +644,8 @@ export function ObsRecordingControls({
             disabled={
               !connected ||
               busy ||
-              (!manualRecording && (recording || state.automation.enabled || disableCaptureStart))
+              automaticMoveRunOpen ||
+              (!manualRecording && (recording || state.automation.enabled))
             }
           >
             {manualRecording

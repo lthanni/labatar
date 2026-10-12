@@ -20,6 +20,10 @@ export type RecordingAnalysisHitStatus = "hit" | "blocked" | "unknown";
 export type RecordingAnalysisHit = {
   id: string;
   index: number;
+  /** Numbered attack window, such as 5B(2); absent in older analyses. */
+  notation?: string | null;
+  /** Orange framebar cells between this attack window and the preceding one. */
+  gapBeforeFrames?: number;
   status: RecordingAnalysisHitStatus;
   startTime: number;
   endTime: number;
@@ -146,6 +150,8 @@ export type RecordingAnalysisDiagnosticFrame = {
   player2Groups: string;
   player1Yellow: string;
   player2Yellow: string;
+  player1PinkStripe?: string;
+  player2PinkStripe?: string;
   player1Phases: RecordingAnalysisPhases;
   player2Phases: RecordingAnalysisDefense;
   player1Meter: {
@@ -179,6 +185,8 @@ export type RecordingAnalysisTiming = {
 
 export type RecordingAnalysis = {
   schemaVersion: 1;
+  /** Per-move takes use the selected capture for identity, without reading input history. */
+  processingMode?: "move-take";
   processedAt: string;
   duration: number;
   sourceWidth: number;

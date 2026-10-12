@@ -381,16 +381,24 @@ function getEffectiveStartup(
   return parent.stanceMinimumDuration + move.startup;
 }
 
-function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMove) => void }) {
-  const moveTableColumns = "minmax(220px, 1fr) repeat(8, 76px) 92px";
+function MoveList({
+  moves,
+  selectedMoveId,
+  onEdit,
+}: {
+  moves: TechMove[];
+  selectedMoveId: string | null;
+  onEdit: (move: TechMove) => void;
+}) {
+  const moveTableColumns = "minmax(220px, 1fr) repeat(8, 64px)";
   return (
     <Paper variant="outlined" sx={{ overflowX: "auto" }}>
       <Box
         sx={{
           display: "grid",
           gridTemplateColumns: moveTableColumns,
-          columnGap: 1.5,
-          minWidth: 960,
+          columnGap: 1,
+          minWidth: 850,
           px: 2,
           py: 1,
           bgcolor: "action.hover",
@@ -407,9 +415,6 @@ function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMov
             </Typography>
           ),
         )}
-        <Typography variant="caption" sx={{ fontWeight: 700 }}>
-          Actions
-        </Typography>
       </Box>
       {moves.length === 0 ? (
         <Typography color="text.secondary" sx={{ p: 2 }}>
@@ -427,7 +432,6 @@ function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMov
             const linkedBaseMove = move.baseMoveId
               ? moves.find((candidate) => candidate.id === move.baseMoveId)
               : null;
-            const linkedMove = linkedChargeMove ?? linkedBaseMove;
             const inputClass = classifyMoveInput(move.input, {
               allowDirectionless: Boolean(move.dependsOnMoveId),
             });
@@ -435,12 +439,14 @@ function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMov
               <ListItemButton
                 key={move.id}
                 component="div"
+                selected={selectedMoveId === move.id}
+                onClick={() => onEdit(move)}
+                aria-label={`Edit ${move.input}`}
                 sx={{
                   display: "grid",
                   gridTemplateColumns: moveTableColumns,
-                  columnGap: 1.5,
-                  minWidth: 960,
-                  cursor: "default",
+                  columnGap: 1,
+                  minWidth: 850,
                   px: 2,
                   borderLeft: move.dependsOnMoveId ? 2 : 0,
                   borderColor: "primary.main",
@@ -497,16 +503,6 @@ function MoveList({ moves, onEdit }: { moves: TechMove[]; onEdit: (move: TechMov
                 <Typography variant="body2">{frameValue(move.hitstun)}</Typography>
                 <Typography variant="body2">{move.resourceCosts.pips}</Typography>
                 <Typography variant="body2">{move.resourceCosts.flow}</Typography>
-                <Stack spacing={0.25}>
-                  <Button size="small" onClick={() => onEdit(move)}>
-                    Edit
-                  </Button>
-                  {linkedMove && (
-                    <Button size="small" onClick={() => onEdit(linkedMove)}>
-                      Linked
-                    </Button>
-                  )}
-                </Stack>
               </ListItemButton>
             );
           })}
@@ -1184,315 +1180,344 @@ export function TechSection() {
               <Typography variant="subtitle1">
                 Moves for {characters.find((option) => option.value === character)?.label}
               </Typography>
-              <MoveList moves={moves} onEdit={editMove} />
-              <Paper variant="outlined" sx={{ p: 1.5 }}>
-                <Typography variant="subtitle2">Accepted data with {support}</Typography>
-                <Typography variant="caption" color="text.secondary">
-                  Values inherit the character baseline unless this support has a separate saved
-                  move version. Select a value to open its source video.
-                </Typography>
-                {moves
-                  .filter((move) =>
-                    measuredFields.some(({ key }) =>
-                      effectiveMeasurement(catalog, character, support, move.id, key),
-                    ),
-                  )
-                  .map((move) => {
-                    const supportMove = techData.supportMoves?.find(
-                      (entry) => entry.baseMoveId === move.id && entry.support === support,
-                    );
-                    return (
-                      <Stack key={move.id} spacing={0.5} sx={{ mt: 1 }}>
-                        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                          <Typography variant="body2">{move.input}</Typography>
-                          {supportMove &&
-                            Object.keys(supportMove.measurements ?? {}).length > 0 && (
-                              <Chip size="small" label={`${support} version`} />
-                            )}
-                        </Stack>
-                        <Stack direction="row" sx={{ gap: 0.5, flexWrap: "wrap" }}>
-                          {measuredFields.map(({ key, label }) => {
-                            const value = effectiveMeasurement(
-                              catalog,
-                              character,
-                              support,
-                              move.id,
-                              key,
-                            );
-                            if (!value) return null;
-                            return (
-                              <Button
-                                key={key}
-                                size="small"
-                                variant={supportMove?.measurements[key] ? "contained" : "outlined"}
-                                onClick={() => selectLinkedRecording(value.recordingId)}
-                                title={`Source: ${value.recordingId}, frames ${value.startFrame}–${value.endFrame} at ${value.frameRate} fps`}
-                              >
-                                {label} {value.value}
-                              </Button>
-                            );
-                          })}
-                        </Stack>
-                      </Stack>
-                    );
-                  })}
-                {!moves.some((move) =>
-                  measuredFields.some(({ key }) =>
-                    effectiveMeasurement(catalog, character, support, move.id, key),
-                  ),
-                ) && (
-                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                    No accepted measurements yet.
-                  </Typography>
-                )}
-              </Paper>
-              <Paper variant="outlined" sx={{ p: 2 }}>
-                <Stack
-                  component="form"
-                  spacing={1.5}
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    saveMove();
+              <Box
+                sx={{
+                  display: "grid",
+                  gridTemplateColumns: {
+                    xs: "minmax(0, 1fr)",
+                    lg: "minmax(0, 3fr) minmax(360px, 2fr)",
+                  },
+                  gap: 2,
+                  alignItems: "start",
+                }}
+              >
+                <Stack spacing={2} sx={{ minWidth: 0 }}>
+                  <MoveList moves={moves} selectedMoveId={editingMoveId} onEdit={editMove} />
+                  <Paper variant="outlined" sx={{ p: 1.5 }}>
+                    <Typography variant="subtitle2">Accepted data with {support}</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Values inherit the character baseline unless this support has a separate saved
+                      move version. Select a value to open its source video.
+                    </Typography>
+                    {moves
+                      .filter((move) =>
+                        measuredFields.some(({ key }) =>
+                          effectiveMeasurement(catalog, character, support, move.id, key),
+                        ),
+                      )
+                      .map((move) => {
+                        const supportMove = techData.supportMoves?.find(
+                          (entry) => entry.baseMoveId === move.id && entry.support === support,
+                        );
+                        return (
+                          <Stack key={move.id} spacing={0.5} sx={{ mt: 1 }}>
+                            <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                              <Typography variant="body2">{move.input}</Typography>
+                              {supportMove &&
+                                Object.keys(supportMove.measurements ?? {}).length > 0 && (
+                                  <Chip size="small" label={`${support} version`} />
+                                )}
+                            </Stack>
+                            <Stack direction="row" sx={{ gap: 0.5, flexWrap: "wrap" }}>
+                              {measuredFields.map(({ key, label }) => {
+                                const value = effectiveMeasurement(
+                                  catalog,
+                                  character,
+                                  support,
+                                  move.id,
+                                  key,
+                                );
+                                if (!value) return null;
+                                return (
+                                  <Button
+                                    key={key}
+                                    size="small"
+                                    variant={
+                                      supportMove?.measurements[key] ? "contained" : "outlined"
+                                    }
+                                    onClick={() => selectLinkedRecording(value.recordingId)}
+                                    title={`Source: ${value.recordingId}, frames ${value.startFrame}–${value.endFrame} at ${value.frameRate} fps`}
+                                  >
+                                    {label} {value.value}
+                                  </Button>
+                                );
+                              })}
+                            </Stack>
+                          </Stack>
+                        );
+                      })}
+                    {!moves.some((move) =>
+                      measuredFields.some(({ key }) =>
+                        effectiveMeasurement(catalog, character, support, move.id, key),
+                      ),
+                    ) && (
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                        No accepted measurements yet.
+                      </Typography>
+                    )}
+                  </Paper>
+                </Stack>
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 2,
+                    minWidth: 0,
+                    position: { xs: "static", lg: "sticky" },
+                    top: 16,
+                    maxHeight: { xs: "none", lg: "calc(100vh - 32px)" },
+                    overflowY: { xs: "visible", lg: "auto" },
                   }}
                 >
-                  <Typography variant="subtitle2">
-                    {editingMoveId ? "Edit move" : "Add move"}
-                  </Typography>
-                  <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                    <TextField
-                      label="Input"
-                      placeholder={moveDraft.dependsOnMoveId ? "A or 2B" : "2B or 214C"}
-                      size="small"
-                      value={moveDraft.input}
-                      inputRef={moveInputRef}
-                      disabled={Boolean(
-                        editingMoveId &&
-                        moves.find((move) => move.id === editingMoveId)?.baseMoveId,
-                      )}
-                      onChange={(event) => {
-                        setMoveInputError(null);
-                        setMoveDraft((current) => ({ ...current, input: event.target.value }));
-                      }}
-                      error={Boolean(moveInputError)}
-                      helperText={
-                        moveInputError ??
-                        (moveDraft.dependsOnMoveId
-                          ? "Followups may use A, B, C, F, EX, SUP, or X without a direction."
-                          : "Example: 2B, j.2C, 236F, 22EX, or 5X.")
-                      }
-                      required
-                      sx={{ flex: 1 }}
-                    />
-                  </Stack>
-                  <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={
-                            moveDraft.flowCancellable ??
-                            isFlowCancellableByDefault(moveDraft.input, {
-                              allowDirectionless: Boolean(moveDraft.dependsOnMoveId),
-                            })
-                          }
-                          onChange={(event) =>
-                            setMoveDraft((current) => ({
-                              ...current,
-                              flowCancellable: event.target.checked,
-                            }))
-                          }
-                        />
-                      }
-                      label="Flow-cancellable"
-                    />
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={moveDraft.isStanceParent}
-                          onChange={(event) =>
-                            setMoveDraft((current) => ({
-                              ...current,
-                              isStanceParent: event.target.checked,
-                            }))
-                          }
-                        />
-                      }
-                      label="Stance move"
-                    />
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={moveDraft.hasChargedVersion}
-                          disabled={Boolean(
-                            editingMoveId &&
-                            moves.find((move) => move.id === editingMoveId)?.baseMoveId,
-                          )}
-                          onChange={(event) =>
-                            setMoveDraft((current) => ({
-                              ...current,
-                              hasChargedVersion: event.target.checked,
-                            }))
-                          }
-                        />
-                      }
-                      label="Has charged version"
-                    />
-                    {moveDraft.isStanceParent && (
+                  <Stack
+                    component="form"
+                    spacing={1.5}
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveMove();
+                    }}
+                  >
+                    <Typography variant="subtitle2">
+                      {editingMoveId ? "Edit move" : "Add move"}
+                    </Typography>
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
+                      <TextField
+                        label="Input"
+                        placeholder={moveDraft.dependsOnMoveId ? "A or 2B" : "2B or 214C"}
+                        size="small"
+                        value={moveDraft.input}
+                        inputRef={moveInputRef}
+                        disabled={Boolean(
+                          editingMoveId &&
+                          moves.find((move) => move.id === editingMoveId)?.baseMoveId,
+                        )}
+                        onChange={(event) => {
+                          setMoveInputError(null);
+                          setMoveDraft((current) => ({ ...current, input: event.target.value }));
+                        }}
+                        error={Boolean(moveInputError)}
+                        helperText={
+                          moveInputError ??
+                          (moveDraft.dependsOnMoveId
+                            ? "Followups may use A, AA, B, C, F, EX, SUP, or X without a direction."
+                            : "Example: 2B, 2AA, 5AA, j.2C, 236F, 22EX, or 5X.")
+                        }
+                        required
+                        sx={{ flex: 1 }}
+                      />
+                    </Stack>
+                    <Stack direction="row" sx={{ gap: 1.5, flexWrap: "wrap" }}>
                       <FormControlLabel
                         control={
-                          <Checkbox
-                            checked={moveDraft.allowsDirectionalFollowups}
+                          <Switch
+                            checked={
+                              moveDraft.flowCancellable ??
+                              isFlowCancellableByDefault(moveDraft.input, {
+                                allowDirectionless: Boolean(moveDraft.dependsOnMoveId),
+                              })
+                            }
                             onChange={(event) =>
                               setMoveDraft((current) => ({
                                 ...current,
-                                allowsDirectionalFollowups: event.target.checked,
+                                flowCancellable: event.target.checked,
                               }))
                             }
-                            size="small"
                           />
                         }
-                        label="1-9 + button followups"
+                        label="Flow-cancellable"
                       />
-                    )}
-                    {moveDraft.isStanceParent && (
-                      <TextField
-                        label="Minimum duration"
-                        type="number"
-                        size="small"
-                        value={moveDraft.stanceMinimumDuration}
-                        onChange={(event) =>
-                          setMoveDraft((current) => ({
-                            ...current,
-                            stanceMinimumDuration: event.target.value,
-                          }))
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={moveDraft.isStanceParent}
+                            onChange={(event) =>
+                              setMoveDraft((current) => ({
+                                ...current,
+                                isStanceParent: event.target.checked,
+                              }))
+                            }
+                          />
                         }
-                        sx={{ width: 150 }}
+                        label="Stance move"
                       />
-                    )}
-                    <FormControl
-                      size="small"
-                      sx={{ minWidth: 240 }}
-                      disabled={stanceParentOptions.length === 0}
-                    >
-                      <InputLabel id="tech-stance-parent-label">Depends on stance</InputLabel>
-                      <Select
-                        labelId="tech-stance-parent-label"
-                        value={selectedStanceParent}
-                        label="Depends on stance"
-                        onChange={(event) =>
-                          setMoveDraft((current) => ({
-                            ...current,
-                            dependsOnMoveId: event.target.value,
-                          }))
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={moveDraft.hasChargedVersion}
+                            disabled={Boolean(
+                              editingMoveId &&
+                              moves.find((move) => move.id === editingMoveId)?.baseMoveId,
+                            )}
+                            onChange={(event) =>
+                              setMoveDraft((current) => ({
+                                ...current,
+                                hasChargedVersion: event.target.checked,
+                              }))
+                            }
+                          />
                         }
-                      >
-                        <MenuItem value="">None</MenuItem>
-                        {stanceParentOptions.map((move) => (
-                          <MenuItem key={move.id} value={move.id}>
-                            {move.input}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  </Stack>
-                  <Typography variant="caption" color="text.secondary">
-                    If a capture situation cannot occur for this move, enter a reason. That
-                    situation will be skipped in gather mode.
-                  </Typography>
-                  <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={moveDraft.nonstandard}
+                        label="Has charged version"
+                      />
+                      {moveDraft.isStanceParent && (
+                        <FormControlLabel
+                          control={
+                            <Checkbox
+                              checked={moveDraft.allowsDirectionalFollowups}
+                              onChange={(event) =>
+                                setMoveDraft((current) => ({
+                                  ...current,
+                                  allowsDirectionalFollowups: event.target.checked,
+                                }))
+                              }
+                              size="small"
+                            />
+                          }
+                          label="1-9 + button followups"
+                        />
+                      )}
+                      {moveDraft.isStanceParent && (
+                        <TextField
+                          label="Minimum duration"
+                          type="number"
+                          size="small"
+                          value={moveDraft.stanceMinimumDuration}
                           onChange={(event) =>
                             setMoveDraft((current) => ({
                               ...current,
-                              nonstandard: event.target.checked,
+                              stanceMinimumDuration: event.target.value,
                             }))
                           }
+                          sx={{ width: 150 }}
                         />
-                      }
-                      label="Nonstandard (manual capture only)"
-                    />
-                    <TextField
-                      label="Nonstandard note"
-                      size="small"
-                      value={moveDraft.nonstandardNote}
-                      onChange={(event) =>
-                        setMoveDraft((current) => ({
-                          ...current,
-                          nonstandardNote: event.target.value,
-                        }))
-                      }
-                      sx={{ minWidth: 240 }}
-                    />
-                  </Stack>
-                  <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
-                    {moveTakeOutcomes.map((slot) => (
-                      <TextField
-                        key={slot}
+                      )}
+                      <FormControl
                         size="small"
-                        label={`${slot} not applicable reason`}
-                        value={moveDraft.notApplicable[slot] ?? ""}
+                        sx={{ minWidth: 240 }}
+                        disabled={stanceParentOptions.length === 0}
+                      >
+                        <InputLabel id="tech-stance-parent-label">Depends on stance</InputLabel>
+                        <Select
+                          labelId="tech-stance-parent-label"
+                          value={selectedStanceParent}
+                          label="Depends on stance"
+                          onChange={(event) =>
+                            setMoveDraft((current) => ({
+                              ...current,
+                              dependsOnMoveId: event.target.value,
+                            }))
+                          }
+                        >
+                          <MenuItem value="">None</MenuItem>
+                          {stanceParentOptions.map((move) => (
+                            <MenuItem key={move.id} value={move.id}>
+                              {move.input}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Stack>
+                    <Typography variant="caption" color="text.secondary">
+                      If a capture situation cannot occur for this move, enter a reason. That
+                      situation will be skipped in gather mode.
+                    </Typography>
+                    <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={moveDraft.nonstandard}
+                            onChange={(event) =>
+                              setMoveDraft((current) => ({
+                                ...current,
+                                nonstandard: event.target.checked,
+                              }))
+                            }
+                          />
+                        }
+                        label="Nonstandard (manual capture only)"
+                      />
+                      <TextField
+                        label="Nonstandard note"
+                        size="small"
+                        value={moveDraft.nonstandardNote}
                         onChange={(event) =>
                           setMoveDraft((current) => ({
                             ...current,
-                            notApplicable: { ...current.notApplicable, [slot]: event.target.value },
+                            nonstandardNote: event.target.value,
                           }))
                         }
-                        sx={{ minWidth: 205 }}
+                        sx={{ minWidth: 240 }}
                       />
-                    ))}
-                  </Stack>
-                  <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", gap: 1.5 }}>
-                    {(
-                      [
-                        ["startup", "Startup"],
-                        ["active", "Active"],
-                        ["recovery", "Recovery"],
-                        ["onBlock", "On block"],
-                        ["blockstun", "Blockstun"],
-                        ["hitstun", "Hitstun"],
-                        ["pips", "Pips"],
-                        ["flow", "Flow"],
-                      ] as const
-                    ).map(([key, label]) => (
-                      <TextField
-                        key={key}
-                        label={label}
-                        type="number"
-                        size="small"
-                        value={moveDraft[key]}
-                        onChange={(event) =>
-                          setMoveDraft((current) => ({ ...current, [key]: event.target.value }))
-                        }
-                        sx={{ width: 110 }}
-                      />
-                    ))}
-                  </Stack>
-                  <Button
-                    type="submit"
-                    variant="contained"
-                    disabled={!moveDraft.input.trim()}
-                    sx={{ alignSelf: "flex-start" }}
-                  >
-                    {editingMoveId ? "Save changes" : "Add move"}
-                  </Button>
-                  {editingMoveId && (
+                    </Stack>
+                    <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
+                      {moveTakeOutcomes.map((slot) => (
+                        <TextField
+                          key={slot}
+                          size="small"
+                          label={`${slot} not applicable reason`}
+                          value={moveDraft.notApplicable[slot] ?? ""}
+                          onChange={(event) =>
+                            setMoveDraft((current) => ({
+                              ...current,
+                              notApplicable: {
+                                ...current.notApplicable,
+                                [slot]: event.target.value,
+                              },
+                            }))
+                          }
+                          sx={{ minWidth: 205 }}
+                        />
+                      ))}
+                    </Stack>
+                    <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", gap: 1.5 }}>
+                      {(
+                        [
+                          ["startup", "Startup"],
+                          ["active", "Active"],
+                          ["recovery", "Recovery"],
+                          ["onBlock", "On block"],
+                          ["blockstun", "Blockstun"],
+                          ["hitstun", "Hitstun"],
+                          ["pips", "Pips"],
+                          ["flow", "Flow"],
+                        ] as const
+                      ).map(([key, label]) => (
+                        <TextField
+                          key={key}
+                          label={label}
+                          type="number"
+                          size="small"
+                          value={moveDraft[key]}
+                          onChange={(event) =>
+                            setMoveDraft((current) => ({ ...current, [key]: event.target.value }))
+                          }
+                          sx={{ width: 110 }}
+                        />
+                      ))}
+                    </Stack>
                     <Button
-                      type="button"
-                      variant="text"
-                      onClick={() => {
-                        setMoveDraft(emptyMoveDraft);
-                        setEditingMoveId(null);
-                        setMoveInputError(null);
-                      }}
+                      type="submit"
+                      variant="contained"
+                      disabled={!moveDraft.input.trim()}
                       sx={{ alignSelf: "flex-start" }}
                     >
-                      Cancel
+                      {editingMoveId ? "Save changes" : "Add move"}
                     </Button>
-                  )}
-                </Stack>
-              </Paper>
+                    {editingMoveId && (
+                      <Button
+                        type="button"
+                        variant="text"
+                        onClick={() => {
+                          setMoveDraft(emptyMoveDraft);
+                          setEditingMoveId(null);
+                          setMoveInputError(null);
+                        }}
+                        sx={{ alignSelf: "flex-start" }}
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                  </Stack>
+                </Paper>
+              </Box>
             </Stack>
           )}
           {section === 1 && (

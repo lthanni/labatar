@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 import { withCommonTechMoves } from "../../src/common-tech-moves";
 import {
+  automatedMoveEligibility,
   automatedWhiffEligibility,
   gatherMoves,
+  moveCaptureComplete,
   moveTakeOutcomeSummary,
   slotStatus,
   takesForSlot,
@@ -46,6 +48,121 @@ describe("move capture gathering", () => {
   });
 });
 
+describe("move capture worklist completion", () => {
+  const analyzedTake = (outcome: "whiff" | "block" | "hit-grounded" | "hit-airborne") =>
+    ({
+      id: outcome,
+      moveTake: {
+        catalogMoveId: `aang-gyatso/${moves[0].id}`,
+        outcome,
+        evidenceStatus: "active",
+      },
+      analysis: { moves: [] },
+    }) as unknown as RecordedVideo;
+
+  it("keeps a move visible until each applicable outcome has accepted analysis", () => {
+    const completed = [
+      analyzedTake("whiff"),
+      analyzedTake("block"),
+      analyzedTake("hit-grounded"),
+      analyzedTake("hit-airborne"),
+    ];
+    expect(moveCaptureComplete(moves[0], completed.slice(0, 3), "aang-gyatso")).toBe(false);
+    expect(moveCaptureComplete(moves[0], completed, "aang-gyatso")).toBe(true);
+    expect(
+      moveCaptureComplete(
+        { ...moves[0], notApplicable: { "hit-airborne": "Cannot hit airborne" } },
+        completed.slice(0, 3),
+        "aang-gyatso",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps pending retakes and unanalyzed accepted takes in the worklist", () => {
+    const completed = [
+      analyzedTake("whiff"),
+      analyzedTake("block"),
+      analyzedTake("hit-grounded"),
+      analyzedTake("hit-airborne"),
+    ];
+    const pending = {
+      ...analyzedTake("whiff"),
+      id: "pending-whiff-retake",
+      moveTake: {
+        ...analyzedTake("whiff").moveTake,
+        evidenceStatus: "pending",
+      },
+      analysis: null,
+    } as RecordedVideo;
+    expect(moveCaptureComplete(moves[0], [...completed, pending], "aang-gyatso")).toBe(false);
+    expect(
+      moveCaptureComplete(
+        moves[0],
+        completed.map((take) => (take.id === "block" ? { ...take, analysis: null } : take)),
+        "aang-gyatso",
+      ),
+    ).toBe(false);
+  });
+
+  it("tracks completion for the selected outcome without requiring the other slots", () => {
+    const whiff = analyzedTake("whiff");
+    expect(moveCaptureComplete(moves[0], [whiff], "aang-gyatso", "whiff")).toBe(true);
+    expect(moveCaptureComplete(moves[0], [whiff], "aang-gyatso", "block")).toBe(false);
+    expect(
+      moveCaptureComplete(
+        { ...moves[0], notApplicable: { block: "Cannot be blocked" } },
+        [whiff],
+        "aang-gyatso",
+        "block",
+      ),
+    ).toBe(true);
+    expect(
+      moveCaptureComplete(
+        moves[0],
+        [
+          whiff,
+          {
+            ...whiff,
+            id: "retake",
+            moveTake: { ...whiff.moveTake!, evidenceStatus: "pending" },
+          } as RecordedVideo,
+        ],
+        "aang-gyatso",
+        "whiff",
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("automatic capture outcome selection", () => {
+  it("uses only the selected outcome when building the automatic queue", () => {
+    const move = { ...moves[0], input: "5A" };
+    const whiff = {
+      id: "whiff",
+      moveTake: {
+        catalogMoveId: `aang-gyatso/${move.id}`,
+        outcome: "whiff",
+        evidenceStatus: "active",
+      },
+    } as RecordedVideo;
+    expect(automatedMoveEligibility(move, [whiff], "aang-gyatso", "whiff")).toMatchObject({
+      eligible: false,
+      kind: "existing-take",
+    });
+    expect(automatedMoveEligibility(move, [whiff], "aang-gyatso", "block")).toMatchObject({
+      eligible: true,
+    });
+    expect(
+      automatedMoveEligibility(
+        { ...move, notApplicable: { "hit-airborne": "Ground only" } },
+        [],
+        "aang-gyatso",
+        "hit-airborne",
+      ),
+    ).toMatchObject({ eligible: false, kind: "not-applicable" });
+  });
+});
+
 describe("automated whiff eligibility", () => {
   const whiffTake = (moveId: string, evidenceStatus: "pending" | "active") =>
     ({
@@ -76,8 +193,32 @@ describe("automated whiff eligibility", () => {
         validation: "needs-validation",
       });
     }
-    for (const input of ["1A", "2B", "3C", "4F", "5EX", "6A", "7B", "8C", "9F", "236EX", "214EX"]) {
-      expect(automatedWhiffEligibility({ ...moves[0], input }, [], "aang-gyatso")).toEqual({
+    for (const input of [
+      "1A",
+      "2B",
+      "2AA",
+      "3C",
+      "4F",
+      "5AA",
+      "5EX",
+      "6A",
+      "7B",
+      "8C",
+      "9F",
+      "236EX",
+      "214EX",
+      "5[C]",
+      "2[B]",
+      "236[EX]",
+      "j.214[A]",
+    ]) {
+      expect(
+        automatedWhiffEligibility(
+          { ...moves[0], input, isCharged: input.includes("[") },
+          [],
+          "aang-gyatso",
+        ),
+      ).toEqual({
         eligible: true,
         validation: "needs-validation",
       });
@@ -117,6 +258,12 @@ describe("automated whiff eligibility", () => {
     expect(
       automatedWhiffEligibility({ ...move, input: "j.236SUP" }, [], "aang-gyatso"),
     ).toMatchObject({ eligible: false, kind: "unsupported" });
+    for (const input of ["1AA", "236AA", "j.5AA"]) {
+      expect(automatedWhiffEligibility({ ...move, input }, [], "aang-gyatso")).toMatchObject({
+        eligible: false,
+        kind: "unsupported",
+      });
+    }
     expect(
       automatedWhiffEligibility(
         { ...move, notApplicable: { whiff: "Cannot whiff" } },
@@ -210,9 +357,10 @@ describe("move processing queue", () => {
     ).toEqual(["older", "pending", "automated-approved"]);
   });
 
-  it("shows detected input and frame values while keeping requested outcome separate", () => {
+  it("shows selected capture identity and frame values without claiming input detection", () => {
     const recording = {
       moveTake: {
+        moveLabel: "2B",
         outcome: "block",
         validation: {
           status: "verified",
@@ -233,9 +381,36 @@ describe("move processing queue", () => {
       },
     } as unknown as RecordedVideo;
     expect(moveTakeOutcomeSummary(recording)).toEqual({
-      result: "Input matched",
+      result: "Capture linked",
       detail:
-        "Observed 2B · contact signal unconfirmed · startup 9 · active 2 · recovery 12 · blockstun 15 · on block +3",
+        "Selected 2B · contact signal unconfirmed · startup 9 · active 2 · recovery 12 · blockstun 15 · on block +3",
     });
+  });
+
+  it("shows both numbered 5B hit windows and their orange gap", () => {
+    const recording = {
+      moveTake: {
+        moveLabel: "5B",
+        outcome: "whiff",
+        validation: { status: "verified", matchedAnalysisMoveId: "move-1" },
+      },
+      analysis: {
+        moves: [
+          {
+            id: "move-1",
+            phases: { startup: 11, active: 12, recovery: 21 },
+            opponentPhases: { hitstun: 0, blockstun: 0 },
+            hits: [
+              { notation: "5B(1)", index: 1, phases: { active: 6 }, gapBeforeFrames: 0 },
+              { notation: "5B(2)", index: 2, phases: { active: 6 }, gapBeforeFrames: 7 },
+            ],
+          },
+        ],
+      },
+    } as unknown as RecordedVideo;
+    expect(moveTakeOutcomeSummary(recording).detail).toContain("5B(1): 6 active");
+    expect(moveTakeOutcomeSummary(recording).detail).toContain(
+      "5B(1): 6 active · 7 gap frames · 5B(2): 6 active",
+    );
   });
 });

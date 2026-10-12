@@ -1,4 +1,4 @@
-import type { MoveTakeOutcome } from "./move-capture-types";
+import { moveTakeOutcomes, type MoveTakeOutcome } from "./move-capture-types";
 import type { RecordedVideo } from "./recording-types";
 import type { TechMove } from "./tech-types";
 
@@ -40,7 +40,28 @@ export function gatherMoves(
   });
 }
 
-export type AutomatedWhiffEligibility =
+/** A move leaves the selected worklist after its outcome has accepted analysis. */
+export function moveCaptureComplete(
+  move: TechMove,
+  recordings: RecordedVideo[],
+  variantId: string,
+  selectedOutcome?: MoveTakeOutcome,
+): boolean {
+  return (selectedOutcome ? [selectedOutcome] : moveTakeOutcomes).every((outcome) => {
+    if (move.notApplicable?.[outcome]?.trim()) return true;
+    const takes = takesForSlot(recordings, variantId, move.id, outcome);
+    return (
+      takes.some(
+        (take) =>
+          take.moveTake?.evidenceStatus === "active" &&
+          !take.moveTake.storageError &&
+          Boolean(take.analysis),
+      ) && !takes.some((take) => take.moveTake?.evidenceStatus === "pending")
+    );
+  });
+}
+
+export type AutomatedMoveEligibility =
   | { eligible: true; validation: "tested" | "needs-validation" }
   | {
       eligible: false;
@@ -54,18 +75,19 @@ export type AutomatedWhiffEligibility =
     };
 
 /** Recipes the input worker can send. A j. prefix adds jump before the input. */
-export function automatedWhiffEligibility(
+export function automatedMoveEligibility(
   move: TechMove,
   recordings: RecordedVideo[],
   variantId: string,
+  outcome: MoveTakeOutcome,
   attemptedMoveIds: ReadonlySet<string> = new Set(),
   facing: "Right" | "Left" = "Right",
-): AutomatedWhiffEligibility {
-  if (move.notApplicable?.whiff?.trim()) {
+): AutomatedMoveEligibility {
+  if (move.notApplicable?.[outcome]?.trim()) {
     return {
       eligible: false,
       kind: "not-applicable",
-      reason: `Whiff not applicable: ${move.notApplicable.whiff.trim()}`,
+      reason: `${outcome === "whiff" ? "Whiff" : outcome === "block" ? "Block" : outcome === "hit-grounded" ? "Hit grounded" : "Hit airborne"} not applicable: ${move.notApplicable[outcome].trim()}`,
     };
   }
   if (move.nonstandard) {
@@ -77,19 +99,19 @@ export function automatedWhiffEligibility(
         : "Tagged nonstandard; capture manually.",
     };
   }
-  const slotTakes = takesForSlot(recordings, variantId, move.id, "whiff");
+  const slotTakes = takesForSlot(recordings, variantId, move.id, outcome);
   if (slotTakes.some((take) => take.moveTake?.evidenceStatus === "active")) {
     return {
       eligible: false,
       kind: "existing-take",
-      reason: "An active whiff take already exists.",
+      reason: `An active ${outcome} take already exists.`,
     };
   }
   if (slotTakes.some((take) => take.moveTake?.evidenceStatus === "pending")) {
     return {
       eligible: false,
       kind: "existing-take",
-      reason: "A pending whiff take already exists.",
+      reason: `A pending ${outcome} take already exists.`,
     };
   }
   if (attemptedMoveIds.has(move.id)) {
@@ -101,15 +123,15 @@ export function automatedWhiffEligibility(
   }
   const input = move.input.toUpperCase();
   if (
-    move.isCharged ||
     move.dependsOnMoveId ||
     move.isStanceParent ||
-    !/^(?:J\.)?(?:236|214|[1-9])(?:EX|[ABCF])$/.test(input)
+    !/^(?:(?:2|5)AA|(?:J\.)?(?:236|214|[1-9])(?:\[(?:EX|[ABCF])\]|EX|[ABCF]))$/.test(input) ||
+    move.isCharged !== input.includes("[")
   ) {
     return {
       eligible: false,
       kind: "unsupported",
-      reason: "No supported whiff recipe for this input.",
+      reason: `No supported ${outcome} recipe for this input.`,
     };
   }
   return {
@@ -117,6 +139,17 @@ export function automatedWhiffEligibility(
     validation:
       input === "5A" || (input === "236A" && facing === "Right") ? "tested" : "needs-validation",
   };
+}
+
+/** Compatibility for existing whiff-only callers. */
+export function automatedWhiffEligibility(
+  move: TechMove,
+  recordings: RecordedVideo[],
+  variantId: string,
+  attemptedMoveIds: ReadonlySet<string> = new Set(),
+  facing: "Right" | "Left" = "Right",
+): AutomatedMoveEligibility {
+  return automatedMoveEligibility(move, recordings, variantId, "whiff", attemptedMoveIds, facing);
 }
 
 /** Captured, pending videos that have not had an analysis saved yet. */
@@ -148,17 +181,21 @@ export function moveTakeOutcomeSummary(recording: RecordedVideo) {
   );
   const result =
     validation.status === "verified"
-      ? "Input matched"
+      ? "Capture linked"
       : validation.status === "mismatch"
-        ? "Input mismatch"
+        ? "Needs review"
         : "Needs review";
   if (!matched) return { result, detail: validation.message };
   const phases = matched.phases;
-  const contact = matched.hits?.some((hit) => hit.status === "blocked")
-    ? "blocked"
-    : matched.hits?.some((hit) => hit.status === "hit")
-      ? "hit"
-      : "unconfirmed";
+  const multipleHits = (matched.hits?.length ?? 0) > 1;
+  const contact =
+    matched.hits?.some((hit) => hit.status === "blocked") ||
+    (multipleHits && matched.opponentPhases.blockstun > 0)
+      ? "blocked"
+      : matched.hits?.some((hit) => hit.status === "hit") ||
+          (multipleHits && matched.opponentPhases.hitstun > 0)
+        ? "hit"
+        : "unconfirmed";
   const numbers = [
     `startup ${phases.startup}`,
     `active ${phases.active}`,
@@ -173,8 +210,19 @@ export function moveTakeOutcomeSummary(recording: RecordedVideo) {
     if (matched.onHit != null)
       numbers.push(`on hit ${matched.onHit >= 0 ? "+" : ""}${matched.onHit}`);
   }
+  const hitWindows =
+    matched.hits && matched.hits.length > 1
+      ? matched.hits
+          .map((hit) => {
+            const notation =
+              hit.notation ?? `${take.moveLabel ?? matched.notation ?? "move"}(${hit.index})`;
+            const gap = hit.gapBeforeFrames ? `${hit.gapBeforeFrames} gap frames · ` : "";
+            return `${gap}${notation}: ${hit.phases.active} active`;
+          })
+          .join(" · ")
+      : null;
   return {
     result,
-    detail: `Observed ${matched.observedNotation ?? matched.notation ?? "unknown input"} · contact signal ${contact} · ${numbers.join(" · ")}`,
+    detail: `Selected ${take.moveLabel ?? matched.notation ?? "move"} · contact signal ${contact} · ${numbers.join(" · ")}${hitWindows ? ` · ${hitWindows}` : ""}`,
   };
 }

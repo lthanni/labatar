@@ -6,9 +6,11 @@ describe("assumed Tech moves", () => {
     const inputs = withCommonTechMoves("Aang", []);
     expect(inputs.map((move) => move.input)).toEqual([
       "2A",
+      "2AA",
       "2B",
       "2C",
       "5A",
+      "5AA",
       "5B",
       "5C",
       "2F",
@@ -34,7 +36,7 @@ describe("assumed Tech moves", () => {
     const initial = withCommonTechMoves("Aang", []);
     const savedMove = { ...initial[0], id: "existing-2a", startup: 7 };
     const moves = withCommonTechMoves("Aang", [savedMove]);
-    expect(moves).toHaveLength(21);
+    expect(moves).toHaveLength(23);
     expect(moves[0]).toEqual(savedMove);
     expect(withCommonTechMoves("Aang", moves)).toEqual(moves);
   });

@@ -4,7 +4,6 @@ import {
   Box,
   Button,
   ButtonBase,
-  Divider,
   Dialog,
   DialogActions,
   DialogContent,
@@ -15,8 +14,7 @@ import {
   Paper,
   Select,
   Stack,
-  Tab,
-  Tabs,
+  TextField,
   Typography,
 } from "@mui/material";
 import { useObsRecording } from "./ObsRecordingContext";
@@ -24,8 +22,9 @@ import type { DevBlackoutStatus } from "./dev-blackout-types";
 import { withCommonTechMoves } from "./common-tech-moves";
 import { linkLegacyChargedMoves } from "./charged-move-variants";
 import {
-  automatedWhiffEligibility,
+  automatedMoveEligibility,
   gatherMoves,
+  moveCaptureComplete,
   moveTakeOutcomeSummary,
   slotStatus,
   takesForSlot,
@@ -37,7 +36,11 @@ import {
   effectiveMeasurement,
   removeRecordingMeasurements,
 } from "./move-measurements";
-import type { KnownMoveCaptureVariant, MoveTakeOutcome } from "./move-capture-types";
+import {
+  moveTakeOutcomes,
+  type KnownMoveCaptureVariant,
+  type MoveTakeOutcome,
+} from "./move-capture-types";
 import {
   isFlowCancellableByDefault,
   normalizeMoveNotation,
@@ -76,6 +79,8 @@ const outcomes: Array<{ value: MoveTakeOutcome; label: string; description: stri
   },
 ];
 
+const selectedOutcomeStorageKey = "moveCapture:selectedOutcome";
+
 function VideoRowButton({
   recording,
   selected,
@@ -96,7 +101,7 @@ function VideoRowButton({
       aria-label={`Watch ${recording.name}`}
       aria-pressed={selected}
       sx={{
-        flex: "1 1 180px",
+        width: "100%",
         minWidth: 0,
         px: 1,
         py: 0.75,
@@ -111,6 +116,230 @@ function VideoRowButton({
     >
       <Stack sx={{ minWidth: 0, overflowWrap: "anywhere" }}>{children}</Stack>
     </ButtonBase>
+  );
+}
+
+function takeWorkflowStatus(recording: RecordedVideo, processingError?: string) {
+  const take = recording.moveTake;
+  if (take?.storageError) return { label: "Save failed", color: "error.main" };
+  if (processingError) return { label: "Failed processing", color: "error.main" };
+  if (take?.evidenceStatus === "archived") return { label: "Needs retake", color: "warning.main" };
+  if (
+    take?.captureMethod === "automated" &&
+    take.captureReviewStatus !== "approved-for-processing"
+  ) {
+    return { label: "Awaiting video approval", color: "warning.main" };
+  }
+  if (recording.analysis && take?.evidenceStatus === "active") {
+    return { label: "Processed and accepted", color: "success.main" };
+  }
+  if (recording.analysis) {
+    return { label: "Processed · review evidence", color: "info.main" };
+  }
+  if (take?.evidenceStatus === "active") {
+    return { label: "Accepted · needs processing", color: "warning.main" };
+  }
+  if (take?.captureMethod === "automated") {
+    return { label: "Approved for processing", color: "info.main" };
+  }
+  return { label: "Ready to process", color: "text.secondary" };
+}
+
+function MoveTakeCard({
+  move,
+  outcome,
+  takes,
+  selectedPlaybackId,
+  captureReady,
+  locked,
+  obsRecording,
+  batchActive,
+  reviewBusy,
+  processingTakeId,
+  deletingTakeId,
+  processingErrors,
+  armAllowed = true,
+  onArm,
+  onWatch,
+  onReviewCapture,
+  onProcess,
+  onReviewEvidence,
+  onDelete,
+}: {
+  move: TechMove;
+  outcome: (typeof outcomes)[number];
+  takes: RecordedVideo[];
+  selectedPlaybackId: string | null;
+  captureReady: boolean;
+  locked: boolean;
+  obsRecording: boolean;
+  batchActive: boolean;
+  reviewBusy: boolean;
+  processingTakeId: string | null;
+  deletingTakeId: string | null;
+  processingErrors: Record<string, string>;
+  armAllowed?: boolean;
+  onArm: () => void;
+  onWatch: (id: string) => void;
+  onReviewCapture: (id: string, action: "approve" | "reject") => void;
+  onProcess: (recording: RecordedVideo) => void;
+  onReviewEvidence: (id: string) => void;
+  onDelete: (recording: RecordedVideo) => void;
+}) {
+  const status = slotStatus(move, outcome.value, takes);
+  const notApplicable = move.notApplicable?.[outcome.value]?.trim();
+  const statusLabel = {
+    "not-applicable": "Not applicable",
+    complete: takes.some((take) => take.moveTake?.evidenceStatus === "pending")
+      ? "Retake pending"
+      : takes.some((take) => take.moveTake?.evidenceStatus === "active" && take.analysis)
+        ? "Processed"
+        : "Accepted · needs processing",
+    pending: "In progress",
+    "needs-redo": "Needs retake",
+    missing: "Missing",
+  }[status];
+  return (
+    <Paper variant="outlined" sx={{ p: 1, minWidth: 0 }}>
+      <Stack spacing={0.75}>
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flexWrap: "wrap" }}>
+          <Typography variant="subtitle2" sx={{ flex: 1 }}>
+            {outcome.label}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {statusLabel}
+          </Typography>
+          {!notApplicable && armAllowed && (
+            <Button size="small" disabled={locked || !captureReady} onClick={onArm}>
+              Arm
+            </Button>
+          )}
+        </Stack>
+        {notApplicable && (
+          <Typography variant="caption" color="text.secondary">
+            {notApplicable}
+          </Typography>
+        )}
+        {takes.length === 0 && !notApplicable ? (
+          <Typography variant="caption" color="text.secondary">
+            No take recorded.
+          </Typography>
+        ) : (
+          [...takes]
+            .sort((left, right) => right.modifiedAt - left.modifiedAt)
+            .map((recording) => {
+              const take = recording.moveTake;
+              const failure = processingErrors[recording.id];
+              const state = takeWorkflowStatus(recording, failure);
+              const awaitingVideoReview =
+                take?.captureMethod === "automated" &&
+                take.captureReviewStatus !== "approved-for-processing" &&
+                take.evidenceStatus === "pending" &&
+                !take.storageError;
+              const canProcess =
+                (take?.evidenceStatus === "pending" ||
+                  (take?.evidenceStatus === "active" && !recording.analysis)) &&
+                !awaitingVideoReview &&
+                !take.storageError;
+              const canDelete = take?.status === "captured" && !awaitingVideoReview;
+              const summary = recording.analysis ? moveTakeOutcomeSummary(recording) : null;
+              return (
+                <Stack key={recording.id} spacing={0.5} sx={{ minWidth: 0 }}>
+                  <VideoRowButton
+                    recording={recording}
+                    selected={selectedPlaybackId === recording.id}
+                    onSelect={() => onWatch(recording.id)}
+                  >
+                    <Typography variant="caption" sx={{ overflowWrap: "anywhere" }}>
+                      {recording.name}
+                    </Typography>
+                  </VideoRowButton>
+                  <Typography variant="caption" color={state.color}>
+                    {state.label}
+                    {summary ? ` · ${summary.result}` : ""}
+                  </Typography>
+                  {(failure || take?.storageError || summary?.detail) && (
+                    <Typography
+                      variant="caption"
+                      color={failure || take?.storageError ? "error" : "text.secondary"}
+                      sx={{ overflowWrap: "anywhere" }}
+                    >
+                      {failure ?? take?.storageError ?? summary?.detail}
+                    </Typography>
+                  )}
+                  <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap", gap: 0.5 }}>
+                    {awaitingVideoReview && (
+                      <>
+                        <Button
+                          size="small"
+                          disabled={reviewBusy || batchActive}
+                          onClick={() => onReviewCapture(recording.id, "approve")}
+                        >
+                          Approve video
+                        </Button>
+                        <Button
+                          size="small"
+                          color="error"
+                          disabled={reviewBusy || batchActive}
+                          onClick={() => onReviewCapture(recording.id, "reject")}
+                        >
+                          Reject
+                        </Button>
+                      </>
+                    )}
+                    {canProcess && (
+                      <Button
+                        size="small"
+                        disabled={
+                          Boolean(processingTakeId) || obsRecording || reviewBusy || batchActive
+                        }
+                        onClick={() => onProcess(recording)}
+                      >
+                        {processingTakeId === recording.id
+                          ? "Processing..."
+                          : recording.analysis
+                            ? "Reprocess"
+                            : "Process"}
+                      </Button>
+                    )}
+                    {take?.evidenceStatus === "pending" && recording.analysis && (
+                      <Button
+                        size="small"
+                        disabled={
+                          reviewBusy ||
+                          batchActive ||
+                          Boolean(processingTakeId) ||
+                          !take.validation.matchedAnalysisMoveId ||
+                          take.validation.status === "mismatch"
+                        }
+                        onClick={() => onReviewEvidence(recording.id)}
+                      >
+                        Accept evidence
+                      </Button>
+                    )}
+                    {canDelete && (
+                      <Button
+                        size="small"
+                        color="error"
+                        disabled={
+                          locked ||
+                          batchActive ||
+                          Boolean(processingTakeId) ||
+                          Boolean(deletingTakeId) ||
+                          reviewBusy
+                        }
+                        onClick={() => onDelete(recording)}
+                      >
+                        Delete take
+                      </Button>
+                    )}
+                  </Stack>
+                </Stack>
+              );
+            })
+        )}
+      </Stack>
+    </Paper>
   );
 }
 
@@ -175,11 +404,14 @@ export function MoveCapturePanel({
   const [techMoves, setTechMoves] = useState<TechMove[]>([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState("");
   const [selectedMoveId, setSelectedMoveId] = useState("");
-  const [outcome, setOutcome] = useState<MoveTakeOutcome>("whiff");
   const [allRecordings, setAllRecordings] = useState<RecordedVideo[]>([]);
   const [recordingsRevision, setRecordingsRevision] = useState(0);
-  const [section, setSection] = useState<"capture" | "review" | "evidence">("capture");
   const [selectedPlaybackId, setSelectedPlaybackId] = useState<string | null>(null);
+  const [showCompletedMoves, setShowCompletedMoves] = useState(false);
+  const [selectedOutcome, setSelectedOutcome] = useState<MoveTakeOutcome>(() => {
+    const saved = localStorage.getItem(selectedOutcomeStorageKey);
+    return moveTakeOutcomes.find((outcome) => outcome === saved) ?? "whiff";
+  });
   const [gatherMode, setGatherMode] = useState<MoveTakeOutcome | null>(null);
   const [attemptedMoveIds, setAttemptedMoveIds] = useState<Set<string>>(new Set());
   const [gatherComplete, setGatherComplete] = useState(false);
@@ -195,6 +427,7 @@ export function MoveCapturePanel({
   const previousActiveTake = useRef<typeof moveCapture.active>(null);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [automaticFacing, setAutomaticFacing] = useState<"Right" | "Left">("Right");
+  const [chargeHoldMs, setChargeHoldMs] = useState(1000);
   const [automaticRun, setAutomaticRun] = useState<{
     status: "idle" | "countdown" | "running" | "paused" | "completed" | "cancelled" | "error";
     index: number;
@@ -203,17 +436,21 @@ export function MoveCapturePanel({
     phase: string;
     error: string | null;
     runId?: string;
+    outcome?: MoveTakeOutcome;
   }>({ status: "idle", index: 0, total: 0, currentMove: null, phase: "", error: null });
+  const [automaticControlAction, setAutomaticControlAction] = useState<
+    "pause" | "resume" | "cancel" | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [blackoutLaunching, setBlackoutLaunching] = useState(false);
 
   const startBlackoutGame = async () => {
     const api = window.electronAPI?.devBlackout;
-    if (!api) return;
+    if (!api || !selectedKnownVariant) return;
     setBlackoutLaunching(true);
     setError(null);
     try {
-      await api.start();
+      await api.start({ testedCharacter: selectedKnownVariant.character });
       await refreshBlackoutStatus();
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : String(startError));
@@ -270,67 +507,62 @@ export function MoveCapturePanel({
         : [],
     [allRecordings, attemptedMoveIds, availableMoves, gatherMode, selectedKnownVariant],
   );
-  const automatedWhiffPreview = useMemo(
+  const automatedPreview = useMemo(
     () =>
       selectedKnownVariant
         ? availableMoves.map((move) => ({
             move,
-            eligibility: automatedWhiffEligibility(
+            eligibility: automatedMoveEligibility(
               move,
               allRecordings,
               selectedKnownVariant.id,
+              selectedOutcome,
               new Set(),
               automaticFacing,
             ),
           }))
         : [],
-    [allRecordings, availableMoves, automaticFacing, selectedKnownVariant],
+    [allRecordings, availableMoves, automaticFacing, selectedKnownVariant, selectedOutcome],
   );
-  const automaticWhiffQueue = useMemo(
+  const automaticQueue = useMemo(
     () =>
-      automatedWhiffPreview
+      automatedPreview
         .filter(({ eligibility }) => eligibility.eligible)
         .map(({ move }) => ({ id: move.id, input: move.input })),
-    [automatedWhiffPreview],
+    [automatedPreview],
   );
+  const completedMoveIds = useMemo(
+    () =>
+      new Set(
+        selectedKnownVariant
+          ? availableMoves
+              .filter((move) =>
+                moveCaptureComplete(move, allRecordings, selectedKnownVariant.id, selectedOutcome),
+              )
+              .map((move) => move.id)
+          : [],
+      ),
+    [allRecordings, availableMoves, selectedKnownVariant, selectedOutcome],
+  );
+  const visibleMoves = showCompletedMoves
+    ? availableMoves
+    : availableMoves.filter((move) => !completedMoveIds.has(move.id));
   const unprocessedTakes = useMemo(
     () =>
-      selectedKnownVariant ? unprocessedMoveTakes(allRecordings, selectedKnownVariant.id) : [],
-    [allRecordings, selectedKnownVariant],
-  );
-  const captureReviewQueue = useMemo(
-    () =>
       selectedKnownVariant
-        ? allRecordings.filter(
-            (recording) =>
-              recording.moveTake?.characterId === selectedKnownVariant.id &&
-              recording.moveTake.captureMethod === "automated" &&
-              recording.moveTake.captureReviewStatus === "awaiting-video-review" &&
-              recording.moveTake.status === "captured" &&
-              recording.moveTake.evidenceStatus === "pending" &&
-              !recording.moveTake.storageError,
+        ? unprocessedMoveTakes(allRecordings, selectedKnownVariant.id).filter(
+            (recording) => recording.moveTake?.outcome === selectedOutcome,
           )
         : [],
-    [allRecordings, selectedKnownVariant],
+    [allRecordings, selectedKnownVariant, selectedOutcome],
   );
-  const processingReviewTakes = useMemo(
-    () =>
-      selectedKnownVariant
-        ? allRecordings
-            .filter(
-              (recording) =>
-                recording.moveTake?.characterId === selectedKnownVariant.id &&
-                ((recording.analysis && recording.moveTake.evidenceStatus === "pending") ||
-                  batchResults[recording.id] ||
-                  processingErrors[recording.id]),
-            )
-            .sort((left, right) => right.modifiedAt - left.modifiedAt)
-        : [],
-    [allRecordings, batchResults, processingErrors, selectedKnownVariant],
+  const selectedMoveTakes = moveTakes.filter(
+    (recording) => recording.moveTake?.outcome === selectedOutcome,
   );
   const selectedPlayback =
-    allRecordings.find((recording) => recording.id === selectedPlaybackId) ??
-    (section === "evidence" ? moveTakes[0] : (captureReviewQueue[0] ?? unprocessedTakes[0])) ??
+    selectedMoveTakes.find((recording) => recording.id === selectedPlaybackId) ??
+    selectedMoveTakes.find((recording) => recording.moveTake?.evidenceStatus === "pending") ??
+    selectedMoveTakes[0] ??
     null;
 
   const loadCatalog = useCallback(async () => {
@@ -365,12 +597,24 @@ export function MoveCapturePanel({
   }, [loadCatalog]);
 
   useEffect(() => {
+    localStorage.setItem(selectedOutcomeStorageKey, selectedOutcome);
+  }, [selectedOutcome]);
+
+  useEffect(() => {
+    const activeOutcome = ["countdown", "running", "paused"].includes(automaticRun.status)
+      ? automaticRun.outcome
+      : moveCapture.armed?.outcome;
+    if (activeOutcome && moveTakeOutcomes.some((outcome) => outcome === activeOutcome)) {
+      setSelectedOutcome(activeOutcome);
+    }
+  }, [automaticRun.outcome, automaticRun.status, moveCapture.armed?.outcome]);
+
+  useEffect(() => {
     const api = window.electronAPI?.moveCapture;
     if (!api?.automaticStatus || !api.onAutomaticState) return;
     const unsubscribe = api.onAutomaticState((nextRun) => {
       setAutomaticRun(nextRun);
-      if (nextRun.status === "completed") {
-        setSection("review");
+      if (nextRun.status === "completed" || nextRun.status === "cancelled") {
         setSelectedPlaybackId(null);
         void loadMoveEvidence();
       }
@@ -409,18 +653,6 @@ export function MoveCapturePanel({
     void loadMoveEvidence();
   }, [loadMoveEvidence]);
 
-  const arm = useCallback(async () => {
-    if (!selectedKnownVariant || !selectedMove) return;
-    await armMoveCapture({
-      characterId: selectedKnownVariant.id,
-      moveId: selectedMove.id,
-      moveInput: selectedMove.input,
-      isStance: Boolean(selectedMove.dependsOnMoveId),
-      isCharged: selectedMove.isCharged,
-      outcome,
-    });
-  }, [armMoveCapture, outcome, selectedKnownVariant, selectedMove]);
-
   const armMove = useCallback(
     async (move: TechMove, mode: MoveTakeOutcome, variant: KnownMoveCaptureVariant) => {
       const armed = await armMoveCapture({
@@ -453,7 +685,6 @@ export function MoveCapturePanel({
         setError("Could not arm the first move. Check the recording controls and try again.");
         return;
       }
-      setOutcome(mode);
       setAttemptedMoveIds(new Set());
       setGatherMode(mode);
       setGatherComplete(queue.length === 0);
@@ -476,15 +707,17 @@ export function MoveCapturePanel({
     }
     const completedTake = previousActiveTake.current;
     previousActiveTake.current = null;
-    if (!completedTake || !gatherMode || !selectedKnownVariant) return;
-    if (
-      completedTake.characterId !== selectedKnownVariant.id ||
-      completedTake.outcome !== gatherMode
-    )
-      return;
+    if (!completedTake) return;
     void (async () => {
       const recordings = await loadMoveEvidence();
       if (!recordings) return;
+      if (
+        !gatherMode ||
+        !selectedKnownVariant ||
+        completedTake.characterId !== selectedKnownVariant.id ||
+        completedTake.outcome !== gatherMode
+      )
+        return;
       const saved = recordings.find((recording) => recording.moveTake?.id === completedTake.id);
       if (!saved || saved.moveTake?.storageError) {
         setError(
@@ -530,13 +763,6 @@ export function MoveCapturePanel({
     });
     try {
       const processed = await processMoveTake(recording);
-      if (processed.moveTake?.validation.status === "mismatch") {
-        await window.electronAPI?.recordings.setMoveEvidence({
-          recordingId: recording.id,
-          action: "archive",
-          reason: processed.moveTake.validation.message,
-        });
-      }
       const summary = moveTakeOutcomeSummary(processed);
       setBatchResults((current) => ({ ...current, [recording.id]: summary.result }));
       return processed;
@@ -563,15 +789,12 @@ export function MoveCapturePanel({
   const reviewAutomatedCapture = async (recordingId: string, action: "approve" | "reject") => {
     const recordingsApi = window.electronAPI?.recordings;
     if (!recordingsApi?.reviewCapture) return;
-    const reason = action === "reject" ? "" : undefined;
-    if (action === "reject" && reason === null) return;
     setReviewBusy(true);
     setError(null);
     try {
       await recordingsApi.reviewCapture({
         recordingId,
         action,
-        reason: reason?.trim() || undefined,
       });
       await loadMoveEvidence();
     } catch (reviewError) {
@@ -581,15 +804,22 @@ export function MoveCapturePanel({
     }
   };
 
-  const deletePendingMove = async () => {
+  const deleteMoveTake = async () => {
     const api = window.electronAPI?.recordings;
-    if (!api?.deletePendingMove || !deleteTarget || batchRunning.current || processingTakeId)
-      return;
+    if (!api?.deleteMoveTake || !deleteTarget || batchRunning.current || processingTakeId) return;
     const recordingId = deleteTarget.id;
     setDeletingTakeId(recordingId);
     setDeleteError(null);
     try {
-      await api.deletePendingMove({ recordingId });
+      const catalog = JSON.parse(
+        localStorage.getItem(techCatalogStorageKey) ?? "{}",
+      ) as TechCatalog;
+      const nextCatalog = removeRecordingMeasurements(catalog, recordingId);
+      await api.deleteMoveTake({ recordingId });
+      if (nextCatalog !== catalog) {
+        localStorage.setItem(techCatalogStorageKey, JSON.stringify(nextCatalog));
+        window.dispatchEvent(new Event(techCatalogUpdatedEvent));
+      }
       setDeleteTarget(null);
       setBatchResults((current) => {
         const next = { ...current };
@@ -621,12 +851,12 @@ export function MoveCapturePanel({
     }
   };
 
-  const startAutomaticWhiffPass = async () => {
+  const startAutomaticPass = async () => {
     const api = window.electronAPI?.moveCapture;
     if (
       !api?.automaticStart ||
       !selectedKnownVariant ||
-      automaticWhiffQueue.length === 0 ||
+      automaticQueue.length === 0 ||
       obsState.status !== "connected"
     )
       return;
@@ -634,8 +864,10 @@ export function MoveCapturePanel({
     try {
       await api.automaticStart({
         variantId: selectedKnownVariant.id,
-        moves: automaticWhiffQueue,
+        moves: automaticQueue,
         facing: automaticFacing,
+        outcome: selectedOutcome,
+        chargeHoldMs,
       });
       await refreshAutomaticRun();
     } catch (runError) {
@@ -645,7 +877,8 @@ export function MoveCapturePanel({
 
   const controlAutomaticRun = async (action: "pause" | "resume" | "cancel") => {
     const api = window.electronAPI?.moveCapture;
-    if (!api) return;
+    if (!api || automaticControlAction) return;
+    setAutomaticControlAction(action);
     setError(null);
     try {
       if (action === "pause") await api.automaticPause?.();
@@ -654,6 +887,8 @@ export function MoveCapturePanel({
       await refreshAutomaticRun();
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : String(runError));
+    } finally {
+      setAutomaticControlAction(null);
     }
   };
 
@@ -661,7 +896,9 @@ export function MoveCapturePanel({
     if (batchRunning.current || processingTakeId || obsState.recording.active) return;
     const recordings = await loadMoveEvidence();
     if (!recordings || !selectedKnownVariant) return;
-    const pending = unprocessedMoveTakes(recordings, selectedKnownVariant.id);
+    const pending = unprocessedMoveTakes(recordings, selectedKnownVariant.id).filter(
+      (recording) => recording.moveTake?.outcome === selectedOutcome,
+    );
     if (pending.length === 0) return;
     batchRunning.current = true;
     setBatchResults({});
@@ -698,15 +935,14 @@ export function MoveCapturePanel({
     }
   };
 
-  const reviewTake = async (recordingId: string, action: "accept" | "archive") => {
+  const reviewTake = async (recordingId: string) => {
     if (!window.electronAPI?.recordings) return;
     setReviewBusy(true);
     setError(null);
     try {
       await window.electronAPI.recordings.setMoveEvidence({
         recordingId,
-        action,
-        reason: action === "archive" ? "Retake requested after review." : undefined,
+        action: "accept",
       });
       {
         const recording = allRecordings.find((item) => item.id === recordingId);
@@ -718,31 +954,25 @@ export function MoveCapturePanel({
           const data = catalog[variant.character] ?? { moves: [], combos: [] };
           const moves = readTechMoves(variant.character);
           const current = { ...catalog, [variant.character]: { ...data, moves } };
-          const withoutReplacedSources =
-            action === "accept"
-              ? allRecordings
-                  .filter(
-                    (item) =>
-                      item.id !== recordingId &&
-                      item.moveTake?.catalogMoveId === recording.moveTake?.catalogMoveId &&
-                      item.moveTake?.outcome === recording.moveTake?.outcome &&
-                      item.moveTake?.evidenceStatus === "active",
-                  )
-                  .reduce(
-                    (result, item) => removeRecordingMeasurements(result, item.id),
-                    current as TechCatalog,
-                  )
-              : current;
-          const next =
-            action === "accept"
-              ? applyAcceptedMeasurements(
-                  withoutReplacedSources,
-                  recording,
-                  variant.character,
-                  variant.support,
-                  allRecordings,
-                )
-              : removeRecordingMeasurements(current, recordingId);
+          const withoutReplacedSources = allRecordings
+            .filter(
+              (item) =>
+                item.id !== recordingId &&
+                item.moveTake?.catalogMoveId === recording.moveTake?.catalogMoveId &&
+                item.moveTake?.outcome === recording.moveTake?.outcome &&
+                item.moveTake?.evidenceStatus === "active",
+            )
+            .reduce(
+              (result, item) => removeRecordingMeasurements(result, item.id),
+              current as TechCatalog,
+            );
+          const next = applyAcceptedMeasurements(
+            withoutReplacedSources,
+            recording,
+            variant.character,
+            variant.support,
+            allRecordings,
+          );
           localStorage.setItem(techCatalogStorageKey, JSON.stringify(next));
           window.dispatchEvent(new Event(techCatalogUpdatedEvent));
         }
@@ -757,9 +987,13 @@ export function MoveCapturePanel({
 
   const openRecording = (recordingId: string) => {
     setSelectedPlaybackId(recordingId);
+    const moveId = allRecordings.find((recording) => recording.id === recordingId)?.moveTake
+      ?.moveId;
+    if (moveId) setSelectedMoveId(moveId);
   };
 
   const batchActive = Boolean(batchProgress && batchProgress.done < batchProgress.total);
+  const automaticRunOpen = ["countdown", "running", "paused"].includes(automaticRun.status);
   const batchFailureCount = Object.values(batchResults).filter(
     (result) => result === "Processing failed",
   ).length;
@@ -769,7 +1003,9 @@ export function MoveCapturePanel({
     batchActive ||
     ["countdown", "running", "paused"].includes(automaticRun.status);
   const obsConnected = obsState.status === "connected";
-  const captureReady = blackoutStatus.active && obsConnected;
+  const blackoutProfileMatchesSelection =
+    blackoutStatus.active && blackoutStatus.testedCharacter === selectedKnownVariant?.character;
+  const captureReady = blackoutProfileMatchesSelection && obsConnected;
   const captureLockReason =
     automaticRun.status === "paused"
       ? "The automatic pass is paused. Resume or cancel it before manual capture."
@@ -797,7 +1033,6 @@ export function MoveCapturePanel({
           { missing: 0, pending: 0, complete: 0, "needs-redo": 0, "not-applicable": 0 },
         )
       : null;
-  const activeMoveTakes = moveTakes.filter((take) => take.moveTake?.evidenceStatus === "active");
   const measuredFields: TechMeasuredField[] = [
     "startup",
     "active",
@@ -823,9 +1058,9 @@ export function MoveCapturePanel({
         <Box>
           <Typography variant="h6">Move capture</Typography>
           <Typography variant="body2" color="text.secondary">
-            Select a known character/support variant and move, then use the header controls or F9.
-            The move list comes from Tech → Moves. Labatar saves the original take under its move
-            and outcome, but processing still has to verify the visible input history independently.
+            Select a character/support, arm a take in its move card, then use the header controls or
+            F9. The move list comes from Tech → Moves. Processing uses the selected take's move
+            identity and measures its frame meter.
           </Typography>
         </Box>
 
@@ -841,10 +1076,12 @@ export function MoveCapturePanel({
           <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexWrap: "wrap" }}>
             <Typography variant="body2" sx={{ flex: 1 }}>
               {blackoutStatus.active
-                ? obsConnected
-                  ? (captureLockReason ??
-                    "Blackout mode and OBS are active. Move capture is enabled.")
-                  : "Blackout mode is active. Connect OBS to enable move capture."
+                ? !blackoutProfileMatchesSelection
+                  ? `Blackout mode is for ${blackoutStatus.testedCharacter}. Select that fighter to capture moves, or restart in the selected fighter's profile.`
+                  : obsConnected
+                    ? (captureLockReason ??
+                      `Blackout for ${blackoutStatus.testedCharacter} and OBS are active. Move capture is enabled. ${blackoutStatus.testedCharacter === "Korra" ? "Zuko is visible as Player 2." : "Other fighters and all supports are hidden."}`)
+                    : "Blackout mode is active. Connect OBS to enable move capture."
                 : (blackoutStatus.error ??
                   (blackoutStatus.gameRunning
                     ? "The game is open without verified blackout assets. Close it before installing blackout mode."
@@ -860,12 +1097,21 @@ export function MoveCapturePanel({
                   !blackoutStatus.available ||
                   blackoutStatus.gameRunning ||
                   blackoutStatus.busy ||
-                  blackoutLaunching
+                  blackoutLaunching ||
+                  !selectedKnownVariant
                 }
                 onClick={() => void startBlackoutGame()}
               >
                 {blackoutLaunching ? "Starting game..." : "Start game in blackout mode"}
               </Button>
+            )}
+            {!blackoutStatus.active && selectedKnownVariant && (
+              <Typography variant="caption" color="text.secondary">
+                {selectedKnownVariant.character} visible; all supports hidden.
+                {selectedKnownVariant.character === "Korra"
+                  ? " Choose Zuko as the visible Player 2 target."
+                  : " Other fighters are hidden."}
+              </Typography>
             )}
             {blackoutStatus.restorePending && (
               <Button size="small" onClick={() => void retryBlackoutRestore()}>
@@ -874,6 +1120,51 @@ export function MoveCapturePanel({
             )}
           </Stack>
         </Alert>
+
+        {automaticRunOpen && (
+          <Alert severity="info">
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexWrap: "wrap" }}>
+              <Typography variant="body2" sx={{ flex: 1 }}>
+                Automatic {automaticRun.outcome ?? "whiff"} pass {automaticRun.status}:{" "}
+                {automaticRun.index} of {automaticRun.total} ·{" "}
+                {automaticRun.currentMove ?? "preparing"}
+                {automaticRun.phase ? ` · ${automaticRun.phase}` : ""}
+                {automaticRun.error ? ` · ${automaticRun.error}` : ""}
+              </Typography>
+              {automaticRun.status === "paused" ? (
+                <Button
+                  size="small"
+                  variant="contained"
+                  disabled={
+                    Boolean(automaticControlAction) ||
+                    !captureReady ||
+                    obsBusy ||
+                    obsState.recording.active
+                  }
+                  onClick={() => void controlAutomaticRun("resume")}
+                >
+                  Resume pass
+                </Button>
+              ) : (
+                <Button
+                  size="small"
+                  disabled={Boolean(automaticControlAction)}
+                  onClick={() => void controlAutomaticRun("pause")}
+                >
+                  Pause
+                </Button>
+              )}
+              <Button
+                size="small"
+                color="error"
+                disabled={Boolean(automaticControlAction)}
+                onClick={() => void controlAutomaticRun("cancel")}
+              >
+                {automaticControlAction === "cancel" ? "Cancelling..." : "Cancel pass"}
+              </Button>
+            </Stack>
+          </Alert>
+        )}
 
         <Box
           sx={{
@@ -884,10 +1175,10 @@ export function MoveCapturePanel({
           }}
         >
           <Stack spacing={1.5} sx={{ minWidth: 0 }}>
-            <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexWrap: "wrap" }}>
               <FormControl
                 size="small"
-                sx={{ minWidth: 200 }}
+                sx={{ minWidth: 200, flex: 1 }}
                 disabled={locked || Boolean(gatherMode) || knownVariants.length === 0}
               >
                 <InputLabel id="move-capture-character-label">Known character / support</InputLabel>
@@ -899,6 +1190,7 @@ export function MoveCapturePanel({
                     setSelectedCharacterId(event.target.value);
                     setSelectedMoveId("");
                     setSelectedPlaybackId(null);
+                    setShowCompletedMoves(false);
                   }}
                 >
                   {knownVariants.map((variant) => (
@@ -911,37 +1203,18 @@ export function MoveCapturePanel({
               <FormControl
                 size="small"
                 sx={{ minWidth: 150 }}
-                disabled={locked || Boolean(gatherMode) || availableMoves.length === 0}
+                disabled={locked || Boolean(gatherMode) || Boolean(moveCapture.armed)}
               >
-                <InputLabel id="move-capture-move-label">Move</InputLabel>
-                <Select
-                  labelId="move-capture-move-label"
-                  label="Move"
-                  value={selectedMoveId}
-                  onChange={(event) => {
-                    setSelectedMoveId(event.target.value);
-                    if (section === "evidence") setSelectedPlaybackId(null);
-                  }}
-                >
-                  {availableMoves.map((move) => (
-                    <MenuItem key={move.id} value={move.id}>
-                      {move.input}
-                      {move.isCharged ? " (charged)" : ""}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-              <FormControl
-                size="small"
-                sx={{ minWidth: 130 }}
-                disabled={locked || Boolean(gatherMode) || !selectedMove}
-              >
-                <InputLabel id="move-capture-outcome-label">Take</InputLabel>
+                <InputLabel id="move-capture-outcome-label">Capture data</InputLabel>
                 <Select
                   labelId="move-capture-outcome-label"
-                  label="Take"
-                  value={outcome}
-                  onChange={(event) => setOutcome(event.target.value as MoveTakeOutcome)}
+                  label="Capture data"
+                  value={selectedOutcome}
+                  onChange={(event) => {
+                    setSelectedOutcome(event.target.value as MoveTakeOutcome);
+                    setSelectedPlaybackId(null);
+                    setShowCompletedMoves(false);
+                  }}
                 >
                   {outcomes.map((item) => (
                     <MenuItem key={item.value} value={item.value}>
@@ -950,635 +1223,379 @@ export function MoveCapturePanel({
                   ))}
                 </Select>
               </FormControl>
-            </Stack>
-
-            <Tabs
-              value={section}
-              onChange={(_, nextSection: "capture" | "review" | "evidence") =>
-                setSection(nextSection)
-              }
-              variant="scrollable"
-              allowScrollButtonsMobile
-              aria-label="Move capture sections"
-            >
-              <Tab value="capture" label="Capture" />
-              <Tab value="review" label={`Review & process (${captureReviewQueue.length})`} />
-              <Tab value="evidence" label="Move evidence" />
-            </Tabs>
-
-            <Stack
-              spacing={1.5}
-              role="tabpanel"
-              sx={{ display: section === "capture" ? "flex" : "none" }}
-            >
               <Button
-                variant="contained"
-                onClick={() => void arm()}
-                disabled={locked || !captureReady || Boolean(gatherMode) || !selectedMove}
+                size="small"
+                onClick={() => void loadMoveEvidence()}
+                disabled={evidenceLoading || Boolean(processingTakeId)}
               >
-                Arm {outcome} take
+                {evidenceLoading ? "Refreshing..." : "Refresh"}
               </Button>
-              <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
-                {outcomes.map((item) => (
-                  <Button
-                    key={item.value}
-                    size="small"
-                    variant={gatherMode === item.value ? "contained" : "outlined"}
-                    disabled={
-                      locked || !captureReady || Boolean(gatherMode) || !selectedKnownVariant
-                    }
-                    onClick={() => void startGather(item.value)}
-                  >
-                    Gather {item.label.toLowerCase()} data
-                  </Button>
-                ))}
-                {gatherMode && (
-                  <Button
-                    size="small"
-                    color="error"
-                    disabled={locked}
-                    onClick={() => {
-                      setGatherMode(null);
-                      setGatherComplete(false);
-                      void disarmMoveCapture();
-                    }}
-                  >
-                    End gather mode
-                  </Button>
-                )}
-              </Stack>
-              {selectedKnownVariant && (
-                <Alert severity="info">
-                  <Typography variant="subtitle2">
-                    Automatic whiff queue preview · {selectedKnownVariant.label}
-                  </Typography>
-                  <Typography variant="body2">
-                    {automaticWhiffQueue.length} supported move
-                    {automaticWhiffQueue.length === 1 ? "" : "s"} queued ·{" "}
-                    {
-                      automatedWhiffPreview.filter(
-                        ({ eligibility }) =>
-                          eligibility.eligible && eligibility.validation === "needs-validation",
-                      ).length
-                    }{" "}
-                    recipes not yet verified in game ·{" "}
-                    {
-                      automatedWhiffPreview.filter(({ eligibility }) => !eligibility.eligible)
-                        .length
-                    }{" "}
-                    skipped. Review every captured video before processing; untested inputs may need
-                    a retake.
-                  </Typography>
-                  <Stack
-                    direction="row"
-                    spacing={1}
-                    sx={{ alignItems: "center", flexWrap: "wrap", mt: 1 }}
-                  >
-                    <FormControl
-                      size="small"
-                      sx={{ minWidth: 130 }}
-                      disabled={
-                        automaticRun.status === "running" ||
-                        automaticRun.status === "countdown" ||
-                        automaticRun.status === "paused"
-                      }
-                    >
-                      <InputLabel id="automatic-facing-label">Facing</InputLabel>
-                      <Select
-                        labelId="automatic-facing-label"
-                        label="Facing"
-                        value={automaticFacing}
-                        onChange={(event) =>
-                          setAutomaticFacing(event.target.value as "Right" | "Left")
-                        }
-                      >
-                        <MenuItem value="Right">Right</MenuItem>
-                        <MenuItem value="Left">Left</MenuItem>
-                      </Select>
-                    </FormControl>
-                    {automaticRun.status === "paused" ? (
-                      <Button
-                        size="small"
-                        variant="contained"
-                        disabled={!captureReady || obsBusy || obsState.recording.active}
-                        onClick={() => void controlAutomaticRun("resume")}
-                      >
-                        Resume pass
-                      </Button>
-                    ) : automaticRun.status === "running" || automaticRun.status === "countdown" ? (
-                      <>
-                        <Button size="small" onClick={() => void controlAutomaticRun("pause")}>
-                          Pause
-                        </Button>
-                        <Button
-                          size="small"
-                          color="error"
-                          onClick={() => void controlAutomaticRun("cancel")}
-                        >
-                          Cancel
-                        </Button>
-                      </>
-                    ) : (
-                      <Button
-                        size="small"
-                        variant="contained"
-                        disabled={
-                          locked ||
-                          !captureReady ||
-                          Boolean(gatherMode) ||
-                          automaticWhiffQueue.length === 0
-                        }
-                        onClick={() => void startAutomaticWhiffPass()}
-                      >
-                        Start automatic whiff pass ({automaticWhiffQueue.length})
-                      </Button>
-                    )}
-                    <Typography variant="caption" color="text.secondary">
-                      Set the training position and facing first. Starting gives you time to focus
-                      the game before capture begins.
-                    </Typography>
-                  </Stack>
-                  {(automaticRun.status === "countdown" ||
-                    automaticRun.status === "running" ||
-                    automaticRun.status === "paused" ||
-                    automaticRun.status === "completed" ||
-                    automaticRun.status === "cancelled" ||
-                    automaticRun.status === "error") && (
-                    <Alert
-                      severity={
-                        automaticRun.status === "error"
-                          ? "error"
-                          : automaticRun.status === "completed"
-                            ? "success"
-                            : "info"
-                      }
-                      sx={{ mt: 1 }}
-                    >
-                      {automaticRun.status === "countdown" ||
-                      automaticRun.status === "running" ||
-                      automaticRun.status === "paused"
-                        ? `Automatic whiff pass ${automaticRun.status}: ${automaticRun.index} of ${automaticRun.total} · ${automaticRun.currentMove ?? "preparing"}${automaticRun.phase ? ` · ${automaticRun.phase}` : ""}`
-                        : `Automatic whiff pass ${automaticRun.status}${automaticRun.total ? ` · ${automaticRun.index} of ${automaticRun.total}` : ""}`}
-                      {automaticRun.error ? ` · ${automaticRun.error}` : ""}
-                    </Alert>
-                  )}
-                  <Stack spacing={0.25} sx={{ mt: 0.75 }}>
-                    {automatedWhiffPreview.map(({ move, eligibility }) => (
-                      <Typography key={move.id} variant="caption" color="text.secondary">
-                        {move.input}:{" "}
-                        {eligibility.eligible
-                          ? eligibility.validation === "tested"
-                            ? "queued (live-tested recipe)"
-                            : "queued (review input and move in video)"
-                          : eligibility.reason}
-                      </Typography>
-                    ))}
-                  </Stack>
-                </Alert>
-              )}
-              {gatherMode && selectedKnownVariant && (
-                <Alert
-                  severity={gatherComplete ? "success" : "info"}
-                  action={
-                    !gatherComplete && !locked ? (
-                      <Button color="inherit" size="small" onClick={() => void skipGatherMove()}>
-                        Skip this move
-                      </Button>
-                    ) : undefined
-                  }
-                >
-                  {gatherComplete
-                    ? `Capture pass complete for ${selectedKnownVariant.label}. Review pending takes and retry any failures.`
-                    : `Gathering ${gatherMode} for ${selectedKnownVariant.label}: ${selectedMove?.input ?? "loading"}. Start and stop recording with the header control or F9; the next move is armed automatically. Next: ${gatherQueue.find((move) => move.id !== selectedMoveId)?.input ?? "end of queue"}.`}
-                  {gatherCounts &&
-                    ` Complete ${gatherCounts.complete} · pending ${gatherCounts.pending} · missing ${gatherCounts.missing} · redo ${gatherCounts["needs-redo"]} · not applicable ${gatherCounts["not-applicable"]}.`}
-                </Alert>
-              )}
+              <Button
+                size="small"
+                variant="contained"
+                onClick={() => void processAll()}
+                disabled={
+                  !selectedKnownVariant ||
+                  unprocessedTakes.length === 0 ||
+                  Boolean(processingTakeId) ||
+                  batchActive ||
+                  obsState.recording.active ||
+                  automaticRunOpen
+                }
+              >
+                Process all ({unprocessedTakes.length})
+              </Button>
+            </Stack>
+            <Typography variant="caption" color="text.secondary">
+              Review automated videos before processing. Processed takes still need evidence
+              acceptance. The requested outcome is separate from what processing observed.
+            </Typography>
+            {batchProgress && (
+              <Alert
+                severity={
+                  batchProgress.done < batchProgress.total
+                    ? "info"
+                    : batchFailureCount > 0
+                      ? "warning"
+                      : "success"
+                }
+              >
+                Attempted {batchProgress.done} of {batchProgress.total} takes
+                {batchProgress.done === batchProgress.total
+                  ? ". " + batchFailureCount + " failed; review their cards and retry."
+                  : processingTakeId
+                    ? " · currently processing " +
+                      (allRecordings.find((item) => item.id === processingTakeId)?.moveTake
+                        ?.moveLabel ?? processingTakeId)
+                    : ""}
+              </Alert>
+            )}
 
-              {selectedMove && (
-                <Typography variant="caption" color="text.secondary">
-                  Expected visible input: {selectedMove.input} ·{" "}
-                  {selectedMove.isCharged
-                    ? "Charged version: its takes are stored separately; hold duration is not yet automatically verified."
-                    : outcomes.find((item) => item.value === outcome)?.description}
-                </Typography>
-              )}
-
-              {moveCapture.armed && (
-                <Alert
-                  severity="info"
-                  action={
-                    <Button
-                      color="inherit"
-                      size="small"
-                      onClick={() => void disarmMoveCapture()}
-                      disabled={locked}
-                    >
-                      Disarm
-                    </Button>
-                  }
+            <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
+              <Button
+                size="small"
+                variant={gatherMode ? "contained" : "outlined"}
+                disabled={locked || !captureReady || Boolean(gatherMode) || !selectedKnownVariant}
+                onClick={() => void startGather(selectedOutcome)}
+              >
+                Gather{" "}
+                {outcomes.find((item) => item.value === selectedOutcome)?.label.toLowerCase()} data
+              </Button>
+              {gatherMode && (
+                <Button
+                  size="small"
+                  color="error"
+                  disabled={locked}
+                  onClick={() => {
+                    setGatherMode(null);
+                    setGatherComplete(false);
+                    void disarmMoveCapture();
+                  }}
                 >
-                  Armed: {moveCapture.armed.characterLabel} · {moveCapture.armed.moveLabel} ·{" "}
-                  {moveCapture.armed.outcome}. It remains armed for additional takes until disarmed.
-                </Alert>
-              )}
-              {moveCapture.active && (
-                <Alert severity="warning">
-                  Recording move take: {moveCapture.active.moveLabel} · {moveCapture.active.outcome}
-                </Alert>
+                  End gather mode
+                </Button>
               )}
             </Stack>
-            <Box role="tabpanel" sx={{ display: section === "review" ? "block" : "none" }}>
-              <Paper variant="outlined" sx={{ p: 1.25 }}>
-                <Stack spacing={1}>
-                  <Stack
-                    direction="row"
-                    spacing={1}
-                    sx={{ alignItems: "center", flexWrap: "wrap" }}
-                  >
-                    <Typography variant="subtitle1" sx={{ flex: 1 }}>
-                      Unprocessed moves ({unprocessedTakes.length})
-                    </Typography>
+            {selectedKnownVariant && (
+              <Alert severity="info">
+                <Typography variant="subtitle2">
+                  Automatic {selectedOutcome} queue · {selectedKnownVariant.label}
+                </Typography>
+                <Typography variant="body2">
+                  {automaticQueue.length} supported move
+                  {automaticQueue.length === 1 ? "" : "s"} queued ·{" "}
+                  {
+                    automatedPreview.filter(
+                      ({ eligibility }) =>
+                        eligibility.eligible && eligibility.validation === "needs-validation",
+                    ).length
+                  }{" "}
+                  recipes not yet verified in game. Existing takes and manual-only moves remain
+                  visible until this outcome is processed and accepted.
+                </Typography>
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  sx={{ alignItems: "center", flexWrap: "wrap", mt: 1 }}
+                >
+                  <FormControl size="small" sx={{ minWidth: 130 }} disabled={automaticRunOpen}>
+                    <InputLabel id="automatic-facing-label">Facing</InputLabel>
+                    <Select
+                      labelId="automatic-facing-label"
+                      label="Facing"
+                      value={automaticFacing}
+                      onChange={(event) =>
+                        setAutomaticFacing(event.target.value as "Right" | "Left")
+                      }
+                    >
+                      <MenuItem value="Right">Right</MenuItem>
+                      <MenuItem value="Left">Left</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <TextField
+                    size="small"
+                    type="number"
+                    label="Charge hold (ms)"
+                    value={chargeHoldMs}
+                    onChange={(event) => setChargeHoldMs(Number(event.target.value))}
+                    disabled={automaticRunOpen}
+                    slotProps={{ htmlInput: { min: 100, max: 5000, step: 50 } }}
+                    sx={{ width: 160 }}
+                  />
+                  {!automaticRunOpen && (
                     <Button
                       size="small"
-                      onClick={() => void loadMoveEvidence()}
-                      disabled={evidenceLoading || Boolean(processingTakeId)}
-                    >
-                      Refresh
-                    </Button>
-                    <Button
                       variant="contained"
-                      size="small"
-                      onClick={() => void processAll()}
                       disabled={
-                        !selectedKnownVariant ||
-                        unprocessedTakes.length === 0 ||
-                        Boolean(processingTakeId) ||
-                        Boolean(batchProgress && batchProgress.done < batchProgress.total) ||
-                        obsState.recording.active
+                        locked ||
+                        !captureReady ||
+                        Boolean(gatherMode) ||
+                        !Number.isInteger(chargeHoldMs) ||
+                        chargeHoldMs < 100 ||
+                        chargeHoldMs > 5000 ||
+                        automaticQueue.length === 0
                       }
+                      onClick={() => void startAutomaticPass()}
                     >
-                      Process all
+                      Start automatic {selectedOutcome} pass ({automaticQueue.length})
                     </Button>
-                  </Stack>
+                  )}
                   <Typography variant="caption" color="text.secondary">
-                    {selectedKnownVariant?.label ?? "Select a character/support"} · processing uses
-                    saved videos and leaves acceptance for review. The situation shown is the
-                    capture request, not a verified opponent outcome.
+                    Set the training position, target state, and facing first, then focus the game.
+                    Bracketed moves hold their attack button for the selected duration.
                   </Typography>
-                  {batchProgress && (
-                    <Alert
-                      severity={
-                        batchProgress.done < batchProgress.total
-                          ? "info"
-                          : batchFailureCount > 0
-                            ? "warning"
-                            : "success"
-                      }
-                    >
-                      Attempted {batchProgress.done} of {batchProgress.total} takes
-                      {batchProgress.done === batchProgress.total
-                        ? `. ${batchFailureCount} failed; review the outcomes below and retry failures.`
-                        : processingTakeId
-                          ? ` · currently processing ${allRecordings.find((item) => item.id === processingTakeId)?.moveTake?.moveLabel ?? processingTakeId}`
-                          : ""}
-                    </Alert>
-                  )}
-                  {captureReviewQueue.length > 0 && (
-                    <>
-                      <Divider />
-                      <Typography variant="subtitle2">
-                        Automated videos awaiting your review
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        Watch each clip and confirm the move, whiff, complete animation, visible
-                        input/frame meter, and clean reset. Only approved clips can be processed.
-                      </Typography>
-                      {captureReviewQueue.map((recording) => (
-                        <Stack
-                          key={recording.id}
-                          direction="row"
-                          spacing={1}
-                          sx={{ alignItems: "center", flexWrap: "wrap" }}
-                        >
-                          <VideoRowButton
-                            recording={recording}
-                            selected={selectedPlayback?.id === recording.id}
-                            onSelect={() => openRecording(recording.id)}
-                          >
-                            <Typography variant="body2">
-                              {recording.moveTake?.moveLabel} · {recording.moveTake?.outcome}
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {recording.name}
-                            </Typography>
-                          </VideoRowButton>
-                          <Button
-                            size="small"
-                            disabled={reviewBusy}
-                            onClick={() => void reviewAutomatedCapture(recording.id, "approve")}
-                          >
-                            Approve for processing
-                          </Button>
-                          <Button
-                            size="small"
-                            color="error"
-                            disabled={reviewBusy}
-                            onClick={() => void reviewAutomatedCapture(recording.id, "reject")}
-                          >
-                            Reject
-                          </Button>
-                          <Button
-                            size="small"
-                            color="error"
-                            disabled={
-                              locked ||
-                              Boolean(processingTakeId) ||
-                              Boolean(deletingTakeId) ||
-                              reviewBusy
-                            }
-                            onClick={() => {
-                              setDeleteError(null);
-                              setDeleteTarget(recording);
-                            }}
-                          >
-                            Delete video
-                          </Button>
-                        </Stack>
-                      ))}
-                    </>
-                  )}
-                  {unprocessedTakes.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary">
-                      No pending unprocessed move videos for this character/support.
-                    </Typography>
-                  ) : (
-                    <Stack spacing={0.5}>
-                      {unprocessedTakes.map((recording) => (
-                        <Stack
-                          key={recording.id}
-                          direction="row"
-                          spacing={1}
-                          sx={{ alignItems: "center", flexWrap: "wrap" }}
-                        >
-                          <VideoRowButton
-                            recording={recording}
-                            selected={selectedPlayback?.id === recording.id}
-                            onSelect={() => openRecording(recording.id)}
-                          >
-                            <Typography variant="body2">
-                              {recording.moveTake?.moveLabel} · {recording.moveTake?.outcome}
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {recording.name}
-                            </Typography>
-                          </VideoRowButton>
-                          <Button
-                            size="small"
-                            disabled={Boolean(processingTakeId) || obsState.recording.active}
-                            onClick={() => void processTake(recording)}
-                          >
-                            Process
-                          </Button>
-                          <Button
-                            size="small"
-                            color="error"
-                            disabled={
-                              locked || Boolean(processingTakeId) || Boolean(deletingTakeId)
-                            }
-                            onClick={() => {
-                              setDeleteError(null);
-                              setDeleteTarget(recording);
-                            }}
-                          >
-                            Delete video
-                          </Button>
-                        </Stack>
-                      ))}
-                    </Stack>
-                  )}
-                  {processingReviewTakes.length > 0 && (
-                    <>
-                      <Divider />
-                      <Typography variant="subtitle2">Outcome summary</Typography>
-                      {processingReviewTakes.map((recording) => {
-                        const summary = moveTakeOutcomeSummary(recording);
-                        const failure = processingErrors[recording.id];
-                        return (
-                          <Stack key={recording.id} spacing={0.25} sx={{ py: 0.5 }}>
-                            <Stack
-                              direction="row"
-                              spacing={1}
-                              sx={{ alignItems: "center", flexWrap: "wrap" }}
-                            >
-                              <VideoRowButton
-                                recording={recording}
-                                selected={selectedPlayback?.id === recording.id}
-                                onSelect={() => openRecording(recording.id)}
-                              >
-                                <Typography variant="body2">
-                                  {recording.moveTake?.moveLabel} · requested{" "}
-                                  {recording.moveTake?.outcome}
-                                </Typography>
-                                <Typography
-                                  variant="caption"
-                                  color={
-                                    failure || recording.moveTake?.validation.status === "mismatch"
-                                      ? "error"
-                                      : recording.moveTake?.validation.status === "verified"
-                                        ? "success.main"
-                                        : "text.secondary"
-                                  }
-                                >
-                                  {failure ? "Processing failed" : summary.result} ·{" "}
-                                  {recording.moveTake?.evidenceStatus ?? "pending"}
-                                </Typography>
-                              </VideoRowButton>
-                              <Button
-                                size="small"
-                                onClick={() => setSelectedMoveId(recording.moveTake?.moveId ?? "")}
-                              >
-                                Select move
-                              </Button>
-                            </Stack>
-                            <Typography
-                              variant="caption"
-                              color={failure ? "error" : "text.secondary"}
-                            >
-                              {failure ?? summary.detail}
-                            </Typography>
-                          </Stack>
-                        );
-                      })}
-                    </>
-                  )}
                 </Stack>
-              </Paper>
-            </Box>
-            <Box role="tabpanel" sx={{ display: section === "evidence" ? "block" : "none" }}>
-              {selectedMove && (
-                <Paper variant="outlined" sx={{ p: 1.25 }}>
-                  <Stack spacing={0.75}>
-                    {selectedKnownVariant && (
-                      <Typography variant="caption" color="text.secondary">
-                        Accepted measurements:{" "}
-                        {measuredFields
-                          .map((field) => {
-                            const source = effectiveMeasurement(
-                              catalogForMeasurements,
-                              selectedKnownVariant.character,
-                              selectedKnownVariant.support,
-                              selectedMove.id,
-                              field,
-                            );
-                            return source ? `${field} ${source.value}` : null;
-                          })
-                          .filter(Boolean)
-                          .join(" · ") || "none yet"}
-                      </Typography>
-                    )}
-                    <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                      <Typography variant="subtitle2" sx={{ flex: 1 }}>
-                        Move evidence ({moveTakes.length} take{moveTakes.length === 1 ? "" : "s"})
-                      </Typography>
-                      <Button
-                        size="small"
-                        onClick={() => void loadMoveEvidence()}
-                        disabled={evidenceLoading}
+                {(automaticRun.status === "completed" ||
+                  automaticRun.status === "cancelled" ||
+                  automaticRun.status === "error") && (
+                  <Alert
+                    severity={
+                      automaticRun.status === "error"
+                        ? "error"
+                        : automaticRun.status === "completed"
+                          ? "success"
+                          : "info"
+                    }
+                    sx={{ mt: 1 }}
+                  >
+                    Automatic {automaticRun.outcome ?? "whiff"} pass {automaticRun.status}
+                    {automaticRun.total
+                      ? " · " + automaticRun.index + " of " + automaticRun.total
+                      : ""}
+                    {automaticRun.error ? " · " + automaticRun.error : ""}
+                  </Alert>
+                )}
+              </Alert>
+            )}
+            {gatherMode && selectedKnownVariant && (
+              <Alert
+                severity={gatherComplete ? "success" : "info"}
+                action={
+                  !gatherComplete && !locked ? (
+                    <Button color="inherit" size="small" onClick={() => void skipGatherMove()}>
+                      Skip this move
+                    </Button>
+                  ) : undefined
+                }
+              >
+                {gatherComplete
+                  ? "Capture pass complete for " +
+                    selectedKnownVariant.label +
+                    ". Review pending takes and retry failures."
+                  : "Gathering " +
+                    gatherMode +
+                    " for " +
+                    selectedKnownVariant.label +
+                    ": " +
+                    (selectedMove?.input ?? "loading") +
+                    ". Start and stop recording with the header control or F9. Next: " +
+                    (gatherQueue.find((move) => move.id !== selectedMoveId)?.input ??
+                      "end of queue") +
+                    "."}
+                {gatherCounts &&
+                  " Complete " +
+                    gatherCounts.complete +
+                    " · pending " +
+                    gatherCounts.pending +
+                    " · missing " +
+                    gatherCounts.missing +
+                    " · redo " +
+                    gatherCounts["needs-redo"] +
+                    " · not applicable " +
+                    gatherCounts["not-applicable"] +
+                    "."}
+              </Alert>
+            )}
+            {moveCapture.armed && (
+              <Alert
+                severity="info"
+                action={
+                  <Button
+                    color="inherit"
+                    size="small"
+                    onClick={() => void disarmMoveCapture()}
+                    disabled={locked}
+                  >
+                    Disarm
+                  </Button>
+                }
+              >
+                Armed: {moveCapture.armed.characterLabel} · {moveCapture.armed.moveLabel} ·{" "}
+                {moveCapture.armed.outcome}. It remains armed for additional takes until disarmed.
+              </Alert>
+            )}
+            {moveCapture.active && (
+              <Alert severity="warning">
+                Recording move take: {moveCapture.active.moveLabel} · {moveCapture.active.outcome}
+              </Alert>
+            )}
+
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexWrap: "wrap" }}>
+              <Typography variant="subtitle1" sx={{ flex: 1 }}>
+                {outcomes.find((item) => item.value === selectedOutcome)?.label} takes (
+                {availableMoves.length - completedMoveIds.size} to do)
+              </Typography>
+              {completedMoveIds.size > 0 && (
+                <Button size="small" onClick={() => setShowCompletedMoves((current) => !current)}>
+                  {showCompletedMoves
+                    ? "Hide completed moves"
+                    : "Show completed moves (" + completedMoveIds.size + ")"}
+                </Button>
+              )}
+            </Stack>
+            {availableMoves.length === 0 && (
+              <Typography variant="body2" color="text.secondary">
+                No moves are listed for this character/support in Tech.
+              </Typography>
+            )}
+            {availableMoves.length > 0 && visibleMoves.length === 0 && (
+              <Alert severity="success">
+                All applicable {selectedOutcome} takes are processed and accepted.
+              </Alert>
+            )}
+            {visibleMoves.map((move) => {
+              const takes = selectedKnownVariant
+                ? allRecordings.filter(
+                    (recording) =>
+                      recording.moveTake?.catalogMoveId === selectedKnownVariant.id + "/" + move.id,
+                  )
+                : [];
+              const automation = automatedPreview.find(
+                (item) => item.move.id === move.id,
+              )?.eligibility;
+              const manualReason =
+                automation &&
+                !automation.eligible &&
+                (automation.kind === "nonstandard" || automation.kind === "unsupported")
+                  ? automation.reason
+                  : null;
+              const measurements =
+                selectedKnownVariant &&
+                measuredFields
+                  .map((field) => {
+                    const source = effectiveMeasurement(
+                      catalogForMeasurements,
+                      selectedKnownVariant.character,
+                      selectedKnownVariant.support,
+                      move.id,
+                      field,
+                    );
+                    return source ? field + " " + source.value : null;
+                  })
+                  .filter(Boolean)
+                  .join(" · ");
+              return (
+                <Paper
+                  key={move.id}
+                  variant="outlined"
+                  sx={{
+                    p: 1,
+                    borderColor: selectedMoveId === move.id ? "primary.main" : "divider",
+                  }}
+                >
+                  <Stack spacing={1}>
+                    <Stack
+                      direction="row"
+                      spacing={1}
+                      sx={{ alignItems: "center", flexWrap: "wrap" }}
+                    >
+                      <ButtonBase
+                        onClick={() => {
+                          setSelectedMoveId(move.id);
+                          setSelectedPlaybackId(null);
+                        }}
+                        sx={{ borderRadius: 1, px: 0.5, textAlign: "left" }}
+                        aria-label={"Select move " + move.input}
                       >
-                        {evidenceLoading ? "Refreshing..." : "Refresh"}
-                      </Button>
+                        <Typography variant="subtitle1">{move.input}</Typography>
+                      </ButtonBase>
+                      {move.isCharged && (
+                        <Typography variant="caption" color="text.secondary">
+                          Charged
+                        </Typography>
+                      )}
+                      {move.nonstandard && (
+                        <Typography variant="caption" color="text.secondary">
+                          Manual capture only
+                        </Typography>
+                      )}
+                      <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+                        {measurements ? "Accepted: " + measurements : "No accepted measurements"}
+                      </Typography>
                     </Stack>
-                    <Typography variant="caption" color="text.secondary">
-                      Pending takes require processing and review. Only accepted active takes
-                      complete evidence slots.
-                    </Typography>
-                    {moveTakes.length === 0 ? (
+                    {(manualReason || move.isCharged) && (
                       <Typography variant="caption" color="text.secondary">
-                        No recorded takes for this move yet.
+                        {manualReason}
+                        {move.isCharged &&
+                          " Review the video to confirm the charged move activated."}
                       </Typography>
-                    ) : (
-                      [
-                        ...outcomes,
-                        {
-                          value: "hit" as const,
-                          label: "Legacy hit",
-                          description: "Opponent state unknown.",
-                        },
-                      ].map((item) => {
-                        const takes = moveTakes.filter(
-                          (take) => take.moveTake?.outcome === item.value,
-                        );
-                        return (
-                          <Box key={item.value}>
-                            <Typography variant="caption" color="text.secondary">
-                              {item.label}: {takes.length} take{takes.length === 1 ? "" : "s"}
-                            </Typography>
-                            {takes.map((take) => {
-                              const matched = take.analysis?.moves.find(
-                                (move) =>
-                                  move.id === take.moveTake?.validation.matchedAnalysisMoveId,
-                              );
-                              const summary = matched
-                                ? `${matched.phases.startup} startup · ${matched.phases.active} active · ${matched.phases.recovery} recovery${item.value === "block" ? ` · on block ${matched.onBlock == null ? "?" : `${matched.onBlock >= 0 ? "+" : ""}${matched.onBlock}`}` : ""}${item.value === "hit" ? ` · on hit ${matched.onHit == null ? "?" : `${matched.onHit >= 0 ? "+" : ""}${matched.onHit}`}` : ""}`
-                                : (take.moveTake?.validation.message ?? "Awaiting processing.");
-                              return (
-                                <Typography
-                                  key={take.id}
-                                  variant="caption"
-                                  component="div"
-                                  color={
-                                    take.moveTake?.validation.status === "verified"
-                                      ? "success.main"
-                                      : "text.secondary"
-                                  }
-                                  sx={{ pl: 1, overflowWrap: "anywhere" }}
-                                >
-                                  [{take.moveTake?.evidenceStatus ?? "pending"}]{" "}
-                                  {take.moveTake?.validation.status ?? "unprocessed"} · {take.name}{" "}
-                                  · {summary}
-                                </Typography>
-                              );
-                            })}
-                          </Box>
-                        );
-                      })
                     )}
-                    {moveTakes.map((take) => (
-                      <Stack
-                        key={take.id}
-                        direction="row"
-                        spacing={1}
-                        sx={{ alignItems: "center", flexWrap: "wrap" }}
-                      >
-                        <VideoRowButton
-                          recording={take}
-                          selected={selectedPlayback?.id === take.id}
-                          onSelect={() => openRecording(take.id)}
-                        >
-                          <Typography variant="body2">{take.name}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {take.moveTake?.outcome} · {take.moveTake?.evidenceStatus ?? "pending"}
-                          </Typography>
-                        </VideoRowButton>
-                        {take.moveTake?.evidenceStatus !== "active" && (
-                          <Button
-                            size="small"
-                            disabled={
-                              Boolean(processingTakeId) ||
-                              (take.moveTake?.captureMethod === "automated" &&
-                                take.moveTake.captureReviewStatus !== "approved-for-processing")
+                    <Box
+                      sx={{
+                        display: "grid",
+                        gridTemplateColumns: "minmax(0, 1fr)",
+                        gap: 1,
+                      }}
+                    >
+                      {outcomes
+                        .filter((item) => item.value === selectedOutcome)
+                        .map((item) => (
+                          <MoveTakeCard
+                            key={item.value}
+                            move={move}
+                            outcome={item}
+                            takes={takes.filter((take) => take.moveTake?.outcome === item.value)}
+                            selectedPlaybackId={selectedPlayback?.id ?? null}
+                            captureReady={captureReady}
+                            locked={locked || Boolean(gatherMode)}
+                            obsRecording={obsState.recording.active}
+                            batchActive={batchActive}
+                            reviewBusy={reviewBusy}
+                            processingTakeId={processingTakeId}
+                            deletingTakeId={deletingTakeId}
+                            processingErrors={processingErrors}
+                            onArm={() => {
+                              if (selectedKnownVariant) {
+                                void armMove(move, item.value, selectedKnownVariant);
+                              }
+                            }}
+                            onWatch={openRecording}
+                            onReviewCapture={(id, action) =>
+                              void reviewAutomatedCapture(id, action)
                             }
-                            onClick={() => void processTake(take)}
-                          >
-                            {processingTakeId === take.id
-                              ? "Processing..."
-                              : take.analysis
-                                ? "Reprocess"
-                                : "Process"}
-                          </Button>
-                        )}
-                        {take.moveTake?.evidenceStatus !== "active" && (
-                          <Button
-                            size="small"
-                            disabled={reviewBusy || !take.analysis}
-                            onClick={() => void reviewTake(take.id, "accept")}
-                          >
-                            Accept reviewed take
-                          </Button>
-                        )}
-                        {take.moveTake?.evidenceStatus !== "archived" && (
-                          <Button
-                            size="small"
-                            color="error"
-                            disabled={reviewBusy}
-                            onClick={() => void reviewTake(take.id, "archive")}
-                          >
-                            Archive
-                          </Button>
-                        )}
-                        {processingErrors[take.id] && (
-                          <Typography variant="caption" color="error">
-                            {processingErrors[take.id]}
-                          </Typography>
-                        )}
-                      </Stack>
-                    ))}
-                    {moveTakes.length > 0 && activeMoveTakes.length === 0 && (
-                      <Alert severity="warning">
-                        No evidence slot has an accepted active take yet.
-                      </Alert>
-                    )}
+                            onProcess={(recording) => void processTake(recording)}
+                            onReviewEvidence={(id) => void reviewTake(id)}
+                            onDelete={(recording) => {
+                              setDeleteError(null);
+                              setDeleteTarget(recording);
+                            }}
+                          />
+                        ))}
+                    </Box>
                   </Stack>
                 </Paper>
-              )}
-              {!selectedMove && (
-                <Typography variant="body2" color="text.secondary">
-                  Select a move to view its evidence.
-                </Typography>
-              )}
-            </Box>
-
+              );
+            })}
             {error && <Alert severity="error">{error}</Alert>}
           </Stack>
           <Box
@@ -1606,13 +1623,14 @@ export function MoveCapturePanel({
           if (!deletingTakeId) setDeleteTarget(null);
         }}
       >
-        <DialogTitle>Delete pending move video?</DialogTitle>
+        <DialogTitle>Delete move take?</DialogTitle>
         <DialogContent>
           <Stack spacing={1}>
             <Typography>
               Permanently delete {deleteTarget ? `“${deleteTarget.name}”` : "this video"} and its
-              move-take metadata? The deleted take will no longer block a retake. Any clips made
-              from this recording will remain but lose their source link.
+              move-take metadata? Its accepted measurements will be removed from Tech. The deleted
+              take will no longer block a retake. Any clips made from this recording will remain but
+              lose their source link.
             </Typography>
             {deleteError && <Alert severity="error">{deleteError}</Alert>}
           </Stack>
@@ -1624,10 +1642,16 @@ export function MoveCapturePanel({
           <Button
             variant="contained"
             color="error"
-            disabled={locked || Boolean(processingTakeId) || Boolean(deletingTakeId)}
-            onClick={() => void deletePendingMove()}
+            disabled={
+              locked ||
+              batchActive ||
+              reviewBusy ||
+              Boolean(processingTakeId) ||
+              Boolean(deletingTakeId)
+            }
+            onClick={() => void deleteMoveTake()}
           >
-            {deletingTakeId ? "Deleting..." : "Delete video"}
+            {deletingTakeId ? "Deleting..." : "Delete take"}
           </Button>
         </DialogActions>
       </Dialog>

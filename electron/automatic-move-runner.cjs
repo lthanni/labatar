@@ -125,9 +125,6 @@ function createAutomaticMoveRunner({
         publish("running", { phase: "tail" });
         await sleep(tailMs, activeRun.controller.signal);
         checkInterrupted(activeRun);
-        publish("running", { phase: "reset-after" });
-        await reset({ move: currentMove, stage: "after" });
-        checkInterrupted(activeRun);
         publish("running", { phase: "stop-recording" });
         const recording = await stopRecord({ move: currentMove, interrupted: false });
         activeRun.recording = false;
@@ -145,6 +142,9 @@ function createAutomaticMoveRunner({
           phase: "advance",
         });
       }
+      // The last move can finish while a cancel request is waiting on OBS or
+      // manifest verification. Honor that request before publishing complete.
+      checkInterrupted(activeRun);
       publish("complete", { index: activeRun.index, currentMove: null, phase: null, error: null });
       run = null;
     } catch (error) {
