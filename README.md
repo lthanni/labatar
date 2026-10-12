@@ -10,6 +10,20 @@ Run the `.exe` installer and launch Labatar from the Start menu. Windows may sho
 
 ## Match history
 
+### Browser version
+
+The browser version runs Match History without installing the Windows app. Choose the Avatar Legends game folder to scan `.dlr` replays recursively, read available rating logs, and load portraits from local `.pak` files. Files stay in your browser session and are not uploaded. A selected `replays` folder also works, without sibling logs or portraits. Use **Rescan** after new matches when your browser supports persistent folder access; otherwise choose the folder again.
+
+To run it locally:
+
+```powershell
+vp run web:dev
+```
+
+To build the static site for GitHub Pages, run `vp run web:build`. The output is in `web-dist/`. The Pages workflow publishes it at `https://lthanni.github.io/labatar/` after GitHub Pages is configured to use **GitHub Actions** and the changes are pushed to `master`.
+
+### Windows app
+
 1. Launch Labatar.
 2. Open the cog-shaped **Settings** dialog and choose your game folder under **Game folder**. Labatar starts with the usual Steam installation folder when it exists:
    `C:\Program Files (x86)\Steam\steamapps\common\Avatar Legends The Fighting Game`

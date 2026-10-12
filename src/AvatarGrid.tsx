@@ -596,6 +596,8 @@ export function AvatarGrid({
   replayFolder,
   active,
   recordingsRefreshToken,
+  webMode = false,
+  webPortraits = {},
   playerOfInterest,
   playerCounts,
   playerOverride,
@@ -611,6 +613,8 @@ export function AvatarGrid({
   replayFolder: string | null;
   active: boolean;
   recordingsRefreshToken: number;
+  webMode?: boolean;
+  webPortraits?: Readonly<Record<string, PortraitUrls>>;
   playerOfInterest: string | null;
   playerCounts: Record<string, number>;
   playerOverride: string | null;
@@ -646,8 +650,9 @@ export function AvatarGrid({
   const [selectedMatchupGameIds, setSelectedMatchupGameIds] = useState<string[] | null>(null);
   const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
   const [portraits, setPortraits] = useState<Record<string, PortraitUrls>>({});
+  const visiblePortraits = webMode ? webPortraits : portraits;
   useEffect(() => {
-    if (!active || !window.electronAPI?.replays) return;
+    if (!active || webMode || !window.electronAPI?.replays) return;
     let cancelled = false;
     void window.electronAPI.replays.stagingStatus().then(
       (status) => {
@@ -668,7 +673,7 @@ export function AvatarGrid({
     return () => {
       cancelled = true;
     };
-  }, [active, replayFolder, rowData]);
+  }, [active, replayFolder, rowData, webMode]);
   const portraitPairs = useMemo(() => {
     const pairs = new Map<string, CharacterSupportPair>();
     const characters = new Set<string>(OPPONENT_CHARACTER_ROSTER);
@@ -690,6 +695,7 @@ export function AvatarGrid({
     return [...pairs.values()];
   }, [rowData]);
   useEffect(() => {
+    if (webMode) return;
     const resolvePortraits = window.electronAPI?.replays?.resolvePortraits;
     if (!active || !resolvePortraits) return;
     let cancelled = false;
@@ -715,9 +721,9 @@ export function AvatarGrid({
     return () => {
       cancelled = true;
     };
-  }, [active, portraitPairs, recordingsRefreshToken]);
+  }, [active, portraitPairs, recordingsRefreshToken, webMode]);
   useEffect(() => {
-    if (!active || !replayFolder || !window.electronAPI?.recordings) return;
+    if (!active || webMode || !replayFolder || !window.electronAPI?.recordings) return;
     let cancelled = false;
     void window.electronAPI.recordings
       .list()
@@ -730,7 +736,7 @@ export function AvatarGrid({
     return () => {
       cancelled = true;
     };
-  }, [active, replayFolder, recordingsRefreshToken]);
+  }, [active, replayFolder, recordingsRefreshToken, webMode]);
   const recordingReplayIndex = useMemo(() => buildRecordingReplayIndex(recordings), [recordings]);
   const replayHashesById = useMemo(
     () =>
@@ -953,8 +959,8 @@ export function AvatarGrid({
       {
         colId: "actions",
         headerName: "Player",
-        width: 360,
-        minWidth: 340,
+        width: webMode ? 272 : 360,
+        minWidth: webMode ? 250 : 340,
         sortable: false,
         filter: false,
         cellRenderer: (params: ICellRendererParams<DisplayRow>) => {
@@ -1000,29 +1006,31 @@ export function AvatarGrid({
                 ) : (
                   <Box component="span" aria-hidden="true" sx={{ width: 72, flexShrink: 0 }} />
                 )}
-                <Box sx={{ width: 88, flexShrink: 0 }}>
-                  {recordingId ? (
-                    <button
-                      type="button"
-                      style={{ width: "100%" }}
-                      aria-label={
-                        isSession
-                          ? `Open recording for set against ${data.opponent}`
-                          : "Open set recording"
-                      }
-                      title="Open set recording"
-                      onClick={() => openRecording(recordingId)}
-                    >
-                      Recording
-                    </button>
-                  ) : (
-                    <Box
-                      component="span"
-                      aria-hidden="true"
-                      sx={{ display: "block", width: "100%", height: 24 }}
-                    />
-                  )}
-                </Box>
+                {!webMode && (
+                  <Box sx={{ width: 88, flexShrink: 0 }}>
+                    {recordingId ? (
+                      <button
+                        type="button"
+                        style={{ width: "100%" }}
+                        aria-label={
+                          isSession
+                            ? `Open recording for set against ${data.opponent}`
+                            : "Open set recording"
+                        }
+                        title="Open set recording"
+                        onClick={() => openRecording(recordingId)}
+                      >
+                        Recording
+                      </button>
+                    ) : (
+                      <Box
+                        component="span"
+                        aria-hidden="true"
+                        sx={{ display: "block", width: "100%", height: 24 }}
+                      />
+                    )}
+                  </Box>
+                )}
               </Stack>
               {mmr && (
                 <Box component="span" sx={{ color: "common.white", whiteSpace: "nowrap" }}>
@@ -1051,7 +1059,7 @@ export function AvatarGrid({
                 >
                   <CharacterSupportCell
                     pairs={characterSupportPairsForRow(data, playerOfInterest, "player")}
-                    portraits={portraits}
+                    portraits={visiblePortraits}
                     rightAligned
                   />
                 </Box>
@@ -1168,7 +1176,7 @@ export function AvatarGrid({
               >
                 <CharacterSupportCell
                   pairs={characterSupportPairsForRow(data, playerOfInterest, "opponent")}
-                  portraits={portraits}
+                  portraits={visiblePortraits}
                 />
               </Box>
             </Box>
@@ -1181,10 +1189,11 @@ export function AvatarGrid({
     [
       expandedSessions,
       playerOfInterest,
-      portraits,
+      visiblePortraits,
       recordingReplayIndex,
       replayFolder,
       replayHashesById,
+      webMode,
     ],
   );
   useEffect(() => {
@@ -1234,7 +1243,7 @@ export function AvatarGrid({
           </Typography>
         </Stack>
       )}
-      {stagingStatus && (stagingStatus.active || stagingStatus.issue) && (
+      {!webMode && stagingStatus && (stagingStatus.active || stagingStatus.issue) && (
         <Alert
           severity={stagingStatus.issue ? "warning" : "info"}
           sx={{ mb: 1, textAlign: "left" }}
@@ -1258,14 +1267,16 @@ export function AvatarGrid({
             : ""}
         </Alert>
       )}
-      <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: "center", textAlign: "left" }}>
-        <Typography variant="caption" color="text.secondary">
-          Tip: Right-click a set or game for file, ZIP, and playback actions.
-        </Typography>
-        <Button size="small" onClick={() => onOpenGuide("staging")}>
-          How staging works
-        </Button>
-      </Stack>
+      {!webMode && (
+        <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: "center", textAlign: "left" }}>
+          <Typography variant="caption" color="text.secondary">
+            Tip: Right-click a set or game for file, ZIP, and playback actions.
+          </Typography>
+          <Button size="small" onClick={() => onOpenGuide("staging")}>
+            How staging works
+          </Button>
+        </Stack>
+      )}
       <AnalyticsSection
         fillHeight
         tableContent={
@@ -1290,6 +1301,7 @@ export function AvatarGrid({
                 autoSizeStrategy={{ type: "fitCellContents" }}
                 getRowId={({ data }) => data.id}
                 onCellContextMenu={(params) => {
+                  if (webMode) return;
                   const event = params.event;
                   if (!params.data || !(event instanceof MouseEvent)) return;
                   event.preventDefault();
@@ -1329,7 +1341,9 @@ export function AvatarGrid({
         }
         games={filteredGames}
         sessions={filteredSessions}
-        getPortrait={(character, support) => portraits[portraitPairKey({ character, support })]}
+        getPortrait={(character, support) =>
+          visiblePortraits[portraitPairKey({ character, support })]
+        }
         playerOfInterest={playerOfInterest}
         playerCounts={playerCounts}
         playerOverride={playerOverride}
