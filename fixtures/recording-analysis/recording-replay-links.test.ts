@@ -1,7 +1,43 @@
 import { describe, expect, it } from "vite-plus/test";
-import { buildRecordingReplayIndex, recordingIdForSet } from "../../src/recording-replay-links";
+import {
+  buildRecordingReplayIndex,
+  interruptedMatchForSet,
+  recordingIdForSet,
+} from "../../src/recording-replay-links";
 
 describe("set recording links", () => {
+  it("shows a logged interruption on a set recording whose final game has no replay", () => {
+    const recordings = [
+      {
+        id: "set.mp4",
+        source: "automatic" as const,
+        games: [
+          { matchId: "finished", replayPath: "C:/game/replays/first.dlr" },
+          { matchId: "interrupted", replayPath: null },
+        ],
+      },
+    ];
+    const index = buildRecordingReplayIndex(recordings);
+    expect(
+      interruptedMatchForSet(
+        ["first.dlr"],
+        "C:/game/replays",
+        index,
+        recordings,
+        new Set(["interrupted"]),
+      ),
+    ).toBe("interrupted");
+    expect(
+      interruptedMatchForSet(
+        ["first.dlr"],
+        "C:/game/replays",
+        index,
+        recordings,
+        new Set(["finished"]),
+      ),
+    ).toBeNull();
+  });
+
   it("links an automatic recording by its exact saved replay path", () => {
     const index = buildRecordingReplayIndex([
       {

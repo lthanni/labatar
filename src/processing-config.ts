@@ -17,7 +17,7 @@ import type {
 } from "./processing-config-types";
 
 export const recordingProcessorVersion = "recording-processor/2";
-export const currentCalibrationProfileVersion = 6;
+export const currentCalibrationProfileVersion = 7;
 declare const __RECORDING_PROCESSOR_FINGERPRINT__: string;
 export const recordingProcessorFingerprint = __RECORDING_PROCESSOR_FINGERPRINT__;
 let loading: Promise<ProcessingConfigurationResult> | null = null;

@@ -101,3 +101,25 @@ export function recordingIdForSet(
   }
   return commonRecordingId;
 }
+
+/** An interrupted match has no replay, but can still belong to a recorded set. */
+export function interruptedMatchForSet(
+  replayIds: string[],
+  replayFolder: string | null,
+  index: Map<string, Set<string>>,
+  recordings: ReplayLinkedRecording[],
+  interruptedMatchIds: ReadonlySet<string>,
+  hashesByReplayId?: Map<string, string>,
+) {
+  const recordingId = recordingIdForSet(replayIds, replayFolder, index, hashesByReplayId);
+  if (!recordingId) return null;
+  const recording = recordings.find((entry) => entry.id === recordingId);
+  return (
+    recording?.games?.find(
+      (game) =>
+        typeof game.matchId === "string" &&
+        interruptedMatchIds.has(game.matchId) &&
+        !game.replayPath,
+    )?.matchId ?? null
+  );
+}

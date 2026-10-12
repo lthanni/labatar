@@ -156,8 +156,11 @@ and its selected evidence slot is missing or needs redo. Supported recipes are
 `1`–`9`, `236`, and `214` with `A`, `B`, `C`, `F`, or `EX`, with an optional
 `j.` prefix for jump attacks, plus grounded `2AA` and `5AA`. AA sends two
 separate A taps while holding Down for `2AA`. Its recording contains the base
-`2A` or `5A` episode before the AA follow-up. Processing links the second
-episode to AA only when both episodes are detected. Jump attacks use the same
+`2A` or `5A` action before the AA follow-up. When both actions share one continuous
+framebar episode, processing splits at the end of the base A's first active
+window. Recovery and startup cells before the next active window become AA
+startup. A separate second episode also links to AA when both are detected.
+Jump attacks use the same
 grounded reset point; the worker sends jump before the motion or attack.
 The runner sends `EX` by pressing the configured `A` and `B` keys together.
 Bracketed charged inputs (such as `5[C]` or `236[EX]`) hold their attack

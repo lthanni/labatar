@@ -7,7 +7,7 @@ import type inputDisplayProfile from "./config/input-display-profile.json";
 export type ProcessingConfiguration = {
   schemaVersion: 1;
   /** Absent is the original persisted palette profile. */
-  calibrationProfileVersion?: 1 | 2 | 3 | 4 | 5 | 6;
+  calibrationProfileVersion?: 1 | 2 | 3 | 4 | 5 | 6 | 7;
   revision: number;
   updatedAt: string;
   origin: "legacy-migration" | "defaults" | "edited" | "imported";

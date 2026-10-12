@@ -70,6 +70,10 @@ export type RecordingAnalysisMove = {
   startTime: number;
   endTime: number;
   phases: RecordingAnalysisPhases;
+  /** Cyan flow stance cells in the stitched attacker framebar. */
+  flowStanceFrames?: number;
+  /** Move duration including flow stance, orange gaps, valid hitpause, and trailing airborne frames. */
+  totalDurationFrames?: number;
   opponentPhases: RecordingAnalysisDefense;
   /** Defender blockstun minus attacker recovery; positive means plus on block. */
   onBlock?: number | null;
@@ -169,6 +173,9 @@ export type RecordingAnalysisDiagnosticFrame = {
   trainingState: "unknown" | "training" | "not-training";
   trainingScore: number;
   framebarChanged: boolean;
+  framebarCounter?: number | null;
+  framebarCounterConfidence?: number | null;
+  framebarCounterChanged?: boolean;
   moveEvent: "start" | "end" | null;
   activeMove: boolean;
 };

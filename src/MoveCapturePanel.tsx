@@ -19,7 +19,7 @@ import {
 } from "@mui/material";
 import { useObsRecording } from "./ObsRecordingContext";
 import type { DevBlackoutStatus } from "./dev-blackout-types";
-import { withCommonTechMoves } from "./common-tech-moves";
+import { resolveFlowStance, withCommonTechMoves } from "./common-tech-moves";
 import { linkLegacyChargedMoves } from "./charged-move-variants";
 import {
   automatedMoveEligibility,
@@ -152,6 +152,7 @@ function MoveTakeCard({
   selectedPlaybackId,
   captureReady,
   locked,
+  deleteLocked,
   obsRecording,
   batchActive,
   reviewBusy,
@@ -172,6 +173,7 @@ function MoveTakeCard({
   selectedPlaybackId: string | null;
   captureReady: boolean;
   locked: boolean;
+  deleteLocked: boolean;
   obsRecording: boolean;
   batchActive: boolean;
   reviewBusy: boolean;
@@ -322,7 +324,7 @@ function MoveTakeCard({
                         size="small"
                         color="error"
                         disabled={
-                          locked ||
+                          deleteLocked ||
                           batchActive ||
                           Boolean(processingTakeId) ||
                           Boolean(deletingTakeId) ||
@@ -350,28 +352,34 @@ function readTechMoves(character: string): TechMove[] {
     const savedMoves: TechMove[] = Array.isArray(moves)
       ? moves
           .filter((move) => typeof move?.id === "string" && typeof move?.input === "string")
-          .map((move) => ({
-            ...move,
-            character,
-            input:
-              normalizeMoveNotation(move.input, {
-                allowDirectionless: Boolean(move.dependsOnMoveId),
-              }) ?? move.input,
-            isStanceParent: move.isStanceParent === true || move.isRekka === true,
-            stanceFollowupPattern: move.stanceFollowupPattern ?? move.rekkaFollowupPattern ?? null,
-            stanceMinimumDuration: move.stanceMinimumDuration ?? move.rekkaMinimumDuration ?? null,
-            chargedMoveId: move.chargedMoveId ?? null,
-            baseMoveId: move.baseMoveId ?? null,
-            isCharged: move.isCharged === true,
-            nonstandard: move.nonstandard === true,
-            nonstandardNote: typeof move.nonstandardNote === "string" ? move.nonstandardNote : "",
-            flowCancellable:
-              typeof move.flowCancellable === "boolean"
-                ? move.flowCancellable
-                : isFlowCancellableByDefault(move.input, {
-                    allowDirectionless: Boolean(move.dependsOnMoveId),
-                  }),
-          }))
+          .map((move) => {
+            const isFlowStance = resolveFlowStance(move);
+            return {
+              ...move,
+              character,
+              input:
+                normalizeMoveNotation(move.input, {
+                  allowDirectionless: Boolean(move.dependsOnMoveId),
+                }) ?? move.input,
+              isStanceParent: move.isStanceParent === true || isFlowStance || move.isRekka === true,
+              isFlowStance,
+              stanceFollowupPattern:
+                move.stanceFollowupPattern ?? move.rekkaFollowupPattern ?? null,
+              stanceMinimumDuration:
+                move.stanceMinimumDuration ?? move.rekkaMinimumDuration ?? null,
+              chargedMoveId: move.chargedMoveId ?? null,
+              baseMoveId: move.baseMoveId ?? null,
+              isCharged: move.isCharged === true,
+              nonstandard: move.nonstandard === true,
+              nonstandardNote: typeof move.nonstandardNote === "string" ? move.nonstandardNote : "",
+              flowCancellable:
+                typeof move.flowCancellable === "boolean"
+                  ? move.flowCancellable
+                  : isFlowCancellableByDefault(move.input, {
+                      allowDirectionless: Boolean(move.dependsOnMoveId),
+                    }),
+            };
+          })
           .filter(
             (move) =>
               parseMoveNotation(move.input, { allowDirectionless: Boolean(move.dependsOnMoveId) })
@@ -1568,6 +1576,7 @@ export function MoveCapturePanel({
                             selectedPlaybackId={selectedPlayback?.id ?? null}
                             captureReady={captureReady}
                             locked={locked || Boolean(gatherMode)}
+                            deleteLocked={automaticRunOpen}
                             obsRecording={obsState.recording.active}
                             batchActive={batchActive}
                             reviewBusy={reviewBusy}

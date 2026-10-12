@@ -89,7 +89,7 @@ describe("persistent processing calibration", () => {
     });
     expect(profile.digitTemplates[0].id).toBe("one");
     expect(profile.trainingMeter.thresholds.enterThreshold).toBe(0.6);
-    expect(profile.calibrationProfileVersion).toBe(6);
+    expect(profile.calibrationProfileVersion).toBe(7);
     expect(legacy.size).toBe(4);
   });
 
@@ -100,7 +100,7 @@ describe("persistent processing calibration", () => {
       (color) => color.name !== "startup-bright",
     );
     const upgraded = upgradeProcessingConfigurationProfile(legacyProfile);
-    expect(upgraded.calibrationProfileVersion).toBe(6);
+    expect(upgraded.calibrationProfileVersion).toBe(7);
     expect(upgraded.framebar.colors).toContainEqual({
       name: "startup-bright",
       red: 94,
@@ -122,7 +122,7 @@ describe("persistent processing calibration", () => {
       (color) => color.name !== "recovery-bright",
     );
     const upgraded = upgradeProcessingConfigurationProfile(savedProfile);
-    expect(upgraded.calibrationProfileVersion).toBe(6);
+    expect(upgraded.calibrationProfileVersion).toBe(7);
     expect(upgraded.framebar.colors).toContainEqual({
       name: "recovery-bright",
       red: 65,
@@ -147,7 +147,7 @@ describe("persistent processing calibration", () => {
       (color) => color.name !== "active-bright",
     );
     const upgraded = upgradeProcessingConfigurationProfile(savedProfile);
-    expect(upgraded.calibrationProfileVersion).toBe(6);
+    expect(upgraded.calibrationProfileVersion).toBe(7);
     expect(upgraded.framebar.colors).toContainEqual({
       name: "active-bright",
       red: 210,
@@ -174,7 +174,7 @@ describe("persistent processing calibration", () => {
       (color) => color.name !== "multihit-gap",
     );
     const upgraded = upgradeProcessingConfigurationProfile(savedProfile);
-    expect(upgraded.calibrationProfileVersion).toBe(6);
+    expect(upgraded.calibrationProfileVersion).toBe(7);
     expect(upgraded.framebar.colors).toContainEqual({
       name: "multihit-gap",
       red: 229,
@@ -199,7 +199,7 @@ describe("persistent processing calibration", () => {
       (color) => color.name !== "flow-stance",
     );
     const upgraded = upgradeProcessingConfigurationProfile(savedProfile);
-    expect(upgraded.calibrationProfileVersion).toBe(6);
+    expect(upgraded.calibrationProfileVersion).toBe(7);
     expect(upgraded.framebar.colors).toContainEqual({
       name: "flow-stance",
       red: 46,
@@ -216,6 +216,28 @@ describe("persistent processing calibration", () => {
       );
     }
     expect(findClosestFramebarColor(65, 132, 191, upgraded.framebar.colors)?.name).toBe(
+      "recovery-bright",
+    );
+  });
+
+  it("adds airborne blue to saved version 6 profiles without changing recovery blue", () => {
+    const savedProfile = configuration();
+    savedProfile.calibrationProfileVersion = 6;
+    savedProfile.framebar.colors = savedProfile.framebar.colors.filter(
+      (color) => color.name !== "airborne",
+    );
+    const upgraded = upgradeProcessingConfigurationProfile(savedProfile);
+    expect(upgraded.calibrationProfileVersion).toBe(7);
+    expect(upgraded.framebar.colors).toContainEqual({
+      name: "airborne",
+      red: 120,
+      green: 162,
+      blue: 223,
+    });
+    expect(findClosestFramebarColor(122, 161, 223, upgraded.framebar.colors)?.name).toBe(
+      "airborne",
+    );
+    expect(findClosestFramebarColor(57, 127, 200, upgraded.framebar.colors)?.name).toBe(
       "recovery-bright",
     );
   });

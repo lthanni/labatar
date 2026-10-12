@@ -69,6 +69,7 @@ import {
   techSelectedRecordingStorageKey,
 } from "./tech-types";
 import type { TechCatalog, TechCombo, TechMove } from "./tech-types";
+import { resolveFlowStance } from "./common-tech-moves";
 import {
   isDirectionalButtonFollowup,
   moveNotationsMatch,
@@ -102,9 +103,12 @@ function readTechCatalog(): TechCatalog {
               isRekka?: boolean;
               rekkaFollowupPattern?: "directional-button";
             };
+            const isFlowStance = resolveFlowStance(move);
             return {
               ...move,
-              isStanceParent: move.isStanceParent === true || legacy.isRekka === true,
+              isStanceParent:
+                move.isStanceParent === true || isFlowStance || legacy.isRekka === true,
+              isFlowStance,
               stanceFollowupPattern:
                 move.stanceFollowupPattern ?? legacy.rekkaFollowupPattern ?? null,
             };
@@ -2763,8 +2767,14 @@ export function RecordingViewer({
                     >
                       {move.notation ?? "Unresolved input"} · {formatVideoTime(move.startTime)}–
                       {formatVideoTime(move.endTime)} · startup {move.phases.startup}, active{" "}
-                      {move.phases.active}, recovery {move.phases.recovery} · blockstun{" "}
-                      {move.opponentPhases.blockstun} · on block{" "}
+                      {move.phases.active}, recovery {move.phases.recovery}
+                      {move.flowStanceFrames != null && move.flowStanceFrames > 0
+                        ? `, flow stance ${move.flowStanceFrames}`
+                        : ""}
+                      {move.totalDurationFrames != null
+                        ? `, total ${move.totalDurationFrames} frames`
+                        : ""}{" "}
+                      · blockstun {move.opponentPhases.blockstun} · on block{" "}
                       {move.onBlock == null
                         ? "?"
                         : `${move.onBlock >= 0 ? "+" : ""}${move.onBlock}`}{" "}
@@ -2955,7 +2965,12 @@ export function RecordingViewer({
                           · training: {debugFrame.trainingState} (
                           {debugFrame.trainingScore.toFixed(2)}) · framebar:{" "}
                           {debugFrame.framebarChanged ? "changed" : "stable"} · move:{" "}
-                          {debugFrame.moveEvent ?? (debugFrame.activeMove ? "active" : "idle")}
+                          {debugFrame.moveEvent ?? (debugFrame.activeMove ? "active" : "idle")} Â·
+                          count: {debugFrame.framebarCounter ?? "unreadable"}
+                          {debugFrame.framebarCounterConfidence != null
+                            ? ` (${debugFrame.framebarCounterConfidence.toFixed(2)})`
+                            : ""}
+                          {debugFrame.framebarCounterChanged ? " (changed)" : ""}
                         </Typography>
                         <Typography variant="caption" sx={{ overflowWrap: "anywhere" }}>
                           P1: {debugFrame.player1Groups || "none"}
@@ -3043,14 +3058,26 @@ export function RecordingViewer({
                     setClipRange([0, Number.isFinite(nextDuration) ? nextDuration : 0]);
                     if (restoredRecordingId.current !== selectedRecording.id) {
                       restoredRecordingId.current = selectedRecording.id;
-                      const savedTime =
-                        playbackPositions.current[positionKey(selectedRecording.id)];
-                      if (
-                        typeof savedTime === "number" &&
-                        savedTime > MINIMUM_SAVED_POSITION_SECONDS &&
-                        Number.isFinite(nextDuration)
-                      ) {
-                        video.currentTime = Math.min(savedTime, nextDuration);
+                      if (panelOnly && Number.isFinite(nextDuration)) {
+                        const needsVideoApproval =
+                          selectedRecording.moveTake?.captureMethod === "automated" &&
+                          selectedRecording.moveTake.captureReviewStatus !==
+                            "approved-for-processing";
+                        const needsEvidenceAcceptance =
+                          selectedRecording.moveTake?.evidenceStatus === "pending";
+                        video.currentTime =
+                          selectedRecording.analysis && !needsEvidenceAcceptance ? nextDuration : 0;
+                        if (needsVideoApproval) void video.play().catch(() => undefined);
+                      } else {
+                        const savedTime =
+                          playbackPositions.current[positionKey(selectedRecording.id)];
+                        if (
+                          typeof savedTime === "number" &&
+                          savedTime > MINIMUM_SAVED_POSITION_SECONDS &&
+                          Number.isFinite(nextDuration)
+                        ) {
+                          video.currentTime = Math.min(savedTime, nextDuration);
+                        }
                       }
                     }
                     currentFrameIndex.current = frameIndexForTime(video.currentTime);

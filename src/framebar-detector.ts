@@ -43,9 +43,72 @@ export type FramebarTimelineSample = {
   player2Phases?: DefensivePhaseCounts;
 };
 
+/**
+ * Count frames beyond the visible meter when a full bar stays in one state.
+ * Timeline samples are decoded one per video frame. The first all-one-state
+ * snapshot accounts for the visible capacity; subsequent snapshots add the
+ * elapsed frames until a different color appears.
+ */
+function saturatedStateExtensions(samples: FramebarTimelineSample[]) {
+  const capacity = Math.max(
+    0,
+    ...samples.map((sample) =>
+      sample.player1Groups.reduce((count, group) => count + group.length, 0),
+    ),
+  );
+  const extensions = new Map<string, number>();
+  if (capacity === 0) return extensions;
+
+  let run: { state: string; start: number; length: number } | null = null;
+  const finishRun = (followedByDifferentState: boolean) => {
+    if (!run) return;
+    const previousGroups = samples[run.start - 1]?.player1Groups ?? [];
+    const stateWasAlreadyVisible = previousGroups.some(
+      (group) => group.state.toLowerCase() === run!.state,
+    );
+    if (followedByDifferentState && stateWasAlreadyVisible && run.length > 1) {
+      extensions.set(run.state, (extensions.get(run.state) ?? 0) + run.length - 1);
+    }
+    run = null;
+  };
+
+  samples.forEach((sample, index) => {
+    const group = sample.player1Groups.length === 1 ? sample.player1Groups[0] : undefined;
+    const state = group?.state.toLowerCase() ?? "";
+    const isSaturatedState = group?.length === capacity && state !== "idle" && state !== "unmapped";
+    if (!isSaturatedState) {
+      finishRun(true);
+      return;
+    }
+    if (run?.state === state) {
+      run.length += 1;
+      return;
+    }
+    finishRun(true);
+    run = { state, start: index, length: 1 };
+  });
+  // Without a later color transition, the observed run may be clipped by the
+  // end of the video, so it is only a lower bound and is not extended here.
+  finishRun(false);
+  return extensions;
+}
+
+function phaseExtensions(extensions: Map<string, number>): FramePhaseCounts {
+  const phases: FramePhaseCounts = { startup: 0, active: 0, recovery: 0, other: 0 };
+  for (const [state, frames] of extensions) {
+    if (state.includes("hitpause") || state === "multihit-gap") phases.other += frames;
+    else if (state.includes("startup") || state.includes("start")) phases.startup += frames;
+    else if (state.includes("active") || state.includes("hit")) phases.active += frames;
+    else if (state.includes("recovery") || state.includes("recover")) phases.recovery += frames;
+    else phases.other += frames;
+  }
+  return phases;
+}
+
 /** A rolling meter can hide early startup cells before recovery is complete. */
 export function summarizeMoveFramebarTimeline(samples: FramebarTimelineSample[]) {
   if (samples.length === 0) return null;
+  const extensions = phaseExtensions(saturatedStateExtensions(samples));
   const visibleScore = (sample: FramebarTimelineSample) =>
     sample.player1Phases.startup + sample.player1Phases.active + sample.player1Phases.recovery;
   const best = samples.reduce((winner, sample) =>
@@ -58,7 +121,17 @@ export function summarizeMoveFramebarTimeline(samples: FramebarTimelineSample[])
     (sample) =>
       sample.player1Phases.recovery === recovery && sample.player1Phases.startup < startup,
   );
-  if (!rolled) return best;
+  if (!rolled) {
+    return {
+      ...best,
+      player1Phases: {
+        startup: best.player1Phases.startup + extensions.startup,
+        active: best.player1Phases.active + extensions.active,
+        recovery: best.player1Phases.recovery + extensions.recovery,
+        other: best.player1Phases.other + extensions.other,
+      },
+    };
+  }
   const structural = samples.reduce((winner, sample) => {
     const score = (candidate: FramebarTimelineSample) =>
       candidate.player1Phases.startup + candidate.player1Phases.active;
@@ -68,7 +141,12 @@ export function summarizeMoveFramebarTimeline(samples: FramebarTimelineSample[])
     ...best,
     player1: structural.player1,
     player1Groups: structural.player1Groups,
-    player1Phases: { ...best.player1Phases, startup, active, recovery },
+    player1Phases: {
+      startup: startup + extensions.startup,
+      active: active + extensions.active,
+      recovery: recovery + extensions.recovery,
+      other: best.player1Phases.other + extensions.other,
+    },
     postHitpauseActiveFrames: Math.max(
       ...samples.map((sample) => sample.postHitpauseActiveFrames ?? 0),
     ),
@@ -78,6 +156,149 @@ export function summarizeMoveFramebarTimeline(samples: FramebarTimelineSample[])
       other: best.player2Phases?.other ?? 0,
     },
   };
+}
+
+/** Count distinct meter states from stitched snapshots, excluding idle cells. */
+export function summarizeMoveDurationFrames(
+  samples: FramebarTimelineSample[],
+  { includeTrailingAirborne = false }: { includeTrailingAirborne?: boolean } = {},
+) {
+  const summary = summarizeMoveFramebarTimeline(samples);
+  if (!summary) return null;
+  const extensions = saturatedStateExtensions(samples);
+  const maximumStateFrames = (state: string) =>
+    Math.max(
+      0,
+      ...samples.map((sample) =>
+        sample.player1Groups
+          .filter((group) => group.state.toLowerCase() === state)
+          .reduce((count, group) => count + group.length, 0),
+      ),
+    ) + (extensions.get(state) ?? 0);
+  const flowStance = maximumStateFrames("flow-stance");
+  const multihitGap = Math.max(
+    0,
+    ...samples.map((sample) =>
+      sample.player1Groups.reduce(
+        (count, group, index) =>
+          count +
+          (group.state.toLowerCase() === "multihit-gap" &&
+          !isRecoveryWaitingGap(sample.player1Groups, index)
+            ? group.length
+            : 0),
+        0,
+      ),
+    ),
+  );
+  // A gray patch can appear in otherwise idle cells while startup is filling
+  // the bar. Hitpause belongs to this move only after an active cell has been
+  // observed; counting every gray patch inflated 236A by 19 frames.
+  let activeSeen = false;
+  const hitpauseVisible = Math.max(
+    0,
+    ...samples.map((sample) => {
+      let frames = 0;
+      for (const group of sample.player1Groups) {
+        const state = group.state.toLowerCase();
+        if (state.includes("active") || (state.includes("hit") && !state.includes("hitpause"))) {
+          activeSeen = true;
+        } else if (state === "hitpause" && activeSeen) {
+          frames += group.length;
+        }
+      }
+      return frames;
+    }),
+  );
+  const hitpause = hitpauseVisible > 0 ? hitpauseVisible + (extensions.get("hitpause") ?? 0) : 0;
+  // A grounded move may finish in the air. Count blue cells that follow one
+  // of its own phases, while airborne attacks still exclude their jump and
+  // post-attack airborne cells.
+  const trailingAirborne = includeTrailingAirborne
+    ? Math.max(
+        0,
+        ...samples.map((sample) => {
+          let movePhaseSeen = false;
+          return sample.player1Groups.reduce((frames, group) => {
+            const state = group.state.toLowerCase();
+            if (/startup|active|recovery|flow-stance|multihit-gap/.test(state)) {
+              movePhaseSeen = true;
+            }
+            return frames + (state === "airborne" && movePhaseSeen ? group.length : 0);
+          }, 0);
+        }),
+      )
+    : 0;
+  const { startup, active, recovery } = summary.player1Phases;
+  return {
+    flowStance,
+    total: startup + active + recovery + flowStance + multihitGap + hitpause + trailingAirborne,
+  };
+}
+
+/** Split an AA cancel at the end of the base A's first active window. */
+export function splitAaFollowupFramebarTimeline(samples: FramebarTimelineSample[]) {
+  const groups = samples.at(-1)?.player1Groups;
+  if (!groups) return null;
+  const firstActiveIndex = groups.findIndex((group) =>
+    group.state.toLowerCase().includes("active"),
+  );
+  if (firstActiveIndex < 0) return null;
+  if (
+    !groups
+      .slice(0, firstActiveIndex)
+      .some((group) => group.state.toLowerCase().includes("startup"))
+  )
+    return null;
+  let firstActiveEndIndex = firstActiveIndex;
+  while (groups[firstActiveEndIndex + 1]?.state.toLowerCase().includes("active"))
+    firstActiveEndIndex += 1;
+  const firstActiveEnd = groups[firstActiveEndIndex].start + groups[firstActiveEndIndex].length;
+  const followupActiveIndex = groups.findIndex(
+    (group) => group.start >= firstActiveEnd && group.state.toLowerCase().includes("active"),
+  );
+  if (followupActiveIndex < 0) return null;
+  const followupActiveStart = groups[followupActiveIndex].start;
+  const cancelStartup = groups.filter(
+    (group) => group.start >= firstActiveEnd && group.start < followupActiveStart,
+  );
+  if (
+    cancelStartup.length === 0 ||
+    cancelStartup.some((group) => !/startup|recovery/i.test(group.state))
+  )
+    return null;
+
+  const withGroups = (sample: FramebarTimelineSample, player1Groups: FramebarGroup[]) => ({
+    ...sample,
+    player1: player1Groups.map((group) => `${group.state}x${group.length}`).join(" "),
+    player1Groups,
+    player1Phases: summarizeFramePhases(player1Groups),
+    postHitpauseActiveFrames: countPostHitpauseActiveFrames(player1Groups),
+  });
+  const followup = samples.flatMap((sample) => {
+    const suffix = sample.player1Groups
+      .filter((group) => group.start >= firstActiveEnd)
+      .map((group) => ({
+        ...group,
+        start: group.start - firstActiveEnd,
+        state:
+          group.start < followupActiveStart && /startup|recovery/i.test(group.state)
+            ? "startup"
+            : group.state,
+      }));
+    if (!suffix.some((group) => group.state !== "idle" && group.state !== "Unmapped")) return [];
+    return [withGroups(sample, suffix)];
+  });
+  const followupStartTime = followup[0]?.timestamp;
+  if (followupStartTime == null) return null;
+  const base = samples
+    .filter((sample) => sample.timestamp <= followupStartTime)
+    .map((sample) =>
+      withGroups(
+        sample,
+        sample.player1Groups.filter((group) => group.start < firstActiveEnd),
+      ),
+    );
+  return { base, followup, followupStartTime };
 }
 
 /** Remove the jump's blue meter cells before measuring an airborne attack. */
@@ -216,6 +437,15 @@ function medianPatchColor(
   return { red: middle(reds), green: middle(greens), blue: middle(blues) };
 }
 
+function isRecoveryWaitingGap(groups: FramebarGroup[], index: number) {
+  return (
+    groups[index]?.state.toLowerCase() === "multihit-gap" &&
+    groups[index - 1]?.state.toLowerCase().includes("recovery") &&
+    groups[index + 1]?.state.toLowerCase().includes("recovery") &&
+    !groups.slice(index + 1).some((later) => later.state.toLowerCase().includes("active"))
+  );
+}
+
 export function summarizeFramePhases(groups: FramebarGroup[]): FramePhaseCounts {
   const phases: FramePhaseCounts = { startup: 0, active: 0, recovery: 0, other: 0 };
   let startupStarted = false;
@@ -224,15 +454,10 @@ export function summarizeFramePhases(groups: FramebarGroup[]): FramePhaseCounts 
     const state = group.state.toLowerCase();
     const isStartup = state.includes("startup") || state.includes("start");
     if (!isStartup && startupStarted) startupEnded = true;
-    const recoveryWaitingGap =
-      state === "multihit-gap" &&
-      groups[index - 1]?.state.toLowerCase().includes("recovery") &&
-      groups[index + 1]?.state.toLowerCase().includes("recovery") &&
-      !groups.slice(index + 1).some((later) => later.state.toLowerCase().includes("active"));
     // Hitpause is commonly represented as a three-frame state and its name
     // contains "hit". Check it before the active-state match so those frames
     // are excluded from active rather than counted as attack frames.
-    if (recoveryWaitingGap) phases.recovery += group.length;
+    if (isRecoveryWaitingGap(groups, index)) phases.recovery += group.length;
     else if (state.includes("hitpause") || state === "multihit-gap") phases.other += group.length;
     else if (isStartup && !startupEnded) {
       phases.startup += group.length;
@@ -461,6 +686,17 @@ export function groupFramebarStates(states: string[]): FramebarGroup[] {
     else groups.push({ state, start: index, length: 1 });
   });
   return groups;
+}
+
+export function isSaturatedSingleStateFramebar(groups: FramebarGroup[], visibleCellCount: number) {
+  const [group] = groups;
+  const state = group?.state.toLowerCase();
+  return (
+    groups.length === 1 &&
+    group?.length === Math.round(visibleCellCount) &&
+    state !== "idle" &&
+    state !== "unmapped"
+  );
 }
 
 export function isIdleFramebar(groups: FramebarGroup[]) {

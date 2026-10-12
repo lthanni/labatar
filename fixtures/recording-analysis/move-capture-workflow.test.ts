@@ -234,12 +234,23 @@ describe("automated whiff eligibility", () => {
     ).toEqual({ eligible: true, validation: "needs-validation" });
   });
 
-  it("queues every common move, including jump attacks, when its whiff slot is empty", () => {
+  it("queues common moves except default flow stances when their whiff slots are empty", () => {
     const catalog = withCommonTechMoves("Aang", []);
     const eligible = catalog.filter(
       (move) => automatedWhiffEligibility(move, [], "aang-gyatso").eligible,
     );
-    expect(eligible.map((move) => move.input)).toEqual(catalog.map((move) => move.input));
+    expect(eligible.map((move) => move.input)).toEqual(
+      catalog.filter((move) => !move.isFlowStance).map((move) => move.input),
+    );
+    const flowMove = catalog.find((move) => move.input === "2F")!;
+    expect(automatedWhiffEligibility(flowMove, [], "aang-gyatso").eligible).toBe(false);
+    expect(
+      automatedWhiffEligibility(
+        { ...flowMove, isFlowStance: false, isStanceParent: false, flowStanceOverride: false },
+        [],
+        "aang-gyatso",
+      ).eligible,
+    ).toBe(true);
   });
 
   it("reports explicit manual, unsupported, not-applicable, and existing-take skips", () => {
@@ -385,6 +396,30 @@ describe("move processing queue", () => {
       detail:
         "Selected 2B · contact signal unconfirmed · startup 9 · active 2 · recovery 12 · blockstun 15 · on block +3",
     });
+  });
+
+  it("shows flow stance state frames and total duration in the processed take", () => {
+    const recording = {
+      moveTake: {
+        moveLabel: "2F",
+        outcome: "whiff",
+        validation: { status: "verified", matchedAnalysisMoveId: "move-1" },
+      },
+      analysis: {
+        moves: [
+          {
+            id: "move-1",
+            phases: { startup: 3, active: 0, recovery: 5 },
+            flowStanceFrames: 12,
+            totalDurationFrames: 20,
+            opponentPhases: { hitstun: 0, blockstun: 0 },
+          },
+        ],
+      },
+    } as unknown as RecordedVideo;
+    const detail = moveTakeOutcomeSummary(recording).detail;
+    expect(detail).toContain("flow stance 12");
+    expect(detail).toContain("total 20 frames");
   });
 
   it("shows both numbered 5B hit windows and their orange gap", () => {

@@ -128,13 +128,13 @@ function validateCapturedMoveTake(moveTake, analysis) {
       return {
         ...base,
         status: "ambiguous",
-        message: `Expected separate ${aaMatch[1]}A and ${aaMatch[1]}AA framebar episodes. Review the clip.`,
+        message: `Expected a ${aaMatch[1]}A action followed by ${aaMatch[1]}AA in the framebar. Review the clip.`,
       };
     }
     return {
       ...base,
       status: "verified",
-      message: `The second framebar move episode was linked to the selected ${aaMatch[1]}AA take; the first remains ${aaMatch[1]}A. Input history was not read.`,
+      message: `The ${aaMatch[1]}AA framebar action was linked to the selected take; the preceding action remains ${aaMatch[1]}A. Input history was not read.`,
       matchedAnalysisMoveId: moves[1].id,
     };
   }

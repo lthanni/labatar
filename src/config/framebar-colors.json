@@ -7,6 +7,7 @@
   { "name": "flow-stance", "red": 46, "green": 192, "blue": 202 },
   { "name": "recovery", "red": 40, "green": 78, "blue": 108 },
   { "name": "recovery-bright", "red": 65, "green": 132, "blue": 191 },
+  { "name": "airborne", "red": 120, "green": 162, "blue": 223 },
   { "name": "blockstun", "red": 68, "green": 46, "blue": 121 },
   { "name": "hitpause", "red": 76, "green": 76, "blue": 75 },
   { "name": "idle", "red": 29, "green": 29, "blue": 33 }

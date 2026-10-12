@@ -20,6 +20,7 @@ import {
   defaultInputDisplayGeometry,
   detectInputDisplay,
   inputDisplayObservationsMatch,
+  readFramebarCounter,
   resolveNewestInput,
   resolveRecentInput,
   type InputDisplayObservation,
@@ -31,11 +32,15 @@ import {
   calculateOnBlock,
   calculateOnHit,
   airborneAttackTimeline,
+  groupFramebarStates,
+  isSaturatedSingleStateFramebar,
   scanFramebar,
   countPostHitpauseActiveFrames,
   resolveFramebarSampleSpacing,
   splitFramebarHitWindows,
+  splitAaFollowupFramebarTimeline,
   summarizeFramePhases,
+  summarizeMoveDurationFrames,
   summarizeMoveFramebarTimeline,
 } from "../../src/framebar-detector";
 import {
@@ -452,7 +457,7 @@ describe("recording-analysis fixture contract", () => {
   it("excludes jump frames from an airborne attack's measured phases", () => {
     const sample = (timestamp: number, jump: number, recovery: number) => {
       const groups = [
-        { state: "recovery-bright", start: 0, length: jump },
+        { state: "airborne", start: 0, length: jump },
         { state: "startup-bright", start: jump, length: 12 },
         { state: "active-bright", start: jump + 12, length: 15 },
         { state: "recovery-bright", start: jump + 27, length: recovery },
@@ -466,7 +471,7 @@ describe("recording-analysis fixture contract", () => {
       };
     };
     const jumpOnly = sample(0.45, 26, 0);
-    jumpOnly.player1Groups = [{ state: "recovery-bright", start: 0, length: 26 }];
+    jumpOnly.player1Groups = [{ state: "airborne", start: 0, length: 26 }];
     jumpOnly.player1Phases = summarizeFramePhases(jumpOnly.player1Groups);
     const attack = airborneAttackTimeline([jumpOnly, sample(1.6, 26, 10), sample(1.8, 9, 27)]);
     expect(attack[0].timestamp).toBe(1.6);
@@ -477,6 +482,57 @@ describe("recording-analysis fixture contract", () => {
     });
   });
 
+  it("separates j.2C's two trailing airborne cells from its 16 recovery cells", () => {
+    // RGB values checked against the 60 fps j.2C whiff take's displayed cells.
+    const cells = [
+      ...Array(15).fill([120, 162, 223]),
+      ...Array(11).fill([88, 200, 120]),
+      ...Array(6).fill([240, 2, 9]),
+      ...Array(16).fill([57, 127, 200]),
+      ...Array(2).fill([122, 161, 223]),
+      ...Array(13).fill([29, 29, 33]),
+    ] as [number, number, number][];
+    const scan = scanFramebar({
+      config: {
+        ...defaultDetectorConfig,
+        sampleStartOffset: 3.5,
+        sampleSpacing: 8,
+        sampleCount: 63,
+      },
+      sampleWidth: 1009,
+      sampleHeight: 65,
+      readPixel: (x) => {
+        const [red, green, blue] = cells[Math.min(62, Math.floor(x / 16))];
+        return { red, green, blue };
+      },
+      getMappedColor: (red, green, blue) =>
+        findClosestFramebarColor(red, green, blue, framebarColorMap),
+    });
+    expect(scan.groups.map(({ state, length }) => [state, length])).toEqual([
+      ["airborne", 15],
+      ["startup-bright", 11],
+      ["active-bright", 6],
+      ["recovery-bright", 16],
+      ["airborne", 2],
+      ["idle", 13],
+    ]);
+    const attack = airborneAttackTimeline([
+      {
+        timestamp: 1.3,
+        player1: "",
+        player1Groups: scan.groups,
+        player2: "",
+        player1Phases: summarizeFramePhases(scan.groups),
+      },
+    ]);
+    expect(summarizeMoveFramebarTimeline(attack)?.player1Phases).toMatchObject({
+      startup: 11,
+      active: 6,
+      recovery: 16,
+    });
+    expect(summarizeMoveDurationFrames(attack)?.total).toBe(33);
+  });
+
   it("keeps j.236EX startup at its first contiguous 22 cells after the meter rolls", () => {
     const snapshot = (
       timestamp: number,
@@ -485,7 +541,7 @@ describe("recording-analysis fixture contract", () => {
       trailingStartup: number,
     ) => {
       const groups = [
-        { state: "recovery-bright", start: 0, length: jump },
+        { state: "airborne", start: 0, length: jump },
         { state: "startup-bright", start: jump, length: 12 },
         { state: "startup", start: jump + 12, length: 10 },
         { state: "active-bright", start: jump + 22, length: 8 },
@@ -545,6 +601,175 @@ describe("recording-analysis fixture contract", () => {
     expect(splitFramebarHitWindows(summary?.player1Groups ?? [])).toHaveLength(4);
   });
 
+  it("extends a uniform framebar state after its 63 visible frames", () => {
+    const snapshot = (
+      timestamp: number,
+      groups: Array<{ state: string; start: number; length: number }>,
+    ) => ({
+      timestamp,
+      player1: "",
+      player1Groups: groups,
+      player2: "",
+      player1Phases: summarizeFramePhases(groups),
+    });
+    const recovery = Array.from({ length: 32 }, (_, index) =>
+      snapshot(62 + index, [{ state: "recovery", start: 0, length: 63 }]),
+    );
+    const samples = [
+      snapshot(61, [
+        { state: "recovery", start: 0, length: 62 },
+        { state: "active", start: 62, length: 1 },
+      ]),
+      ...recovery,
+      snapshot(94, [
+        { state: "recovery", start: 0, length: 62 },
+        { state: "idle", start: 62, length: 1 },
+      ]),
+    ];
+
+    expect(summarizeMoveFramebarTimeline(samples)?.player1Phases.recovery).toBe(94);
+    expect(summarizeMoveDurationFrames(samples)?.total).toBe(94);
+    expect(summarizeMoveDurationFrames(samples.slice(0, -1))?.total).toBe(63);
+    expect(isSaturatedSingleStateFramebar(recovery[0].player1Groups, 63)).toBe(true);
+    expect(isSaturatedSingleStateFramebar([{ state: "idle", start: 0, length: 63 }], 63)).toBe(
+      false,
+    );
+  });
+
+  it("reads a changing numeric counter from the lower part of the framebar crop", () => {
+    const digits = [
+      ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+      ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+    ];
+    const width = 100;
+    const height = 30;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let pixel = 0; pixel < width * height; pixel += 1) data[pixel * 4 + 3] = 255;
+    digits.forEach((digit, digitIndex) => {
+      digit.forEach((row, y) => {
+        for (let x = 0; x < row.length; x += 1) {
+          const cell = row[x];
+          if (cell !== "1") continue;
+          for (let dy = 0; dy < 2; dy += 1) {
+            for (let dx = 0; dx < 2; dx += 1) {
+              const index = ((8 + y * 2 + dy) * width + 35 + digitIndex * 14 + x * 2 + dx) * 4;
+              data[index] = 255;
+              data[index + 1] = 255;
+              data[index + 2] = 255;
+            }
+          }
+        }
+      });
+    });
+
+    expect(readFramebarCounter({ data, width, height })).toMatchObject({ value: 21 });
+  });
+
+  it("includes flow stance and orange gaps in total move frames across a meter roll", () => {
+    const beforeRoll = [
+      { state: "idle", start: 0, length: 5 },
+      { state: "startup", start: 5, length: 4 },
+      { state: "active", start: 9, length: 2 },
+      { state: "multihit-gap", start: 11, length: 3 },
+      { state: "active", start: 14, length: 2 },
+      { state: "flow-stance", start: 16, length: 6 },
+      { state: "recovery", start: 22, length: 1 },
+    ];
+    const afterRoll = [
+      { state: "active", start: 0, length: 2 },
+      { state: "flow-stance", start: 2, length: 6 },
+      { state: "recovery", start: 8, length: 8 },
+      { state: "idle", start: 16, length: 10 },
+    ];
+    const samples = [beforeRoll, afterRoll].map((groups, timestamp) => ({
+      timestamp,
+      player1: "",
+      player1Groups: groups,
+      player2: "",
+      player1Phases: summarizeFramePhases(groups),
+    }));
+    expect(summarizeMoveDurationFrames(samples)).toEqual({ flowStance: 6, total: 25 });
+  });
+
+  it("does not add recovery waiting cells twice to the total", () => {
+    const groups = [
+      { state: "startup", start: 0, length: 2 },
+      { state: "active", start: 2, length: 2 },
+      { state: "recovery", start: 4, length: 2 },
+      { state: "multihit-gap", start: 6, length: 3 },
+      { state: "recovery", start: 9, length: 2 },
+    ];
+    expect(
+      summarizeMoveDurationFrames([
+        {
+          timestamp: 0,
+          player1: "",
+          player1Groups: groups,
+          player2: "",
+          player1Phases: summarizeFramePhases(groups),
+        },
+      ]),
+    ).toEqual({ flowStance: 0, total: 11 });
+  });
+
+  it("splits 5A into 5AA at the first active window and counts cancel frames as startup", () => {
+    const states = [
+      ...Array(8).fill("startup-bright"),
+      ...Array(2).fill("active-bright"),
+      ...Array(2).fill("recovery-bright"),
+      ...Array(6).fill("startup-bright"),
+      ...Array(2).fill("active-bright"),
+      ...Array(24).fill("recovery-bright"),
+    ];
+    const samples = states.map((_, index) => {
+      const player1Groups = groupFramebarStates([
+        ...states.slice(0, index + 1),
+        ...Array(63 - index - 1).fill("idle"),
+      ]);
+      return {
+        timestamp: index / 60,
+        player1: "",
+        player1Groups,
+        player2: "",
+        player1Phases: summarizeFramePhases(player1Groups),
+      };
+    });
+    const split = splitAaFollowupFramebarTimeline(samples);
+    expect(split?.followupStartTime).toBe(10 / 60);
+    expect(summarizeMoveFramebarTimeline(split?.base ?? [])?.player1Phases).toMatchObject({
+      startup: 8,
+      active: 2,
+      recovery: 0,
+    });
+    expect(summarizeMoveFramebarTimeline(split?.followup ?? [])?.player1Phases).toMatchObject({
+      startup: 8,
+      active: 2,
+      recovery: 24,
+    });
+    expect(summarizeMoveDurationFrames(split?.followup ?? [])?.total).toBe(34);
+  });
+
+  it("does not split orange-separated multihits as an AA cancel", () => {
+    const player1Groups = groupFramebarStates([
+      ...Array(8).fill("startup"),
+      ...Array(2).fill("active"),
+      ...Array(3).fill("multihit-gap"),
+      ...Array(2).fill("active"),
+      ...Array(24).fill("recovery"),
+    ]);
+    expect(
+      splitAaFollowupFramebarTimeline([
+        {
+          timestamp: 0,
+          player1: "",
+          player1Groups,
+          player2: "",
+          player1Phases: summarizeFramePhases(player1Groups),
+        },
+      ]),
+    ).toBeNull();
+  });
+
   it("separates 5B's two active windows across its seven orange cells", () => {
     const groups = [
       { state: "startup-bright", start: 0, length: 11 },
@@ -574,7 +799,7 @@ describe("recording-analysis fixture contract", () => {
 
   it("counts j.236B's three orange waiting cells between recovery groups as recovery", () => {
     const groups = [
-      { state: "recovery-bright", start: 0, length: 19 }, // Jump lead-in.
+      { state: "airborne", start: 0, length: 19 }, // Jump lead-in.
       { state: "startup-bright", start: 19, length: 27 },
       { state: "active-bright", start: 46, length: 7 },
       { state: "recovery-bright", start: 53, length: 10 },
@@ -598,8 +823,8 @@ describe("recording-analysis fixture contract", () => {
     expect(splitFramebarHitWindows(attack[0].player1Groups)).toHaveLength(1);
 
     const secondHit = [...groups, { state: "active-bright", start: 78, length: 4 }];
-    expect(summarizeFramePhases(secondHit).recovery).toBe(41);
-    expect(summarizeFramePhases(secondHit).other).toBe(3);
+    expect(summarizeFramePhases(secondHit).recovery).toBe(22);
+    expect(summarizeFramePhases(secondHit).other).toBe(22);
   });
 
   it("calculates on-block advantage from recovery and purple blockstun", () => {

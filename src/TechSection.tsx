@@ -27,7 +27,7 @@ import {
 } from "@mui/material";
 import type { RecordedVideo } from "./recording-types";
 import { moveTakeOutcomes, type MoveTakeOutcome } from "./move-capture-types";
-import { withCommonTechMoves } from "./common-tech-moves";
+import { isNonMotionFMove, resolveFlowStance, withCommonTechMoves } from "./common-tech-moves";
 import { effectiveMeasurement } from "./move-measurements";
 import {
   chargedInputFor,
@@ -113,10 +113,15 @@ type MoveDraft = {
   notApplicable: Partial<Record<MoveTakeOutcome, string>>;
   flowCancellable: boolean | null;
   isStanceParent: boolean;
+  isFlowStance: boolean;
+  flowStanceOverride: boolean | null;
   hasChargedVersion: boolean;
   allowsDirectionalFollowups: boolean;
   dependsOnMoveId: string;
   stanceMinimumDuration: string;
+  flowStanceMinimumTimeToFlowCancel: string;
+  flowStanceMinimumTimeToFollowup: string;
+  flowStanceMaxDuration: string;
   startup: string;
   active: string;
   recovery: string;
@@ -143,10 +148,15 @@ const emptyMoveDraft: MoveDraft = {
   notApplicable: {},
   flowCancellable: null,
   isStanceParent: false,
+  isFlowStance: false,
+  flowStanceOverride: null,
   hasChargedVersion: false,
   allowsDirectionalFollowups: false,
   dependsOnMoveId: "",
   stanceMinimumDuration: "",
+  flowStanceMinimumTimeToFlowCancel: "",
+  flowStanceMinimumTimeToFollowup: "",
+  flowStanceMaxDuration: "",
   startup: "",
   active: "",
   recovery: "",
@@ -205,10 +215,23 @@ function loadTechCatalog(): TechCatalog {
                   allowDirectionless: Boolean(move.dependsOnMoveId),
                 })
               : null;
+          const isFlowStance = resolveFlowStance(move);
           return {
             ...currentMove,
             input: normalizedInput ?? move.input,
-            isStanceParent: move.isStanceParent === true || legacyMove.isRekka === true,
+            isStanceParent:
+              move.isStanceParent === true || isFlowStance || legacyMove.isRekka === true,
+            isFlowStance,
+            flowStanceMinimumTimeToFlowCancel:
+              typeof move.flowStanceMinimumTimeToFlowCancel === "number"
+                ? move.flowStanceMinimumTimeToFlowCancel
+                : null,
+            flowStanceMinimumTimeToFollowup:
+              typeof move.flowStanceMinimumTimeToFollowup === "number"
+                ? move.flowStanceMinimumTimeToFollowup
+                : null,
+            flowStanceMaxDuration:
+              typeof move.flowStanceMaxDuration === "number" ? move.flowStanceMaxDuration : null,
             isCharged: move.isCharged === true,
             nonstandard: move.nonstandard === true,
             nonstandardNote: typeof move.nonstandardNote === "string" ? move.nonstandardNote : "",
@@ -376,9 +399,13 @@ function getEffectiveStartup(
   if (!move || move.startup == null || visited.has(move.id)) return null;
   if (!move.dependsOnMoveId) return move.startup;
   const parent = moves.find((candidate) => candidate.id === move.dependsOnMoveId);
-  if (!parent || parent.stanceMinimumDuration == null) return null;
+  if (!parent) return null;
+  const minimumFollowup = parent.isFlowStance
+    ? parent.flowStanceMinimumTimeToFollowup
+    : parent.stanceMinimumDuration;
+  if (minimumFollowup == null) return null;
   visited.add(move.id);
-  return parent.stanceMinimumDuration + move.startup;
+  return minimumFollowup + move.startup;
 }
 
 function MoveList({
@@ -456,7 +483,11 @@ function MoveList({
                   primary={
                     <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
                       <span>{move.input}</span>
-                      {move.isStanceParent && <Chip label="Stance" size="small" color="primary" />}
+                      {move.isFlowStance ? (
+                        <Chip label="Flow stance" size="small" color="primary" />
+                      ) : move.isStanceParent ? (
+                        <Chip label="Stance" size="small" color="primary" />
+                      ) : null}
                       {move.isCharged && <Chip label="Charged" size="small" color="warning" />}
                       {move.nonstandard && (
                         <Chip label="Nonstandard" size="small" color="default" />
@@ -481,8 +512,19 @@ function MoveList({
                       move.stanceFollowupPattern === "directional-button"
                         ? "Accepts 1-9 + button followups"
                         : null,
-                      move.isStanceParent && move.stanceMinimumDuration != null
+                      move.isStanceParent &&
+                      !move.isFlowStance &&
+                      move.stanceMinimumDuration != null
                         ? `Stance minimum ${move.stanceMinimumDuration}`
+                        : null,
+                      move.isFlowStance && move.flowStanceMinimumTimeToFlowCancel != null
+                        ? `Minimum time to flow cancel ${move.flowStanceMinimumTimeToFlowCancel}`
+                        : null,
+                      move.isFlowStance && move.flowStanceMinimumTimeToFollowup != null
+                        ? `Minimum time to followup ${move.flowStanceMinimumTimeToFollowup}`
+                        : null,
+                      move.isFlowStance && move.flowStanceMaxDuration != null
+                        ? `Max duration ${move.flowStanceMaxDuration}`
                         : null,
                       move.nonstandardNote?.trim()
                         ? `Nonstandard: ${move.nonstandardNote.trim()}`
@@ -951,12 +993,24 @@ export function TechSection() {
       nonstandard: move.nonstandard === true,
       nonstandardNote: move.nonstandardNote ?? "",
       isStanceParent: move.isStanceParent,
+      isFlowStance: move.isFlowStance === true,
+      flowStanceOverride:
+        typeof move.flowStanceOverride === "boolean"
+          ? move.flowStanceOverride
+          : move.isFlowStance && !isNonMotionFMove(move.input)
+            ? true
+            : move.isStanceParent && !move.isFlowStance && isNonMotionFMove(move.input)
+              ? false
+              : null,
       notApplicable: move.notApplicable ?? {},
       flowCancellable: move.flowCancellable,
       hasChargedVersion: Boolean(move.chargedMoveId),
       allowsDirectionalFollowups: move.stanceFollowupPattern === "directional-button",
       dependsOnMoveId: move.dependsOnMoveId ?? "",
       stanceMinimumDuration: String(move.stanceMinimumDuration ?? ""),
+      flowStanceMinimumTimeToFlowCancel: String(move.flowStanceMinimumTimeToFlowCancel ?? ""),
+      flowStanceMinimumTimeToFollowup: String(move.flowStanceMinimumTimeToFollowup ?? ""),
+      flowStanceMaxDuration: String(move.flowStanceMaxDuration ?? ""),
       startup: String(move.startup ?? ""),
       active: String(move.active ?? ""),
       recovery: String(move.recovery ?? ""),
@@ -1004,6 +1058,17 @@ export function TechSection() {
       nonstandard: moveDraft.nonstandard,
       nonstandardNote: moveDraft.nonstandardNote.trim(),
       isStanceParent: moveDraft.isStanceParent,
+      isFlowStance: moveDraft.isFlowStance,
+      flowStanceOverride: moveDraft.flowStanceOverride,
+      flowStanceMinimumTimeToFlowCancel: moveDraft.isFlowStance
+        ? parseMoveNumber(moveDraft.flowStanceMinimumTimeToFlowCancel)
+        : null,
+      flowStanceMinimumTimeToFollowup: moveDraft.isFlowStance
+        ? parseMoveNumber(moveDraft.flowStanceMinimumTimeToFollowup)
+        : null,
+      flowStanceMaxDuration: moveDraft.isFlowStance
+        ? parseMoveNumber(moveDraft.flowStanceMaxDuration)
+        : null,
       notApplicable: Object.fromEntries(
         Object.entries(moveDraft.notApplicable)
           .map(([slot, reason]) => [slot, reason?.trim() ?? ""])
@@ -1017,9 +1082,10 @@ export function TechSection() {
       baseMoveId: editingMove?.baseMoveId ?? null,
       stanceFollowupPattern,
       dependsOnMoveId: stanceParentId,
-      stanceMinimumDuration: moveDraft.isStanceParent
-        ? parseMoveNumber(moveDraft.stanceMinimumDuration)
-        : null,
+      stanceMinimumDuration:
+        moveDraft.isStanceParent && !moveDraft.isFlowStance
+          ? parseMoveNumber(moveDraft.stanceMinimumDuration)
+          : null,
       startup: parseMoveNumber(moveDraft.startup),
       active: parseMoveNumber(moveDraft.active),
       recovery: parseMoveNumber(moveDraft.recovery),
@@ -1075,6 +1141,48 @@ export function TechSection() {
     setMoveDraft(emptyMoveDraft);
     setEditingMoveId(null);
     window.requestAnimationFrame(() => moveInputRef.current?.focus());
+  };
+
+  const delete2AA = () => {
+    const selected = moves.find((move) => move.id === editingMoveId);
+    if (!selected || selected.input.toUpperCase() !== "2AA") return;
+    if (
+      !window.confirm(
+        `Delete 2AA for ${character}? Its saved move and support data will be removed. Recordings will be kept.`,
+      )
+    )
+      return;
+    setCatalog((current) => {
+      const data = current[character];
+      if (!data) return current;
+      const removedIds = new Set([
+        selected.id,
+        ...data.moves.filter((move) => move.baseMoveId === selected.id).map((move) => move.id),
+      ]);
+      return {
+        ...current,
+        [character]: {
+          ...data,
+          moves: data.moves
+            .filter((move) => !removedIds.has(move.id))
+            .map((move) => ({
+              ...move,
+              dependsOnMoveId: removedIds.has(move.dependsOnMoveId ?? "")
+                ? null
+                : move.dependsOnMoveId,
+              chargedMoveId: removedIds.has(move.chargedMoveId ?? "") ? null : move.chargedMoveId,
+            })),
+          supportMoves: data.supportMoves?.filter((move) => !removedIds.has(move.baseMoveId)),
+          combos: data.combos.map((combo) => ({
+            ...combo,
+            moveIds: combo.moveIds.map((id) => (id && removedIds.has(id) ? null : id)),
+          })),
+        },
+      };
+    });
+    setMoveDraft(emptyMoveDraft);
+    setEditingMoveId(null);
+    setMoveInputError(null);
   };
 
   const editCombo = (combo: TechCombo) => {
@@ -1292,7 +1400,21 @@ export function TechSection() {
                         )}
                         onChange={(event) => {
                           setMoveInputError(null);
-                          setMoveDraft((current) => ({ ...current, input: event.target.value }));
+                          setMoveDraft((current) => {
+                            const isFlowStance = isNonMotionFMove(event.target.value);
+                            return {
+                              ...current,
+                              input: event.target.value,
+                              ...(current.flowStanceOverride === null
+                                ? {
+                                    isFlowStance,
+                                    isStanceParent:
+                                      isFlowStance ||
+                                      (current.isStanceParent && !current.isFlowStance),
+                                  }
+                                : {}),
+                            };
+                          });
                         }}
                         error={Boolean(moveInputError)}
                         helperText={
@@ -1325,20 +1447,32 @@ export function TechSection() {
                         }
                         label="Flow-cancellable"
                       />
-                      <FormControlLabel
-                        control={
-                          <Switch
-                            checked={moveDraft.isStanceParent}
-                            onChange={(event) =>
-                              setMoveDraft((current) => ({
-                                ...current,
-                                isStanceParent: event.target.checked,
-                              }))
-                            }
-                          />
-                        }
-                        label="Stance move"
-                      />
+                      <FormControl size="small" sx={{ minWidth: 170 }}>
+                        <InputLabel id="tech-move-type-label">Move type</InputLabel>
+                        <Select
+                          labelId="tech-move-type-label"
+                          label="Move type"
+                          value={
+                            moveDraft.isFlowStance
+                              ? "flow-stance"
+                              : moveDraft.isStanceParent
+                                ? "stance"
+                                : "standard"
+                          }
+                          onChange={(event) =>
+                            setMoveDraft((current) => ({
+                              ...current,
+                              isStanceParent: event.target.value !== "standard",
+                              isFlowStance: event.target.value === "flow-stance",
+                              flowStanceOverride: event.target.value === "flow-stance",
+                            }))
+                          }
+                        >
+                          <MenuItem value="standard">Standard</MenuItem>
+                          <MenuItem value="stance">Stance</MenuItem>
+                          <MenuItem value="flow-stance">Flow stance</MenuItem>
+                        </Select>
+                      </FormControl>
                       <FormControlLabel
                         control={
                           <Switch
@@ -1374,7 +1508,7 @@ export function TechSection() {
                           label="1-9 + button followups"
                         />
                       )}
-                      {moveDraft.isStanceParent && (
+                      {moveDraft.isStanceParent && !moveDraft.isFlowStance && (
                         <TextField
                           label="Minimum duration"
                           type="number"
@@ -1388,6 +1522,52 @@ export function TechSection() {
                           }
                           sx={{ width: 150 }}
                         />
+                      )}
+                      {moveDraft.isFlowStance && (
+                        <>
+                          <TextField
+                            label="Minimum time to flow cancel"
+                            type="number"
+                            size="small"
+                            value={moveDraft.flowStanceMinimumTimeToFlowCancel}
+                            onChange={(event) =>
+                              setMoveDraft((current) => ({
+                                ...current,
+                                flowStanceMinimumTimeToFlowCancel: event.target.value,
+                              }))
+                            }
+                            slotProps={{ htmlInput: { min: 0, step: 1 } }}
+                            sx={{ width: 210 }}
+                          />
+                          <TextField
+                            label="Minimum time to followup"
+                            type="number"
+                            size="small"
+                            value={moveDraft.flowStanceMinimumTimeToFollowup}
+                            onChange={(event) =>
+                              setMoveDraft((current) => ({
+                                ...current,
+                                flowStanceMinimumTimeToFollowup: event.target.value,
+                              }))
+                            }
+                            slotProps={{ htmlInput: { min: 0, step: 1 } }}
+                            sx={{ width: 210 }}
+                          />
+                          <TextField
+                            label="Max duration"
+                            type="number"
+                            size="small"
+                            value={moveDraft.flowStanceMaxDuration}
+                            onChange={(event) =>
+                              setMoveDraft((current) => ({
+                                ...current,
+                                flowStanceMaxDuration: event.target.value,
+                              }))
+                            }
+                            slotProps={{ htmlInput: { min: 0, step: 1 } }}
+                            sx={{ width: 150 }}
+                          />
+                        </>
                       )}
                       <FormControl
                         size="small"
@@ -1515,6 +1695,18 @@ export function TechSection() {
                         Cancel
                       </Button>
                     )}
+                    {editingMoveId &&
+                      moves.find((move) => move.id === editingMoveId)?.input.toUpperCase() ===
+                        "2AA" && (
+                        <Button
+                          type="button"
+                          color="error"
+                          onClick={delete2AA}
+                          sx={{ alignSelf: "flex-start" }}
+                        >
+                          Delete 2AA
+                        </Button>
+                      )}
                   </Stack>
                 </Paper>
               </Box>

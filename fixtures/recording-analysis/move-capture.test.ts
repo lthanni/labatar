@@ -205,7 +205,7 @@ describe("reviewed capture association", () => {
     expect(result.matchedAnalysisMoveId).toBeNull();
   });
 
-  it("links the second episode of an approved AA take and retains the base A episode", () => {
+  it("links the AA action of an approved take and retains the base A action", () => {
     for (const direction of ["2", "5"]) {
       const result = validateCapturedMoveTake(
         { expectedInputs: [`${direction}AA`], moveLabel: `${direction}AA` },
@@ -219,7 +219,7 @@ describe("reviewed capture association", () => {
     }
   });
 
-  it("requires both framebar episodes before linking an AA followup", () => {
+  it("requires both framebar actions before linking an AA followup", () => {
     const result = validateCapturedMoveTake(
       { expectedInputs: ["5AA"], moveLabel: "5AA" },
       { moves: [{ id: "one-episode" }] },

@@ -21,6 +21,7 @@ const { autoUpdater } = require("electron-updater");
 const { OBSWebSocket } = require("obs-websocket-js");
 const ffmpegStaticPath = require("ffmpeg-static");
 const { MatchLogWatcher } = require("./match-watcher.cjs");
+const { createInterruptedMatchScanner } = require("./interrupted-match-scanner.cjs");
 const { createUnnamedRecordChapter } = require("./record-chapter.cjs");
 const { addGameChaptersToMp4, probeChapters } = require("./game-chapters.cjs");
 const { buildClipExportFfmpegArgs } = require("./clip-export.cjs");
@@ -3764,6 +3765,7 @@ async function findLogFiles(folder) {
 
 async function readReplayRatingsFromLog(logFile) {
   const ratingsByReplayName = new Map();
+  const interruptedScanner = createInterruptedMatchScanner();
   let pendingRatings = null;
   const pendingVolatility = {};
   const pendingCharacters = {};
@@ -3771,6 +3773,7 @@ async function readReplayRatingsFromLog(logFile) {
   const input = fs.createReadStream(logFile, { encoding: "latin1" });
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
   for await (const line of lines) {
+    interruptedScanner.processLine(line);
     const glicko = parseSetNewMatchGlicko(line);
     if (glicko) {
       if (glicko.player === "player1") {
@@ -3809,29 +3812,34 @@ async function readReplayRatingsFromLog(logFile) {
       pendingMmrChange = null;
     }
   }
-  return ratingsByReplayName;
+  return { ratings: ratingsByReplayName, interruptions: interruptedScanner.finish() };
 }
 
 async function readReplayRatings(folder, onProgress, cache) {
   const logFiles = await findLogFiles(folder);
   const ratingsByReplayName = new Map();
+  const interruptedMatchIds = new Set();
   const currentLogKeys = new Set();
   for (const [index, logFile] of logFiles.entries()) {
     const cacheKey = path.resolve(logFile).toLowerCase();
     currentLogKeys.add(cacheKey);
     let ratings = null;
+    let interruptions = [];
     try {
       const stat = await fs.promises.stat(logFile);
       const fingerprint = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
       const cached = cache?.ratingLogs.get(cacheKey);
-      if (cached?.fingerprint === fingerprint) {
+      if (cached?.fingerprint === fingerprint && Array.isArray(cached.interruptions)) {
         ratings = cached.ratings;
+        interruptions = cached.interruptions;
         cache.ratingLogs.delete(cacheKey);
         cache.ratingLogs.set(cacheKey, cached);
       } else {
-        ratings = await readReplayRatingsFromLog(logFile);
+        const scanned = await readReplayRatingsFromLog(logFile);
+        ratings = scanned.ratings;
+        interruptions = scanned.interruptions;
         if (cache) {
-          cache.ratingLogs.set(cacheKey, { fingerprint, ratings });
+          cache.ratingLogs.set(cacheKey, { fingerprint, ratings, interruptions });
           cache.dirty = true;
         }
       }
@@ -3841,6 +3849,7 @@ async function readReplayRatings(folder, onProgress, cache) {
     for (const [replayName, replayRatings] of ratings ?? []) {
       ratingsByReplayName.set(replayName, replayRatings);
     }
+    for (const matchId of interruptions) interruptedMatchIds.add(matchId);
     onProgress?.(index + 1, logFiles.length);
   }
   if (cache) {
@@ -3855,7 +3864,7 @@ async function readReplayRatings(folder, onProgress, cache) {
       cache.dirty = true;
     }
   }
-  return ratingsByReplayName;
+  return { ratingsByReplayName, interruptedMatchIds: [...interruptedMatchIds] };
 }
 
 async function parseReplayFile(
@@ -5425,7 +5434,11 @@ async function saveReplayScanCache(cache) {
     replayFiles: [...cache.replayFiles],
     ratingLogs: [...cache.ratingLogs].map(([key, entry]) => [
       key,
-      { fingerprint: entry.fingerprint, ratings: [...entry.ratings] },
+      {
+        fingerprint: entry.fingerprint,
+        ratings: [...entry.ratings],
+        interruptions: entry.interruptions,
+      },
     ]),
     snapshot: cache.snapshot,
   };
@@ -5484,7 +5497,7 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
     const seenReplayIds = new Set();
     let duplicateCount = 0;
     event.sender.send("replays:scan-progress", { completed: 0, total: 0, phase: "logs" });
-    const ratingsByReplayName = await readReplayRatings(
+    const { ratingsByReplayName, interruptedMatchIds } = await readReplayRatings(
       resolvedFolder,
       (completed, logTotal) => {
         event.sender.send("replays:scan-progress", {
@@ -5549,7 +5562,7 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
       playerCounts[game.player1] = (playerCounts[game.player1] ?? 0) + 1;
       playerCounts[game.player2] = (playerCounts[game.player2] ?? 0) + 1;
     }
-    const result = { games, playerCounts, duplicateCount };
+    const result = { games, playerCounts, duplicateCount, interruptedMatchIds };
     if (JSON.stringify(scanCache.snapshot) !== JSON.stringify(result)) scanCache.dirty = true;
     scanCache.snapshot = result;
     await saveReplayScanCache(scanCache).catch((error) => {

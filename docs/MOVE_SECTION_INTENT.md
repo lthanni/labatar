@@ -12,6 +12,10 @@ A move with a charged version keeps its standard entry and gets a separate brack
 
 A stance is a parent move with followups. A followup can use a bare button such as `A` when it depends on a stance parent; this bare input only applies in that stance sequence. The older global bare-button stance matching is no longer used. Previously saved rekka parents are read as stance parents; older bare-button entries without a parent remain stored but must be assigned to a stance before capture can select them.
 
+A flow stance is a stance move with separate minimum times to flow cancel and follow up, plus a maximum duration. These timing values are entered in frames. The minimum followup time is used when calculating a dependent move's effective startup.
+
+Directional F inputs without a motion, such as `2F`, `4F`, and `6F`, default to flow stance. The move type can be changed manually; that choice is saved and takes precedence over the input default.
+
 Capture selects from Tech → Moves for the chosen character/support variant. Support choice identifies the take and its storage location; it does not create a separate move list. Capture records the selected move's input, stance/charged flags, and ID when a take is armed. A detected input is checked against that snapshot after processing. Capture does not create or edit move definitions.
 
 Observed timing, hitboxes, and inputs remain evidence until reviewed. Processing must not silently write uncertain observations into Tech → Moves.

@@ -3,6 +3,7 @@ import {
   detectInputDisplay,
   formatInputDisplayObservation,
   inputDisplayObservationsMatch,
+  readFramebarCounter,
   resolveNewestInput,
   type InputDisplayObservation,
   type ResolvedInput,
@@ -14,13 +15,16 @@ import {
 import {
   groupFramebarStates,
   isIdleFramebar,
+  isSaturatedSingleStateFramebar,
   calculateOnBlock,
   calculateOnHit,
   airborneAttackTimeline,
   countPostHitpauseActiveFrames,
   resolveFramebarSampleSpacing,
+  summarizeMoveDurationFrames,
   summarizeMoveFramebarTimeline,
   scanFramebar,
+  splitAaFollowupFramebarTimeline,
   splitFramebarHitWindows,
   stabilizeFramebarStates,
   summarizeDefensivePhases,
@@ -172,6 +176,9 @@ function createMove(
   const attackTimeline = airborneTake ? airborneAttackTimeline(moveTimeline) : moveTimeline;
   const moveStartTime = attackTimeline[0]?.timestamp ?? active.startTime;
   const best = summarizeMoveFramebarTimeline(attackTimeline);
+  const durationFrames = summarizeMoveDurationFrames(attackTimeline, {
+    includeTrailingAirborne: !airborneTake,
+  });
   const phases: RecordingAnalysisPhases = best?.player1Phases ?? {
     startup: 0,
     active: 0,
@@ -274,6 +281,8 @@ function createMove(
     startTime: moveStartTime,
     endTime,
     phases,
+    flowStanceFrames: durationFrames?.flowStance,
+    totalDurationFrames: durationFrames?.total,
     opponentPhases,
     onBlock,
     onHit,
@@ -443,6 +452,7 @@ export async function processRecording(
   let hasInputBaseline = false;
   let previousFramebarSignature = "";
   let lastFramebarChangeTime = 0;
+  let lastFramebarCounterValue: number | null = null;
   let activeMove: ActiveMove | null = null;
   let pendingMoveStart: { framebarStartTime: number } | null = null;
   let trainingFrames = 0;
@@ -453,8 +463,53 @@ export async function processRecording(
 
   const finishMove = (endTime: number) => {
     if (!activeMove) return;
+    const currentMove = activeMove;
+    const addMove = (move: RecordingAnalysisMove, notation: string | null) => {
+      move.notation = notation;
+      move.hits?.forEach((hit) => {
+        hit.notation = notation
+          ? move.hits!.length > 1
+            ? `${notation}(${hit.index})`
+            : notation
+          : null;
+      });
+      moves.push(move);
+    };
+    if (aaBaseDirection && moves.length === 0) {
+      const episode = timeline.filter(
+        (sample) =>
+          sample.timestamp >= currentMove.framebarStartTime && sample.timestamp <= endTime,
+      );
+      const split = splitAaFollowupFramebarTimeline(episode);
+      if (split) {
+        const baseMove = createMove(
+          currentMove,
+          split.followupStartTime,
+          split.base,
+          moves.length,
+          hitboxTimeline.filter((sample) => sample.time < split.followupStartTime),
+          frameRate,
+        );
+        addMove(baseMove, `${aaBaseDirection}A`);
+        const followupMove = createMove(
+          {
+            startTime: split.followupStartTime,
+            framebarStartTime: split.followupStartTime,
+            input: null,
+          },
+          endTime,
+          split.followup,
+          moves.length,
+          hitboxTimeline.filter((sample) => sample.time >= split.followupStartTime),
+          frameRate,
+        );
+        addMove(followupMove, `${aaBaseDirection}AA`);
+        activeMove = null;
+        return;
+      }
+    }
     const move = createMove(
-      activeMove,
+      currentMove,
       endTime,
       timeline,
       moves.length,
@@ -462,18 +517,14 @@ export async function processRecording(
       frameRate,
       airborneTake,
     );
-    if (moveTakeMode) {
-      move.notation =
-        aaBaseDirection && moves.length === 0 ? `${aaBaseDirection}A` : (moveTakeLabel ?? null);
-    }
-    move.hits?.forEach((hit) => {
-      hit.notation = move.notation
-        ? move.hits!.length > 1
-          ? `${move.notation}(${hit.index})`
-          : move.notation
-        : null;
-    });
-    moves.push(move);
+    addMove(
+      move,
+      moveTakeMode
+        ? aaBaseDirection && moves.length === 0
+          ? `${aaBaseDirection}A`
+          : (moveTakeLabel ?? null)
+        : move.notation,
+    );
     activeMove = null;
   };
 
@@ -619,6 +670,17 @@ export async function processRecording(
     );
     const p1Pixels = player1Context.getImageData(0, 0, p1Size.width, p1Size.height).data;
     const p2Pixels = player2Context.getImageData(0, 0, p2Size.width, p2Size.height).data;
+    const framebarCounter = readFramebarCounter({
+      data: p1Pixels,
+      width: p1Size.width,
+      height: p1Size.height,
+    });
+    const framebarCounterChanged =
+      framebarCounter !== null &&
+      lastFramebarCounterValue !== null &&
+      framebarCounter.value !== lastFramebarCounterValue;
+    if (framebarCounterChanged) lastFramebarChangeTime = time;
+    if (framebarCounter) lastFramebarCounterValue = framebarCounter.value;
     const p1Reading = scanFramebar({
       config,
       sampleWidth: p1Size.width,
@@ -747,7 +809,12 @@ export async function processRecording(
         hitboxTimeline.push({ frame, time, boxes });
       }
     }
-    if (activeMove && !changed && time - lastFramebarChangeTime >= 0.15) {
+    if (
+      activeMove &&
+      !changed &&
+      !isSaturatedSingleStateFramebar(p1Groups, config.sampleCount) &&
+      time - lastFramebarChangeTime >= 0.15
+    ) {
       finishMove(time);
       moveEvent = "end";
     }
@@ -780,6 +847,9 @@ export async function processRecording(
         player2States: p2States,
         player1Groups: p1Groups.map((group) => `${group.state}x${group.length}`).join(" "),
         player2Groups: p2Groups.map((group) => `${group.state}x${group.length}`).join(" "),
+        framebarCounter: framebarCounter?.value ?? null,
+        framebarCounterConfidence: framebarCounter?.confidence ?? null,
+        framebarCounterChanged,
         player1Yellow: p1Reading.yellowStates.map((yellow) => (yellow ? "Y" : ".")).join(""),
         player2Yellow: p2Reading.yellowStates.map((yellow) => (yellow ? "Y" : ".")).join(""),
         player1PinkStripe: p1Reading.pinkStripeStates

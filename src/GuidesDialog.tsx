@@ -128,7 +128,10 @@ export function GuidesDialog({
             <GuideTopic title="Right-click a row" {...entryProps(guideEntryIds.matches[1])}>
               Right-click a set or a game in the table to open its actions. You can show its files
               in File Explorer, export the set or replay as a ZIP, or prepare its replays for
-              playback inside the game. Actions on a set include every game in that set.
+              playback inside the game. You can also mark or unmark a ragequit based on your own
+              review. A Disconnected badge means the game log reported a connection interruption and
+              no replay was saved; it does not identify which player caused it. Actions on a set
+              include every replay in that set.
             </GuideTopic>
             <GuideTopic title="Prepare for playback" {...entryProps(guideEntryIds.matches[2])}>
               The preparation action temporarily puts only the selected replays in the game's replay

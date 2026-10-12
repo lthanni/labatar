@@ -13,6 +13,13 @@ export type TechMove = {
   character: string;
   input: string;
   isStanceParent: boolean;
+  /** Flow stance is a stance parent with its own timing windows. */
+  isFlowStance?: boolean;
+  /** Explicit move-type choice; absent values use the input-based default. */
+  flowStanceOverride?: boolean | null;
+  flowStanceMinimumTimeToFlowCancel?: number | null;
+  flowStanceMinimumTimeToFollowup?: number | null;
+  flowStanceMaxDuration?: number | null;
   /** This catalog entry is the held/charged version and owns separate capture data. */
   isCharged: boolean;
   /** Excluded from automated capture; the move remains available for manual capture. */

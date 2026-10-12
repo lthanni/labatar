@@ -34,7 +34,7 @@ export function gatherMoves(
   attemptedMoveIds: ReadonlySet<string>,
 ) {
   return moves.filter((move) => {
-    if (attemptedMoveIds.has(move.id)) return false;
+    if (move.nonstandard || attemptedMoveIds.has(move.id)) return false;
     const status = slotStatus(move, outcome, takesForSlot(recordings, variantId, move.id, outcome));
     return status === "missing" || status === "needs-redo";
   });
@@ -201,6 +201,10 @@ export function moveTakeOutcomeSummary(recording: RecordedVideo) {
     `active ${phases.active}`,
     `recovery ${phases.recovery}`,
   ];
+  if (matched.flowStanceFrames != null && matched.flowStanceFrames > 0)
+    numbers.push(`flow stance ${matched.flowStanceFrames}`);
+  if (matched.totalDurationFrames != null)
+    numbers.push(`total ${matched.totalDurationFrames} frames`);
   if (take.outcome === "block") {
     numbers.push(`blockstun ${matched.opponentPhases.blockstun}`);
     if (matched.onBlock != null)

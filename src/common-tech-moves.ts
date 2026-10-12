@@ -1,10 +1,22 @@
 import type { TechMove } from "./tech-types";
-import { isFlowCancellableByDefault } from "./move-notation";
+import { isFlowCancellableByDefault, parseMoveNotation } from "./move-notation";
+
+export function isNonMotionFMove(input: string) {
+  const parsed = parseMoveNotation(input, { allowDirectionless: true });
+  return parsed.ok && parsed.isDirectional && parsed.button === "F" && !parsed.isCharged;
+}
+
+export function resolveFlowStance(move: TechMove) {
+  if (typeof move.flowStanceOverride === "boolean") return move.flowStanceOverride;
+  if (move.isFlowStance === true) return true;
+  // An existing stance selection takes precedence over the new input default.
+  if (move.isStanceParent === true) return false;
+  return isNonMotionFMove(move.input);
+}
 
 export const commonMoveInputs = [
-  ...["2", "5"].flatMap((direction) =>
-    ["A", "AA", "B", "C"].map((button) => `${direction}${button}`),
-  ),
+  ...["A", "B", "C"].map((button) => `2${button}`),
+  ...["A", "AA", "B", "C"].map((button) => `5${button}`),
   ...["2", "4", "6"].map((direction) => `${direction}F`),
   ...["236", "214"].flatMap((motion) =>
     ["A", "B", "C", "EX"].map((button) => `${motion}${button}`),
@@ -22,11 +34,13 @@ export function withCommonTechMoves(character: string, existing: TechMove[]): Te
     let id = stem;
     let suffix = 2;
     while (moves.some((move) => move.id === id)) id = `${stem}-${suffix++}`;
+    const isFlowStance = isNonMotionFMove(input);
     moves.push({
       id,
       character,
       input,
-      isStanceParent: false,
+      isStanceParent: isFlowStance,
+      isFlowStance,
       isCharged: false,
       nonstandard: false,
       flowCancellable: isFlowCancellableByDefault(input),

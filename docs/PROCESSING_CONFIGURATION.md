@@ -60,6 +60,19 @@ the FFmpeg JPEG frame path. The color is recognized as its own move state, not
 as startup, active, or recovery. Saved configurations gain it on load; existing
 analyses need reprocessing to use the new calibration.
 
+Calibration profile version 7 adds `RGB(120,162,223)` as `airborne`, sampled
+from the light blue cells before and after Aang's j.2C in the 60 fps whiff take.
+The darker blue cells after its active window are recovery; the final two light
+blue cells are airborne and must not increase recovery or total move frames.
+Saved configurations gain this color on load. Existing j.2C analyses need
+reprocessing with the current calibration to use it.
+
+For grounded moves that end in the air, such as Aang's 236A, trailing airborne
+cells count toward the move's total duration. Aerial attacks (`j.` notation)
+still exclude their jump and post-attack airborne cells. Hitpause cells count
+toward duration only after an active attack cell has appeared; gray patches
+during startup alone do not establish hitpause for that move.
+
 ## Saves and recovery
 
 The main process validates configuration before saving. Writes use a temporary

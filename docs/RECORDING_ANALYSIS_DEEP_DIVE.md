@@ -212,6 +212,57 @@ src/recording-analysis/
 
 `recording-processor.ts` is the browser-video adapter. Detector modules should not import React, read `localStorage`, or depend on a live overlay.
 
+## Two-stage move framebar processing
+
+Move-take processing should separate recording what the framebar shows from
+interpreting that sequence as move data. The approved framebar sequence is a
+reusable input to the second stage, so corrections to phase and multihit rules
+do not require decoding the source video again.
+
+### Stage 1: framebar sequence extraction
+
+Read the video and persist one ordered observation per sampled source frame.
+Each observation should retain the source frame index and timestamp, both
+players' stabilized per-cell state labels, and enough capture metadata to
+reproduce or review the classification (source dimensions, effective framebar
+geometry, frame rate, color-map/calibration snapshot, and extractor version).
+Keep `unmapped` cells explicit; do not replace them with a guessed phase.
+
+This artifact records observations, not move conclusions. It must not contain
+derived startup/active/recovery totals or numbered hit windows as authoritative
+data. A compact display such as `startup, active, gap, active, recovery` can be
+generated from the cell observations for review, but the stored per-frame
+observations remain the source of truth. The artifact is versioned and stored
+with the take independently of the final analysis, so it remains available
+when interpretation is rerun.
+
+### Review and approval
+
+Show the captured sequence and its timing in a review step before deriving move
+data. Approval is attached to the exact sequence revision (or content hash),
+not just the recording. If extraction is rerun and the sequence changes, the
+new revision requires review. Keep rejected or superseded revisions available
+for comparison, matching the existing analysis-history behavior.
+
+### Stage 2: framebar interpretation
+
+Consume only the approved sequence plus versioned interpretation rules and the
+take's move label. Derive move episodes, startup/active/recovery counts,
+multihit windows and gaps, and durations from those saved observations. Record
+the interpreter version and its inputs with the result. Rerunning this stage
+must not open a frame reader or access the video.
+
+For example, the sequence `startup, active, gap, active, recovery` remains the
+recorded evidence. The interpreter may determine that it contains two active
+windows and that the second contains five active frames; changing that rule
+should produce a new determination from the same approved sequence.
+
+This boundary applies to conclusions supported by framebar observations.
+Hitbox geometry, input-history recognition, and other measurements that use
+different video regions need their own captured observation artifacts or a
+separate video-backed stage; they must not be presented as if they were
+recomputed from the framebar sequence.
+
 ## Calibration contract
 
 Calibration must be an explicit, versioned analysis input. A future snapshot should contain at least:

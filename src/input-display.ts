@@ -638,6 +638,14 @@ function readNumberInSegment(
   return { text, confidence: Math.max(0, totalConfidence / glyphs.length), glyphs: glyphSamples };
 }
 
+/** Read the small neutral frame count below the cells in a cropped framebar region. */
+export function readFramebarCounter(image: RgbImage) {
+  const reading = readNumberInSegment(image, 0, image.height, 28, 72, 0, 100);
+  if (!reading || !/^\d{1,4}$/.test(reading.text) || reading.confidence < 0.62) return null;
+  const value = Number(reading.text);
+  return Number.isSafeInteger(value) ? { value, confidence: reading.confidence } : null;
+}
+
 function buildButtonChecks(
   row: InputDisplayRow,
   image: RgbImage,

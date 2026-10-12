@@ -158,11 +158,13 @@ declare global {
           games: ReplayRow[];
           playerCounts: Record<string, number>;
           duplicateCount: number;
+          interruptedMatchIds?: string[];
         } | null>;
         scanFolder: (folder: string) => Promise<{
           games: ReplayRow[];
           playerCounts: Record<string, number>;
           duplicateCount: number;
+          interruptedMatchIds?: string[];
         }>;
         resolvePortraits: (request: {
           pairs: Array<{ character: string; support: string }>;
@@ -622,6 +624,7 @@ function ReplayAnalysis({
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [replayFolder, setReplayFolder] = useState<string | null>(null);
   const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
+  const [interruptedMatchIds, setInterruptedMatchIds] = useState<string[]>([]);
   const [overridePlayer, setOverridePlayer] = useState<string | null>(null);
   const [rankedOnly, setRankedOnly] = useState(false);
   const [rankAffectingOnly, setRankAffectingOnly] = useState(false);
@@ -649,7 +652,12 @@ function ReplayAnalysis({
   const [isGridPending, startGridTransition] = useTransition();
   const lastLoadedFolder = useRef<string | null>(null);
   const onData = useCallback(
-    (nextGames: ReplayRow[], counts: Record<string, number>, folder: string) => {
+    (
+      nextGames: ReplayRow[],
+      counts: Record<string, number>,
+      folder: string,
+      nextInterruptedMatchIds: string[] = [],
+    ) => {
       const folderChanged = lastLoadedFolder.current !== folder;
       lastLoadedFolder.current = folder;
       startGridTransition(() => {
@@ -665,6 +673,7 @@ function ReplayAnalysis({
             : stableGames;
         });
         setReplayFolder(folder);
+        setInterruptedMatchIds(nextInterruptedMatchIds);
         setPlayerCounts((currentCounts) => {
           const currentKeys = Object.keys(currentCounts);
           const nextKeys = Object.keys(counts);
@@ -703,7 +712,7 @@ function ReplayAnalysis({
           if (progressTimer !== null) window.clearTimeout(progressTimer);
           setScanLoading(false);
           onScanError(null);
-          onData(cached.games, cached.playerCounts, gameFolder);
+          onData(cached.games, cached.playerCounts, gameFolder, cached.interruptedMatchIds);
         })
         .catch(() => undefined);
     }
@@ -718,7 +727,7 @@ function ReplayAnalysis({
         if (progressTimer !== null) window.clearTimeout(progressTimer);
         setScanLoading(false);
         onScanError(null);
-        onData(result.games, result.playerCounts, gameFolder);
+        onData(result.games, result.playerCounts, gameFolder, result.interruptedMatchIds);
         const scannedCount = result.games.length + result.duplicateCount;
         setScanProgress({ completed: scannedCount, total: scannedCount, phase: "scanning" });
       })
@@ -859,6 +868,7 @@ function ReplayAnalysis({
       )}
       <AvatarGrid
         rowData={relevantGames}
+        interruptedMatchIds={interruptedMatchIds}
         replayFolder={replayFolder}
         active={active}
         recordingsRefreshToken={recordingsRefreshToken}
