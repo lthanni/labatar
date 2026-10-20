@@ -19,3 +19,4 @@ bucket_name = "labatar-combo-candidates"
 
 [secrets]
 required = ["ACCESS_TEAM_DOMAIN", "ACCESS_AUD", "EDITOR_EMAILS"]
+# EDITOR_EMAILS is the fixed bootstrap owner list; manage other roles in D1.

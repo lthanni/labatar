@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { webcrypto } from "node:crypto";
 import {
+  authorizeAccessAdmin,
   authorizeComboPreview,
   authorizeEditor,
   handleRequest,
@@ -23,6 +24,7 @@ function database() {
     prepare(sql) {
       let statement = sqlite.prepare(sql);
       return {
+        all: async () => ({ results: statement.all() }),
         bind(...values) {
           const args = values.map((value) => (value === undefined ? null : value));
           return {
@@ -261,24 +263,36 @@ test("Access identity requires a valid signature, audience, issuer and time", as
     ),
     "editor@example.com",
   );
-  await assert.rejects(() => authorizeComboPreview(accessRequest, env, fetcher));
-  assert.equal(
-    await authorizeComboPreview(
-      accessRequest,
-      { ...env, COMBO_PREVIEW_ACCESS_MODE: "access" },
-      fetcher,
-    ),
-    "editor@example.com",
-  );
+  const db = database();
+  const roleEnv = { ...env, DB: db, EDITOR_EMAILS: "owner@example.com" };
+  await assert.rejects(() => authorizeComboPreview(accessRequest, roleEnv, fetcher));
+  await db
+    .prepare(
+      "INSERT INTO catalog_access_roles (email, role, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+    )
+    .bind("editor@example.com", "viewer", new Date().toISOString(), "owner@example.com")
+    .run();
+  assert.equal(await authorizeComboPreview(accessRequest, roleEnv, fetcher), "editor@example.com");
+  await assert.rejects(() => authorizeEditor(accessRequest, roleEnv, fetcher));
+  await db
+    .prepare("UPDATE catalog_access_roles SET role = 'editor' WHERE email = ?")
+    .bind("editor@example.com")
+    .run();
+  assert.equal(await authorizeEditor(accessRequest, roleEnv, fetcher), "editor@example.com");
+  await assert.rejects(() => authorizeAccessAdmin(accessRequest, roleEnv, fetcher));
+  const ownerRequest = new Request(accessRequest.url, {
+    headers: { "Cf-Access-Jwt-Assertion": await token({ ...claims, email: "owner@example.com" }) },
+  });
+  assert.equal(await authorizeAccessAdmin(ownerRequest, roleEnv, fetcher), "owner@example.com");
   await assert.rejects(() =>
-    authorizeComboPreview(
-      new Request(accessRequest.url),
-      { ...env, COMBO_PREVIEW_ACCESS_MODE: "access" },
-      fetcher,
-    ),
+    authorizeComboPreview(new Request(accessRequest.url), roleEnv, fetcher),
   );
+  await db
+    .prepare("DELETE FROM catalog_access_roles WHERE email = ?")
+    .bind("editor@example.com")
+    .run();
   await assert.rejects(() =>
-    authorizeEditor(accessRequest, { ...env, EDITOR_EMAILS: "other@example.com" }, fetcher),
+    authorizeEditor(accessRequest, { ...env, DB: db, EDITOR_EMAILS: "other@example.com" }, fetcher),
   );
   const [header, , signature] = valid.split(".");
   const tampered = `${header}.${encode({ ...claims, email: "other@example.com" })}.${signature}`;
@@ -286,6 +300,99 @@ test("Access identity requires a valid signature, audience, issuer and time", as
   await assert.rejects(() => verifyAccessJwt(valid, { ...env, ACCESS_AUD: "wrong" }, fetcher));
   const expired = await token({ ...claims, exp: 1 });
   await assert.rejects(() => verifyAccessJwt(expired, env, fetcher));
+  db.close();
+});
+
+test("only owner can manage individual viewer and editor roles", async () => {
+  const db = database();
+  const env = { DB: db, EDITOR_EMAILS: "owner@example.com" };
+  const owner = async () => "owner@example.com";
+  const denied = async () => {
+    throw new Error("Denied.");
+  };
+  try {
+    assert.equal(
+      (await handleRequest(request("/v1/editor/access-roles"), env, {}, denied, denied, denied))
+        .status,
+      403,
+    );
+    const put = (email, role, headers = {}) =>
+      request(
+        "/v1/editor/access-roles",
+        "PUT",
+        { email, role },
+        { "X-Labatar-Admin": "1", ...headers },
+      );
+    assert.equal(
+      (await handleRequest(put("viewer@example.com", "viewer"), env, {}, denied, denied, denied))
+        .status,
+      403,
+    );
+    assert.equal(
+      (
+        await handleRequest(
+          put("viewer@example.com", "viewer", { Origin: "https://evil.example" }),
+          env,
+          {},
+          denied,
+          denied,
+          owner,
+        )
+      ).status,
+      400,
+    );
+    assert.equal(
+      (await handleRequest(put("owner@example.com", "viewer"), env, {}, denied, denied, owner))
+        .status,
+      400,
+    );
+    assert.equal(
+      (await handleRequest(put("viewer@example.com", "viewer"), env, {}, denied, denied, owner))
+        .status,
+      200,
+    );
+    assert.equal(
+      (await handleRequest(put("editor@example.com", "editor"), env, {}, denied, denied, owner))
+        .status,
+      200,
+    );
+    const list = await handleRequest(
+      request("/v1/editor/access-roles"),
+      env,
+      {},
+      denied,
+      denied,
+      owner,
+    );
+    assert.deepEqual(
+      (await list.json()).items.map(({ email, role }) => [email, role]),
+      [
+        ["editor@example.com", "editor"],
+        ["viewer@example.com", "viewer"],
+      ],
+    );
+    const removal = request(
+      "/v1/editor/access-roles",
+      "DELETE",
+      { email: "viewer@example.com" },
+      { "X-Labatar-Admin": "1" },
+    );
+    assert.equal((await handleRequest(removal, env, {}, denied, denied, owner)).status, 200);
+    const after = await handleRequest(
+      request("/v1/editor/access-roles"),
+      env,
+      {},
+      denied,
+      denied,
+      owner,
+    );
+    assert.deepEqual(
+      (await after.json()).items.map(({ email }) => email),
+      ["editor@example.com"],
+    );
+  } finally {
+    db.close();
+  }
 });
 
 void test("Combos preview permission is separate from editor permission", async () => {
@@ -424,6 +531,29 @@ test("publisher page and assets require editor authorization", async () => {
     const script = await handleRequest(request("/v1/editor/app.js"), env, {}, editor);
     assert.equal(script.status, 200);
     assert.deepEqual(paths, ["/v1/editor/app", "/v1/editor/app.js"]);
+    const deniedAdmin = await handleRequest(request("/v1/editor/access"), env, {}, editor);
+    assert.equal(deniedAdmin.status, 403);
+    const owner = async () => "owner@example.com";
+    const adminPage = await handleRequest(
+      request("/v1/editor/access"),
+      env,
+      {},
+      editor,
+      undefined,
+      owner,
+    );
+    assert.equal(adminPage.status, 200);
+    assert.match(adminPage.headers.get("Content-Security-Policy"), /script-src 'self'/);
+    const adminScript = await handleRequest(
+      request("/v1/editor/access.js"),
+      env,
+      {},
+      editor,
+      undefined,
+      owner,
+    );
+    assert.equal(adminScript.status, 200);
+    assert.deepEqual(paths.slice(2), ["/v1/editor/access", "/v1/editor/access.js"]);
   } finally {
     db.close();
   }

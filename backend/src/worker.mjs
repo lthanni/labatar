@@ -472,18 +472,95 @@ export async function verifyAccessJwt(token, env, fetcher = fetch) {
 
 export async function authorizeEditor(request, env, fetcher = fetch) {
   const email = await verifyAccessJwt(request.headers.get("Cf-Access-Jwt-Assertion"), env, fetcher);
-  const approved = (env.EDITOR_EMAILS ?? "").split(",").map((item) => item.trim().toLowerCase());
-  if (!approved.includes(email)) throw new Error("This account is not an approved editor.");
+  if (!(ownerEmails(env).includes(email) || (await accessRole(env.DB, email)) === "editor")) {
+    throw new Error("This account is not an approved editor.");
+  }
   return email;
 }
 
 export async function authorizeComboPreview(request, env, fetcher = fetch) {
   const email = await verifyAccessJwt(request.headers.get("Cf-Access-Jwt-Assertion"), env, fetcher);
-  if (env.COMBO_PREVIEW_ACCESS_MODE !== "access") {
-    const editors = (env.EDITOR_EMAILS ?? "").split(",").map((item) => item.trim().toLowerCase());
-    if (!editors.includes(email)) throw new Error("Combos preview access is unavailable.");
-  }
+  if (!(ownerEmails(env).includes(email) || (await accessRole(env.DB, email))))
+    throw new Error("Combos preview access is unavailable.");
   return email;
+}
+
+function ownerEmails(env) {
+  return (env.EDITOR_EMAILS ?? "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+async function accessRole(db, email) {
+  if (!db) throw new Error("Access roles are unavailable.");
+  const { results } = await db
+    .prepare("SELECT role FROM catalog_access_roles WHERE email = ?")
+    .bind(email)
+    .all();
+  return results[0]?.role ?? null;
+}
+
+export async function authorizeAccessAdmin(request, env, fetcher = fetch) {
+  const email = await verifyAccessJwt(request.headers.get("Cf-Access-Jwt-Assertion"), env, fetcher);
+  if (!ownerEmails(env).includes(email)) throw new Error("Access administration is unavailable.");
+  return email;
+}
+
+function accessEmail(value) {
+  if (typeof value !== "string") throw new Error("Enter an email address.");
+  const email = value.trim().toLowerCase();
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    throw new Error("Enter a valid email address.");
+  return email;
+}
+
+function checkAdminMutation(request) {
+  if (request.headers.get("X-Labatar-Admin") !== "1")
+    throw new Error("Admin request header is required.");
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== new URL(request.url).origin)
+    throw new Error("Admin request origin is invalid.");
+}
+
+async function handleAccessRoles(request, env, adminEmail) {
+  if (request.method === "GET") {
+    const { results } = await env.DB.prepare(
+      "SELECT email, role, updated_at AS updatedAt, updated_by AS updatedBy FROM catalog_access_roles ORDER BY email",
+    ).all();
+    return json({ owner: adminEmail, items: results }, 200, privateHeaders);
+  }
+  try {
+    checkAdminMutation(request);
+    const body = await readJsonBody(request);
+    if (!isObject(body)) throw new Error("JSON body must be an object.");
+    exactFields(body, new Set(request.method === "PUT" ? ["email", "role"] : ["email"]));
+    const email = accessEmail(body.email);
+    if (ownerEmails(env).includes(email)) throw new Error("Owner access is managed separately.");
+    if (request.method === "PUT") {
+      if (body.role !== "viewer" && body.role !== "editor")
+        throw new Error("Role must be viewer or editor.");
+      const now = new Date().toISOString();
+      await env.DB.prepare(`
+        INSERT INTO catalog_access_roles (email, role, updated_at, updated_by)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(email) DO UPDATE SET
+          role = excluded.role,
+          updated_at = excluded.updated_at,
+          updated_by = excluded.updated_by
+      `)
+        .bind(email, body.role, now, adminEmail)
+        .run();
+      return json({ email, role: body.role }, 200, privateHeaders);
+    }
+    if (request.method === "DELETE") {
+      await env.DB.prepare("DELETE FROM catalog_access_roles WHERE email = ?").bind(email).run();
+      return json({ removed: email }, 200, privateHeaders);
+    }
+  } catch (error) {
+    return fail(error.message, 400, true);
+  }
+  return fail("Method not allowed.", 405, true);
 }
 
 async function listRecords(db, kind, search, editor = false) {
@@ -608,6 +685,7 @@ export async function handleRequest(
   _context,
   getEditor = authorizeEditor,
   getComboPreview = authorizeComboPreview,
+  getAccessAdmin = authorizeAccessAdmin,
 ) {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -643,6 +721,41 @@ export async function handleRequest(
       return fail("Combos preview access required.", 403, true);
     }
     return json({ allowed: true }, 200, privateHeaders);
+  }
+  if (path === "/v1/editor/access-roles") {
+    let adminEmail;
+    try {
+      adminEmail = await getAccessAdmin(request, env);
+    } catch {
+      return fail("Access administration required.", 403, true);
+    }
+    if (!["GET", "PUT", "DELETE"].includes(request.method))
+      return fail("Method not allowed.", 405, true);
+    try {
+      return await handleAccessRoles(request, env, adminEmail);
+    } catch {
+      return fail("Access roles are unavailable.", 503, true);
+    }
+  }
+  if (request.method === "GET" && /^\/v1\/editor\/access(?:\.(?:js|css))?$/.test(path)) {
+    try {
+      await getAccessAdmin(request, env);
+    } catch {
+      return fail("Access administration required.", 403, true);
+    }
+    if (!env.ASSETS) return fail("Admin assets are unavailable.", 503, true);
+    const asset = await env.ASSETS.fetch(request);
+    const headers = new Headers(asset.headers);
+    headers.set("Cache-Control", "private, no-store");
+    headers.set("X-Content-Type-Options", "nosniff");
+    headers.set("Referrer-Policy", "no-referrer");
+    if (path === "/v1/editor/access") {
+      headers.set(
+        "Content-Security-Policy",
+        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      );
+    }
+    return new Response(asset.body, { status: asset.status, headers });
   }
   if (request.method === "GET" && /^\/v1\/editor\/app(?:\.(?:js|css))?$/.test(path)) {
     try {

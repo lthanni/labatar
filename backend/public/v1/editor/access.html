@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Labatar access</title>
+    <link rel="stylesheet" href="/v1/editor/access.css" />
+    <script type="module" src="/v1/editor/access.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">Labatar catalog</p>
+        <h1>Manage access</h1>
+        <p>Add someone once. Editors can publish and automatically get Combos preview access.</p>
+      </header>
+
+      <section aria-labelledby="add-heading">
+        <h2 id="add-heading">Add or change a person</h2>
+        <form id="access-form">
+          <label
+            >Email <input id="email" type="email" autocomplete="email" required maxlength="254"
+          /></label>
+          <label
+            >Access
+            <select id="role">
+              <option value="viewer">Combos viewer</option>
+              <option value="editor">Editor and Combos viewer</option>
+            </select>
+          </label>
+          <button type="submit">Save access</button>
+        </form>
+      </section>
+
+      <section aria-labelledby="people-heading">
+        <div class="section-heading">
+          <h2 id="people-heading">People</h2>
+          <button id="refresh" type="button">Refresh</button>
+        </div>
+        <p id="owner" class="muted"></p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Access</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="people"></tbody>
+          </table>
+        </div>
+      </section>
+      <p id="message" role="status" aria-live="polite"></p>
+    </main>
+  </body>
+</html>

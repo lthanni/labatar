@@ -1,6 +1,6 @@
 # Labatar catalog backend
 
-This folder is a Cloudflare Worker backed by D1 and an R2 bucket for combo candidate MP4s. Published moves and combos are publicly readable. Editor routes require a valid Cloudflare Access JWT **and** an email in the private `EDITOR_EMAILS` Worker secret. Candidate submission is currently open; submitter authorization will be added later.
+This folder is a Cloudflare Worker backed by D1 and an R2 bucket for combo candidate MP4s. Published moves and combos are publicly readable. Editor routes require a valid Cloudflare Access JWT and either an editor role in D1 or an owner email in the private `EDITOR_EMAILS` Worker secret. Candidate submission is currently open; submitter authorization will be added later.
 
 The desktop app has a public, read-only Tech tab and a Combos page that fetches published records from this Worker and saves an offline snapshot in IndexedDB. Players can also keep local combos and personal tracking on their device. The development-only Tech editor and recording workflow still use the local draft catalog. Existing drafts are not published automatically; select a combo and choose **Publish combo** to publish it.
 
@@ -8,9 +8,11 @@ The desktop reader uses `https://labatar-catalog.landenhanni.workers.dev` by def
 
 ## Combos preview access
 
-The installed app shows **Combos · Coming soon** until its running Electron process confirms preview access. A user can choose **Have preview access? Sign in** in the tab. The app uses the existing persistent Cloudflare Access session to call `GET /v1/editor/combo-preview`. Cloudflare Access decides who may reach the endpoint, and the Worker verifies its signed Access JWT. Until `COMBO_PREVIEW_ACCESS_MODE` is set to `access`, the Worker further limits preview to the editors in the private `EDITOR_EMAILS` secret. The Combos page is mounted only after an allowed response. The check runs again on app startup. If it cannot reach the Worker, the page stays in Coming soon mode. This is a user-interface rollout; published combo data remains public through `/v1/combos`.
+The installed app shows **Combos · Coming soon** until its running Electron process confirms preview access. A user can choose **Have preview access? Sign in** in the tab. The app uses the existing persistent Cloudflare Access session to call `GET /v1/editor/combo-preview`. The Worker verifies the signed Access JWT and checks for a viewer or editor role in D1. An editor automatically has viewer access. The owner email in `EDITOR_EMAILS` also has both roles. The Combos page is mounted only after an allowed response. The check runs again on app startup. If it cannot reach the Worker, the page stays in Coming soon mode. This is a user-interface rollout; published combo data remains public through `/v1/combos`.
 
-Before enabling Access-only preview, inspect the Access allow policy for `/v1/editor/*` and confirm it admits only intended viewers and editors. Then set the optional `COMBO_PREVIEW_ACCESS_MODE` Worker secret to `access`. Its default is editor-only, so a broad or unverified Access policy cannot silently open the preview. After this one-time switch, invite or remove a Combos viewer only in the Access allow policy. No Worker deployment or new installer is needed for each viewer. Keep viewers out of `EDITOR_EMAILS` if they should not publish. The Worker checks that secret separately on catalog writes and editor reads. The Access application must cover `/v1/editor/combo-preview`; all users install the same app.
+The owner manages people at `https://labatar-catalog.landenhanni.workers.dev/v1/editor/access`. Add one email as **Combos viewer** or **Editor and Combos viewer**, change its role, or remove it. Changes take effect on the next Worker permission check. This page and its API require the signed owner identity from `EDITOR_EMAILS`; the secret is a fixed bootstrap owner list, not the place to add ordinary users. The old `COMBO_PREVIEW_ACCESS_MODE` setting is ignored and can be deleted. No Worker deployment or new installer is needed for each person.
+
+The Access application must cover only `/v1/editor/*`. To make the D1 roles the sole member list, configure an **Allow**, not **Bypass**, policy that lets a person authenticate with a verified email even before a role is assigned. For example, Include **Everyone** and enable One-time PIN on the application. Access then verifies identity and forwards a signed JWT; the Worker rejects anyone absent from the D1 role table and owner secret. This deliberately makes the Access login available to more people, while the Worker remains the authorization gate. Keep the public API paths outside the Access application. Do not delete the owner secret: it is needed to manage roles.
 
 ## Combo publisher
 
@@ -31,13 +33,13 @@ The publisher uses revision headers for safe edits. A conflict means another edi
 3. Enable R2 in the Cloudflare dashboard for this account, then create the private bucket with `vp dlx wrangler r2 bucket create labatar-combo-candidates`. Keep `binding = "CANDIDATE_VIDEOS"` in `wrangler.toml` and do not enable public bucket access. Cloudflare error 10042 means R2 still needs to be enabled for the account.
 4. Apply `schema.sql` with `vp dlx wrangler d1 execute labatar-catalog --remote --file schema.sql`. It adds `combo_candidates` without changing existing catalog records. Older review clients may have stored an approval marker in the `rejection_reason` field; the current upload path no longer requires it. Rejected candidates continue to use that field for the editor's reason.
 5. This Worker uses the `landenhanni.workers.dev` account subdomain. With `name = "labatar-catalog"` and `workers_dev = true`, its expected URL is `https://labatar-catalog.landenhanni.workers.dev`. No custom domain or change to the GitHub Pages site is needed.
-6. In Cloudflare Zero Trust, create a self-hosted Access application for **only** `labatar-catalog.landenhanni.workers.dev/v1/editor/*`. Its allow policy should list the approved editors and Combos preview viewers. Do not protect the entire Worker because its read endpoints and candidate submission are public.
-7. In Cloudflare **Workers & Pages → labatar-catalog → Settings → Variables and Secrets**, set `ACCESS_TEAM_DOMAIN` to the Access team name, `ACCESS_AUD` to the application Audience (AUD) tag, and `EDITOR_EMAILS` to a comma-separated list of publishing editors. Set each as a Secret. These values are not stored in `wrangler.toml`; its `[secrets]` section names the required bindings without exposing their values. After checking the Access allow policy, set the optional `COMBO_PREVIEW_ACCESS_MODE` secret to `access` to make that policy the sole Combos viewer list. Alternatively, use `vp dlx wrangler secret put <NAME>` for each binding. Keep local `.dev.vars` files out of Git.
+6. In Cloudflare Zero Trust, create a self-hosted Access application for **only** `labatar-catalog.landenhanni.workers.dev/v1/editor/*`. Set an **Allow** policy that permits email authentication for people you may add through the admin page; Include **Everyone** with One-time PIN is one option. Never use **Bypass**, which would prevent the Worker from receiving a verified identity. Do not protect the entire Worker because its read endpoints and candidate submission are public.
+7. In Cloudflare **Workers & Pages → labatar-catalog → Settings → Variables and Secrets**, set `ACCESS_TEAM_DOMAIN` to the Access team name, `ACCESS_AUD` to the application Audience (AUD) tag, and `EDITOR_EMAILS` to the fixed owner email(s). Set each as a Secret. These values are not stored in `wrangler.toml`; its `[secrets]` section names the required bindings without exposing their values. Remove any old `COMBO_PREVIEW_ACCESS_MODE` secret. Alternatively, use `vp dlx wrangler secret put <NAME>` for each binding. Keep local `.dev.vars` files out of Git.
 8. Deploy with `vp dlx wrangler deploy`. Existing Worker secrets are preserved by deploy. Check `GET https://labatar-catalog.landenhanni.workers.dev/health` and `GET https://labatar-catalog.landenhanni.workers.dev/v1/combos`.
 
 If `vp dlx wrangler` stops with `ERR_PNPM_IGNORED_BUILDS` for `esbuild` and `workerd` on Windows, use `pnpm.cmd dlx --allow-build=esbuild --allow-build=workerd wrangler <command>` instead for each Wrangler command above. For example, run `pnpm.cmd dlx --allow-build=esbuild --allow-build=workerd wrangler login`. The `.cmd` launcher also avoids PowerShell's script execution policy for `pnpm.ps1`.
 
-The configured Access team name and audience must match the Access application. The publisher list stays in the Worker secret; once Access-only preview is enabled, preview viewers are managed only through the Access policy. No Cloudflare credentials, email lists, or user secrets belong in the repository.
+The configured Access team name and audience must match the Access application. The owner list stays in the Worker secret. Everyone else is managed one person at a time through the private admin page and D1. No Cloudflare credentials, email lists, or user secrets belong in the repository.
 
 After deployment, verify `GET /health` returns `{"ok":true,"features":{"comboNotes":true,"comboCandidates":true}}`. This confirms the deployed Worker accepts combo notes and has candidate video storage. Check the public `GET /v1/moves` and `GET /v1/combos` routes too. Open `/v1/editor/moves` in a browser: Access should prompt for sign-in, then the Worker should return an editor list for an approved editor. If the public routes prompt for sign-in, the Access application covers too broad a path. If the editor route still returns HTTP 401 after sign-in, check the Access team name, audience, and allowed email.
 
@@ -45,25 +47,27 @@ For local database work, run `vp dlx wrangler d1 execute labatar-catalog --local
 
 ## API
 
-| Method | Path                                              | Access       | Purpose                                                           |
-| ------ | ------------------------------------------------- | ------------ | ----------------------------------------------------------------- |
-| GET    | `/health`                                         | Public       | Health response                                                   |
-| GET    | `/v1/editor/app`                                  | Editor       | Browser combo publisher                                           |
-| GET    | `/v1/editor/combo-preview`                        | Preview      | Check whether the signed-in user can open the Combos page         |
-| GET    | `/v1/moves?character=aang`                        | Public       | Published moves                                                   |
-| GET    | `/v1/combos?character=aang&support=gyatso`        | Public       | Published combos                                                  |
-| GET    | `/v1/editor/moves` or `/v1/editor/combos`         | Editor       | Latest records, including unpublished records and revisions       |
-| PUT    | `/v1/editor/moves/:id` or `/v1/editor/combos/:id` | Editor       | Create or replace a record                                        |
-| DELETE | `/v1/editor/moves/:id` or `/v1/editor/combos/:id` | Editor       | Unpublish a record; older revisions remain in D1                  |
-| POST   | `/v1/candidates`                                  | Public       | Create an MP4 candidate upload and receive a private upload token |
-| PUT    | `/v1/candidates/:id/parts/:number`                | Upload token | Upload an 8 MiB part (last part may be smaller)                   |
-| POST   | `/v1/candidates/:id/complete`                     | Upload token | Complete the MP4 and place the combo in review                    |
-| POST   | `/v1/candidates/:id/abort`                        | Upload token | Abort an unfinished upload                                        |
-| GET    | `/v1/editor/candidates`                           | Editor       | List submitted candidates                                         |
-| GET    | `/v1/editor/candidates/:id/video`                 | Editor       | Download the submitted MP4                                        |
-| POST   | `/v1/editor/candidates/:id/approve`               | Editor       | Legacy approval endpoint for older desktop clients                |
-| POST   | `/v1/editor/candidates/:id/reject`                | Editor       | Reject and remove the queued MP4                                  |
-| POST   | `/v1/editor/candidates/:id/uploaded`              | Editor       | Save a pending candidate's YouTube URL                            |
+| Method         | Path                                              | Access       | Purpose                                                           |
+| -------------- | ------------------------------------------------- | ------------ | ----------------------------------------------------------------- |
+| GET            | `/health`                                         | Public       | Health response                                                   |
+| GET            | `/v1/editor/app`                                  | Editor       | Browser combo publisher                                           |
+| GET            | `/v1/editor/combo-preview`                        | Preview      | Check whether the signed-in user can open the Combos page         |
+| GET            | `/v1/editor/access`                               | Owner        | Manage viewer and editor roles in a browser                       |
+| GET/PUT/DELETE | `/v1/editor/access-roles`                         | Owner        | List, set, or remove individual roles                             |
+| GET            | `/v1/moves?character=aang`                        | Public       | Published moves                                                   |
+| GET            | `/v1/combos?character=aang&support=gyatso`        | Public       | Published combos                                                  |
+| GET            | `/v1/editor/moves` or `/v1/editor/combos`         | Editor       | Latest records, including unpublished records and revisions       |
+| PUT            | `/v1/editor/moves/:id` or `/v1/editor/combos/:id` | Editor       | Create or replace a record                                        |
+| DELETE         | `/v1/editor/moves/:id` or `/v1/editor/combos/:id` | Editor       | Unpublish a record; older revisions remain in D1                  |
+| POST           | `/v1/candidates`                                  | Public       | Create an MP4 candidate upload and receive a private upload token |
+| PUT            | `/v1/candidates/:id/parts/:number`                | Upload token | Upload an 8 MiB part (last part may be smaller)                   |
+| POST           | `/v1/candidates/:id/complete`                     | Upload token | Complete the MP4 and place the combo in review                    |
+| POST           | `/v1/candidates/:id/abort`                        | Upload token | Abort an unfinished upload                                        |
+| GET            | `/v1/editor/candidates`                           | Editor       | List submitted candidates                                         |
+| GET            | `/v1/editor/candidates/:id/video`                 | Editor       | Download the submitted MP4                                        |
+| POST           | `/v1/editor/candidates/:id/approve`               | Editor       | Legacy approval endpoint for older desktop clients                |
+| POST           | `/v1/editor/candidates/:id/reject`                | Editor       | Reject and remove the queued MP4                                  |
+| POST           | `/v1/editor/candidates/:id/uploaded`              | Editor       | Save a pending candidate's YouTube URL                            |
 
 Create with `If-None-Match: *`. Update or unpublish with `If-Match: "<revision>"` using the latest revision returned by the editor list. A stale revision returns HTTP 409. Record IDs, character IDs, support IDs, move IDs, and resource keys are lowercase slugs.
 

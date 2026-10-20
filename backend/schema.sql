@@ -31,3 +31,10 @@ CREATE TABLE IF NOT EXISTS combo_candidates (
 
 CREATE INDEX IF NOT EXISTS combo_candidates_review
   ON combo_candidates (status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS catalog_access_roles (
+  email TEXT PRIMARY KEY,
+  role TEXT NOT NULL CHECK (role IN ('viewer', 'editor')),
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL
+);
