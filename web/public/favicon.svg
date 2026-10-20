@@ -1,11 +1,4 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
-  <defs>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#90caf9"/>
-      <stop offset="1" stop-color="#8de3dc"/>
-    </linearGradient>
-  </defs>
-  <rect width="64" height="64" rx="16" fill="#171923"/>
-  <rect x="7" y="7" width="50" height="50" rx="13" fill="url(#accent)"/>
-  <path d="M23 21v22h20" fill="none" stroke="#10212c" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect width="64" height="64" rx="14" fill="#F4CD9F"/>
+  <path d="M19 13h10v27h14v9H19z" fill="#278AC9"/>
 </svg>
