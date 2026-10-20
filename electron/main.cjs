@@ -45,6 +45,10 @@ const { replaceLocalRecordingWithYouTube } = require("./youtube-recording-replac
 const { createYouTubeUploadService } = require("./youtube-upload.cjs");
 const { publishCombo } = require("./catalog-publisher.cjs");
 const {
+  checkComboPreviewAccess,
+  requestComboPreviewAccess,
+} = require("./combo-preview-access.cjs");
+const {
   candidateServiceStatus,
   submitComboCandidate,
   listComboCandidates,
@@ -68,6 +72,7 @@ const { normalizeRendererSnapshot, summarizeProcessMetric } = require("./rendere
 const { createRecordingResponse, getMediaStreamMetrics } = require("./recording-media.cjs");
 const { importComboMp4 } = require("./recording-import.cjs");
 const { importReplays } = require("./replay-import.cjs");
+const { importDiscordReplayUrl } = require("./discord-replay-import.cjs");
 const supportMap = require("./support-map.json");
 const characterMap = require("./character-map.json");
 const { createProcessingConfigurationStore } = require("./processing-config.cjs");
@@ -7165,6 +7170,8 @@ ipcMain.on("recordings:start-drag", async (event, request) => {
     });
   } catch (error) {
     console.warn("Could not start recording drag:", obsErrorMessage(error));
+  } finally {
+    if (!event.sender.isDestroyed()) event.sender.send("recordings:drag-finished");
   }
 });
 ipcMain.handle("catalog:publish-combo", async (event, request) => {
@@ -7183,6 +7190,11 @@ ipcMain.handle("catalog:publish-combo", async (event, request) => {
     throw error;
   }
 });
+ipcMain.handle("catalog:combo-preview-access", (event, request) =>
+  request?.interactive
+    ? requestComboPreviewAccess(BrowserWindow.fromWebContents(event.sender))
+    : checkComboPreviewAccess(),
+);
 ipcMain.handle("combo-candidates:status", () => candidateServiceStatus());
 ipcMain.handle("combo-candidates:submit", async (event, request) => {
   const recordingPath = resolveRecordingPath(String(request?.recordingId ?? ""));
@@ -7378,7 +7390,7 @@ ipcMain.handle("replays:get-folder", () => {
   return getReplayFolder();
 });
 
-async function runReplayImport(paths) {
+async function runReplayImportTask(task) {
   if (replayStagingBusy || replayImportBusy) {
     throw new Error("Another replay operation is in progress. Try again shortly.");
   }
@@ -7393,13 +7405,19 @@ async function runReplayImport(paths) {
   }
   replayImportBusy = true;
   try {
-    return await importReplays(paths, getReplayFolder());
+    return await task(getReplayFolder());
   } finally {
     replayImportBusy = false;
   }
 }
 
-ipcMain.handle("replays:import-dropped", (_, paths) => runReplayImport(paths));
+ipcMain.handle("replays:import-dropped", (_, paths) =>
+  runReplayImportTask((folder) => importReplays(paths, folder)),
+);
+ipcMain.handle("replays:import-link", (_, url) => {
+  if (!isDev) throw new Error("Replay link import is available only in development builds.");
+  return runReplayImportTask((folder) => importDiscordReplayUrl(url, folder));
+});
 
 ipcMain.handle("replays:choose-import", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -7408,7 +7426,7 @@ ipcMain.handle("replays:choose-import", async () => {
     filters: [{ name: "Replay files and ZIP archives", extensions: ["dlr", "zip"] }],
   });
   if (result.canceled || result.filePaths.length === 0) return null;
-  return runReplayImport(result.filePaths);
+  return runReplayImportTask((folder) => importReplays(result.filePaths, folder));
 });
 
 ipcMain.handle("replays:get-game-folder-status", () => getGameFolderStatus());

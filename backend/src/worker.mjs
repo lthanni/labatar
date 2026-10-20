@@ -477,6 +477,17 @@ export async function authorizeEditor(request, env, fetcher = fetch) {
   return email;
 }
 
+export async function authorizeComboPreview(request, env, fetcher = fetch) {
+  const email = await verifyAccessJwt(request.headers.get("Cf-Access-Jwt-Assertion"), env, fetcher);
+  const approved = [env.COMBO_PREVIEW_EMAILS, env.EDITOR_EMAILS]
+    .filter(Boolean)
+    .flatMap((list) => list.split(","))
+    .map((item) => item.trim().toLowerCase());
+  if (!approved.includes(email))
+    throw new Error("This account does not have Combos preview access.");
+  return email;
+}
+
 async function listRecords(db, kind, search, editor = false) {
   const character = search.get("character");
   const support = search.get("support");
@@ -593,7 +604,13 @@ async function unpublishRecord(env, kind, pathId, expected, email) {
   return json({ id: pathId, revision: expected + 1, published: false }, 200, privateHeaders);
 }
 
-export async function handleRequest(request, env, _context, getEditor = authorizeEditor) {
+export async function handleRequest(
+  request,
+  env,
+  _context,
+  getEditor = authorizeEditor,
+  getComboPreview = authorizeComboPreview,
+) {
   const url = new URL(request.url);
   const path = url.pathname;
   if (request.method === "OPTIONS" && /^\/v1\/(?:moves|combos)$/.test(path)) {
@@ -619,6 +636,15 @@ export async function handleRequest(request, env, _context, getEditor = authoriz
       ok: true,
       features: { comboNotes: true, comboCandidates: Boolean(env.CANDIDATE_VIDEOS) },
     });
+  }
+  if (path === "/v1/editor/combo-preview") {
+    if (request.method !== "GET") return fail("Method not allowed.", 405, true);
+    try {
+      await getComboPreview(request, env);
+    } catch {
+      return fail("Combos preview access required.", 403, true);
+    }
+    return json({ allowed: true }, 200, privateHeaders);
   }
   if (request.method === "GET" && /^\/v1\/editor\/app(?:\.(?:js|css))?$/.test(path)) {
     try {

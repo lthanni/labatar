@@ -6,6 +6,12 @@ The desktop app has a public, read-only Tech tab and a Combos page that fetches 
 
 The desktop reader uses `https://labatar-catalog.landenhanni.workers.dev` by default. Set `VITE_CATALOG_API_URL` before starting the app to point it at a local Worker, for example `http://localhost:8787`. The override is a public build-time setting, not a credential. Direct publishing is enabled only when the reader targets the hosted catalog; the app sends editor writes to that same hosted Worker.
 
+## Combos preview access
+
+The installed app shows **Combos · Coming soon** until its running Electron process confirms preview access. A user can choose **Have preview access? Sign in** in the tab. The app uses the existing persistent Cloudflare Access session to call `GET /v1/editor/combo-preview`; the Worker verifies the Access JWT and permits emails in `COMBO_PREVIEW_EMAILS` or `EDITOR_EMAILS`. The Combos page is mounted only after an allowed response. The check runs again on app startup. If it cannot reach the Worker, the page stays in Coming soon mode. This is a user-interface rollout; published combo data remains public through `/v1/combos`.
+
+To invite a viewer without publishing rights, add the email to `COMBO_PREVIEW_EMAILS` in `wrangler.toml` and to the Cloudflare Access allow policy for `/v1/editor/*`, then deploy the Worker. Keep it out of `EDITOR_EMAILS`. The Worker checks `EDITOR_EMAILS` separately on catalog writes and editor reads. Editors already have preview access without being repeated in `COMBO_PREVIEW_EMAILS`. The Access application must cover `/v1/editor/combo-preview`, and both the Access policy and Worker allowlist must admit a tester before sign-in succeeds. The installer contains no user list; all users install the same app.
+
 ## Combo publisher
 
 The publisher supports an optional public combo name, editor difficulty from 1 to 5, and an editor-pick context and reason. Deploy this Worker update before publishing those fields from the new Combos page.
@@ -25,7 +31,7 @@ The publisher uses revision headers for safe edits. A conflict means another edi
 3. Enable R2 in the Cloudflare dashboard for this account, then create the private bucket with `vp dlx wrangler r2 bucket create labatar-combo-candidates`. Keep `binding = "CANDIDATE_VIDEOS"` in `wrangler.toml` and do not enable public bucket access. Cloudflare error 10042 means R2 still needs to be enabled for the account.
 4. Apply `schema.sql` with `vp dlx wrangler d1 execute labatar-catalog --remote --file schema.sql`. It adds `combo_candidates` without changing existing catalog records. Older review clients may have stored an approval marker in the `rejection_reason` field; the current upload path no longer requires it. Rejected candidates continue to use that field for the editor's reason.
 5. This Worker uses the `landenhanni.workers.dev` account subdomain. With `name = "labatar-catalog"` and `workers_dev = true`, its expected URL is `https://labatar-catalog.landenhanni.workers.dev`. No custom domain or change to the GitHub Pages site is needed.
-6. In Cloudflare Zero Trust, create a self-hosted Access application for **only** `labatar-catalog.landenhanni.workers.dev/v1/editor/*`. Its allow policy should list the approved editors. Copy the team name and Application Audience (AUD) tag into `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` in `wrangler.toml`. Put the same editor email addresses, comma-separated, in `EDITOR_EMAILS`. Do not protect the entire Worker because its read endpoints and candidate submission are public.
+6. In Cloudflare Zero Trust, create a self-hosted Access application for **only** `labatar-catalog.landenhanni.workers.dev/v1/editor/*`. Its allow policy should list the approved editors and Combos preview testers. Copy the team name and Application Audience (AUD) tag into `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` in `wrangler.toml`. Put editor addresses in `EDITOR_EMAILS` and viewer-only tester addresses in `COMBO_PREVIEW_EMAILS`, comma-separated. Do not protect the entire Worker because its read endpoints and candidate submission are public.
 7. Deploy with `vp dlx wrangler deploy`. Check `GET https://labatar-catalog.landenhanni.workers.dev/health` and `GET https://labatar-catalog.landenhanni.workers.dev/v1/combos`.
 
 If `vp dlx wrangler` stops with `ERR_PNPM_IGNORED_BUILDS` for `esbuild` and `workerd` on Windows, use `pnpm.cmd dlx --allow-build=esbuild --allow-build=workerd wrangler <command>` instead for each Wrangler command above. For example, run `pnpm.cmd dlx --allow-build=esbuild --allow-build=workerd wrangler login`. The `.cmd` launcher also avoids PowerShell's script execution policy for `pnpm.ps1`.
@@ -42,6 +48,7 @@ For local database work, run `vp dlx wrangler d1 execute labatar-catalog --local
 | ------ | ------------------------------------------------- | ------------ | ----------------------------------------------------------------- |
 | GET    | `/health`                                         | Public       | Health response                                                   |
 | GET    | `/v1/editor/app`                                  | Editor       | Browser combo publisher                                           |
+| GET    | `/v1/editor/combo-preview`                        | Preview      | Check whether the signed-in user can open the Combos page         |
 | GET    | `/v1/moves?character=aang`                        | Public       | Published moves                                                   |
 | GET    | `/v1/combos?character=aang&support=gyatso`        | Public       | Published combos                                                  |
 | GET    | `/v1/editor/moves` or `/v1/editor/combos`         | Editor       | Latest records, including unpublished records and revisions       |

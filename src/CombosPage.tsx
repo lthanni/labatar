@@ -2898,7 +2898,18 @@ export function CombosPage({ active }: { active: boolean }) {
                     flexWrap: "wrap",
                   }}
                 >
-                  <Typography variant="h6">Your answers for {starter || "this starter"}</Typography>
+                  <Typography variant="h6">
+                    {starter ? (
+                      <>
+                        <Box component="span" sx={{ color: "primary.main" }}>
+                          {starter}
+                        </Box>{" "}
+                        starter combos
+                      </>
+                    ) : (
+                      "Starter combos"
+                    )}
+                  </Typography>
                   <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
                     {workspace.localCombos.length > 0 && (
                       <Button

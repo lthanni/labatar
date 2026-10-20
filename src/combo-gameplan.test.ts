@@ -131,6 +131,9 @@ describe("personal combo workspace", () => {
     expect(comboStarterGroup("2B")).toBe("ground-normal");
     expect(comboStarterGroup("j.B!~A")).toBe("crit");
     expect(comboStarterFromRoute("STANCE~B > 5A", true)).toBe("STANCE~B");
+    expect(comboStarterFromRoute("2F~B > 5A")).toBe("2F~B");
+    expect(comboStarterFromRoute("5B > 2F~B > 5A")).toBe("5B");
+    expect(comboStarterFromRoute("5B~A > 236B")).toBe("5B");
     expect(comboStarterFromRoute("5B > 236A")).toBe("5B");
     const saved = parseComboWorkspace({
       version: 1,

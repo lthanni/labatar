@@ -9,6 +9,8 @@ describe("assumed Tech moves", () => {
   it("starts each character with the requested inputs and unknown frame data", () => {
     const inputs = withCommonTechMoves("Aang", []);
     expect(inputs.map((move) => move.input)).toEqual([
+      "TH",
+      "j.TH",
       "2A",
       "2B",
       "2C",
@@ -40,9 +42,13 @@ describe("assumed Tech moves", () => {
 
   it("preserves existing move IDs and data when filling gaps", () => {
     const initial = withCommonTechMoves("Aang", []);
-    const savedMove = { ...initial[0], id: "existing-2a", startup: 7 };
+    const savedMove = {
+      ...initial.find((move) => move.input === "2A")!,
+      id: "existing-2a",
+      startup: 7,
+    };
     const moves = withCommonTechMoves("Aang", [savedMove]);
-    expect(moves).toHaveLength(25);
+    expect(moves).toHaveLength(27);
     expect(moves[0]).toEqual(savedMove);
     expect(withCommonTechMoves("Aang", moves)).toEqual(moves);
   });

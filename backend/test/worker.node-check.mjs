@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { webcrypto } from "node:crypto";
 import {
+  authorizeComboPreview,
   authorizeEditor,
   handleRequest,
   validateRecord,
@@ -252,6 +253,29 @@ test("Access identity requires a valid signature, audience, issuer and time", as
     await authorizeEditor(accessRequest, { ...env, EDITOR_EMAILS: "editor@example.com" }, fetcher),
     "editor@example.com",
   );
+  assert.equal(
+    await authorizeComboPreview(
+      accessRequest,
+      { ...env, COMBO_PREVIEW_EMAILS: "editor@example.com" },
+      fetcher,
+    ),
+    "editor@example.com",
+  );
+  assert.equal(
+    await authorizeComboPreview(
+      accessRequest,
+      { ...env, EDITOR_EMAILS: "editor@example.com" },
+      fetcher,
+    ),
+    "editor@example.com",
+  );
+  await assert.rejects(() =>
+    authorizeComboPreview(
+      accessRequest,
+      { ...env, COMBO_PREVIEW_EMAILS: "other@example.com" },
+      fetcher,
+    ),
+  );
   await assert.rejects(() =>
     authorizeEditor(accessRequest, { ...env, EDITOR_EMAILS: "other@example.com" }, fetcher),
   );
@@ -261,6 +285,33 @@ test("Access identity requires a valid signature, audience, issuer and time", as
   await assert.rejects(() => verifyAccessJwt(valid, { ...env, ACCESS_AUD: "wrong" }, fetcher));
   const expired = await token({ ...claims, exp: 1 });
   await assert.rejects(() => verifyAccessJwt(expired, env, fetcher));
+});
+
+void test("Combos preview permission is separate from editor permission", async () => {
+  const db = database();
+  const env = { DB: db };
+  const denied = async () => {
+    throw new Error("Not an editor.");
+  };
+  const preview = async () => "tester@example.com";
+  try {
+    const allowed = await handleRequest(
+      request("/v1/editor/combo-preview"),
+      env,
+      {},
+      denied,
+      preview,
+    );
+    assert.equal(allowed.status, 200);
+    assert.deepEqual(await allowed.json(), { allowed: true });
+    assert.equal(
+      (await handleRequest(request("/v1/editor/combo-preview"), env, {}, denied, denied)).status,
+      403,
+    );
+    assert.equal((await handleRequest(request("/v1/editor/combos"), env, {}, denied)).status, 401);
+  } finally {
+    db.close();
+  }
 });
 
 test("public reads, editor writes, revision conflicts and unpublishing", async () => {

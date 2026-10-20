@@ -89,6 +89,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return ipcRenderer.invoke("replays:import-dropped", paths);
     },
     chooseImport: () => ipcRenderer.invoke("replays:choose-import"),
+    importLink: (url) => ipcRenderer.invoke("replays:import-link", url),
     getGameFolderStatus: () => ipcRenderer.invoke("replays:get-game-folder-status"),
     selectFolder: () => ipcRenderer.invoke("replays:select-folder"),
     getCachedScan: (folder) => ipcRenderer.invoke("replays:get-cached-scan", folder),
@@ -164,9 +165,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
     deletePendingMove: (request) => ipcRenderer.invoke("recordings:delete-pending-move", request),
     deleteMoveTake: (request) => ipcRenderer.invoke("recordings:delete-move-take", request),
     startDrag: (request) => ipcRenderer.send("recordings:start-drag", request),
+    onDragFinished: (listener) => {
+      const handler = () => listener();
+      ipcRenderer.on("recordings:drag-finished", handler);
+      return () => ipcRenderer.removeListener("recordings:drag-finished", handler);
+    },
   },
   catalogPublisher: {
     publishCombo: (request) => ipcRenderer.invoke("catalog:publish-combo", request),
+  },
+  comboPreview: {
+    checkAccess: (request) => ipcRenderer.invoke("catalog:combo-preview-access", request),
   },
   comboCandidates: {
     status: () => ipcRenderer.invoke("combo-candidates:status"),

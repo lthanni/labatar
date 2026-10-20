@@ -240,7 +240,9 @@ describe("automated whiff eligibility", () => {
       (move) => automatedWhiffEligibility(move, [], "aang-gyatso").eligible,
     );
     expect(eligible.map((move) => move.input)).toEqual(
-      catalog.filter((move) => !move.isFlowStance).map((move) => move.input),
+      catalog
+        .filter((move) => !move.isFlowStance && move.input !== "TH" && move.input !== "j.TH")
+        .map((move) => move.input),
     );
     const flowMove = catalog.find((move) => move.input === "2F")!;
     expect(automatedWhiffEligibility(flowMove, [], "aang-gyatso").eligible).toBe(false);
@@ -359,7 +361,7 @@ describe("move processing queue", () => {
         id: "archived",
         moveTake: { ...candidate.moveTake, evidenceStatus: "archived" },
       },
-      { ...candidate, id: "processed", analysis: { moves: [] } },
+      { ...candidate, id: "analyzed-without-framebar", analysis: { moves: [] } },
       {
         ...candidate,
         id: "failed-save",
@@ -369,7 +371,7 @@ describe("move processing queue", () => {
     ] as RecordedVideo[];
     expect(
       unprocessedMoveTakes(recordings, "aang-gyatso").map((recording) => recording.id),
-    ).toEqual(["older", "pending", "automated-approved"]);
+    ).toEqual(["older", "pending", "automated-approved", "analyzed-without-framebar"]);
   });
 
   it("shows selected capture identity and frame values without claiming input detection", () => {

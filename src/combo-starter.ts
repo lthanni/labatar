@@ -1,4 +1,5 @@
 import { classifyMoveInput, parseMoveNotation } from "./move-notation";
+import { isNonMotionFMove } from "./common-tech-moves";
 
 export const comboStarterGroups = [
   { id: "crit", label: "Crits" },
@@ -29,14 +30,14 @@ export function comboStarterGroup(input: string): (typeof comboStarterGroups)[nu
   return `${location}-special`;
 }
 
-/** Include the first stance followup when the starter itself does not attack. */
+/** Include the first followup for a non-attacking stance or a default flow stance. */
 export function comboStarterLabel(
   starter: string,
   route: string,
   isNonAttackStance: boolean,
   fallbackFollowup?: string,
 ): string {
-  if (!isNonAttackStance) return starter;
+  if (!isNonAttackStance && !isNonMotionFMove(starter.replace(/!$/, ""))) return starter;
   const leadingFollowup = /^\s*([^\s>~,→]+)\s*~\s*([^\s>~,→]+)/.exec(route);
   const routeStarter = leadingFollowup?.[1].replace(/!$/, "");
   const routeFollowup =
@@ -47,7 +48,7 @@ export function comboStarterLabel(
   return followup ? `${starter}~${followup}` : starter;
 }
 
-/** The first route token is the starter; a non-attacking stance includes its follow-up. */
+/** The first route token is the starter; stance openers include their follow-up. */
 export function comboStarterFromRoute(route: string, isNonAttackStance = false): string {
   const starter = /^\s*([^\s>~,→]+)/.exec(route)?.[1] ?? "";
   return comboStarterLabel(starter, route, isNonAttackStance);

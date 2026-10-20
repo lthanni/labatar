@@ -164,6 +164,7 @@ declare global {
         getFolder: () => Promise<string | null>;
         importDropped: (files: File[]) => Promise<{ importedCount: number }>;
         chooseImport: () => Promise<{ importedCount: number } | null>;
+        importLink: (url: string) => Promise<{ importedCount: number }>;
         getGameFolderStatus: () => Promise<{ folder: string | null; issue: string | null }>;
         selectFolder: () => Promise<string | null>;
         getCachedScan: (folder: string) => Promise<{
@@ -328,11 +329,15 @@ declare global {
         deletePendingMove: (request: { recordingId: string }) => Promise<{ id: string }>;
         deleteMoveTake: (request: { recordingId: string }) => Promise<{ id: string }>;
         startDrag: (request: { recordingId: string }) => void;
+        onDragFinished: (listener: () => void) => () => void;
       };
       catalogPublisher: {
         publishCombo: (
           request: import("./publish-combo-draft").PublishComboDraft,
         ) => Promise<{ cancelled: true } | { cancelled: false; id: string; revision: number }>;
+      };
+      comboPreview: {
+        checkAccess: (request?: { interactive?: boolean }) => Promise<boolean>;
       };
       comboCandidates: {
         status: () => Promise<{ available: boolean }>;
@@ -1068,6 +1073,7 @@ function App() {
   const [gameFolderRefreshToken, setGameFolderRefreshToken] = useState(0);
   const [replayScanError, setReplayScanError] = useState<string | null>(null);
   const [replayDropActive, setReplayDropActive] = useState(false);
+  const outboundRecordingDragRef = useRef(false);
   const [replayImportBusy, setReplayImportBusy] = useState(false);
   const [replayImportMessage, setReplayImportMessage] = useState<{
     severity: "success" | "error";
@@ -1091,7 +1097,43 @@ function App() {
   const artworkTabAvailable = Boolean(window.electronAPI?.artwork);
   const tabStorageKey = "avatar-app-last-tab-v2";
   const comboEditorModeStorageKey = "labatar-combos-editor-mode";
+  const [comboPreviewAccess, setComboPreviewAccess] = useState(developerTabsAvailable);
+  const [comboPreviewChecking, setComboPreviewChecking] = useState(false);
+  const [comboPreviewError, setComboPreviewError] = useState<string | null>(null);
   const { state: obsState } = useObsRecording();
+  useEffect(() => {
+    if (developerTabsAvailable || !window.electronAPI?.comboPreview) return;
+    let active = true;
+    setComboPreviewChecking(true);
+    void window.electronAPI.comboPreview
+      .checkAccess()
+      .then((allowed) => {
+        if (active) setComboPreviewAccess(allowed);
+      })
+      .catch(() => {
+        if (active) setComboPreviewAccess(false);
+      })
+      .finally(() => {
+        if (active) setComboPreviewChecking(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+  const signInForComboPreview = async () => {
+    if (!window.electronAPI?.comboPreview) return;
+    setComboPreviewChecking(true);
+    setComboPreviewError(null);
+    try {
+      const allowed = await window.electronAPI.comboPreview.checkAccess({ interactive: true });
+      setComboPreviewAccess(allowed);
+      if (!allowed) setComboPreviewError("This account does not have preview access yet.");
+    } catch (error) {
+      setComboPreviewError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setComboPreviewChecking(false);
+    }
+  };
   const availableTabIndices = [
     0,
     ...(recordingTabAvailable ? [recordingsTabIndex] : []),
@@ -1207,6 +1249,7 @@ function App() {
   };
   useEffect(() => {
     const importDropped = window.electronAPI?.replays.importDropped;
+    const importLink = developerTabsAvailable ? window.electronAPI?.replays.importLink : undefined;
     if (!importDropped) return;
     const hasFiles = (event: DragEvent) => {
       const transfer = event.dataTransfer;
@@ -1217,40 +1260,44 @@ function App() {
           transfer.files.length > 0),
       );
     };
-    let hideDropOverlay: number | null = null;
-    const showDropOverlay = () => {
-      setReplayDropActive(true);
-      if (hideDropOverlay !== null) window.clearTimeout(hideDropOverlay);
-      hideDropOverlay = window.setTimeout(() => setReplayDropActive(false), 800);
+    const hasLink = (event: DragEvent) => {
+      if (!importLink) return false;
+      const types = Array.from(event.dataTransfer?.types ?? []);
+      return types.some((type) => ["text/uri-list", "text/plain", "text/html"].includes(type));
     };
-    const onDragEnter = (event: DragEvent) => {
-      if (hasFiles(event)) showDropOverlay();
+    const isEditable = (target: EventTarget | null) =>
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      (target instanceof HTMLElement && target.isContentEditable);
+    const droppedLink = (transfer: DataTransfer) => {
+      const uriList = transfer
+        .getData("text/uri-list")
+        .split(/\r?\n/)
+        .find((line) => line && !line.startsWith("#"));
+      const plain = transfer.getData("text/plain").trim();
+      const html = transfer.getData("text/html");
+      const htmlLink = html
+        ? new DOMParser()
+            .parseFromString(html, "text/html")
+            .querySelector("a[href]")
+            ?.getAttribute("href")
+        : null;
+      const candidates = [uriList, plain, htmlLink].filter((value): value is string =>
+        Boolean(value),
+      );
+      return (
+        candidates.find((value) => value.startsWith("https://cdn.discordapp.com/attachments/")) ??
+        candidates[0] ??
+        ""
+      );
     };
-    const onDragOver = (event: DragEvent) => {
-      if (!hasFiles(event)) return;
-      event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
-      showDropOverlay();
-    };
-    const onDrop = (event: DragEvent) => {
-      if (!hasFiles(event)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (hideDropOverlay !== null) window.clearTimeout(hideDropOverlay);
-      setReplayDropActive(false);
+    const beginImport = (request: () => Promise<{ importedCount: number }>) => {
       if (replayImportBusy) return;
-      const files = [...(event.dataTransfer?.files ?? [])];
-      if (!files.length) {
-        setReplayImportMessage({ severity: "error", text: "No files were available in the drop." });
-        return;
-      }
       setReplayImportBusy(true);
       setReplayImportMessage(null);
       void Promise.resolve()
-        .then(() => importDropped(files))
-        .then(({ importedCount }) => {
-          finishReplayImport({ importedCount });
-        })
+        .then(request)
+        .then(finishReplayImport)
         .catch((error) => {
           setReplayImportMessage({
             severity: "error",
@@ -1259,14 +1306,90 @@ function App() {
         })
         .finally(() => setReplayImportBusy(false));
     };
+    let hideDropOverlay: number | null = null;
+    const finishOutboundDrag = () => {
+      outboundRecordingDragRef.current = false;
+    };
+    const onDragStart = (event: DragEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest('[draggable="true"]')) return;
+      outboundRecordingDragRef.current = true;
+      if (hideDropOverlay !== null) window.clearTimeout(hideDropOverlay);
+      setReplayDropActive(false);
+    };
+    const showDropOverlay = () => {
+      setReplayDropActive(true);
+      if (hideDropOverlay !== null) window.clearTimeout(hideDropOverlay);
+      hideDropOverlay = window.setTimeout(() => setReplayDropActive(false), 800);
+    };
+    const onDragEnter = (event: DragEvent) => {
+      if (outboundRecordingDragRef.current) return;
+      if (hasFiles(event) || (hasLink(event) && !isEditable(event.target))) showDropOverlay();
+    };
+    const onDragOver = (event: DragEvent) => {
+      if (outboundRecordingDragRef.current) {
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+        return;
+      }
+      if (!hasFiles(event) && !(hasLink(event) && !isEditable(event.target))) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      showDropOverlay();
+    };
+    const onDrop = (event: DragEvent) => {
+      if (outboundRecordingDragRef.current) {
+        event.preventDefault();
+        event.stopPropagation();
+        finishOutboundDrag();
+        return;
+      }
+      if (!hasFiles(event) && !hasLink(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (hideDropOverlay !== null) window.clearTimeout(hideDropOverlay);
+      setReplayDropActive(false);
+      const transfer = event.dataTransfer;
+      if (!transfer) return;
+      const link = droppedLink(transfer);
+      if (
+        link &&
+        importLink &&
+        (link.startsWith("https://cdn.discordapp.com/attachments/") || transfer.files.length === 0)
+      ) {
+        beginImport(() => importLink(link));
+      } else if (transfer.files.length > 0) {
+        const files = [...transfer.files];
+        beginImport(() => importDropped(files));
+      } else {
+        setReplayImportMessage({
+          severity: "error",
+          text: "No files were available in the drop.",
+        });
+      }
+    };
+    const onPaste = (event: ClipboardEvent) => {
+      if (isEditable(event.target) || !importLink) return;
+      const link = event.clipboardData?.getData("text/plain").trim() ?? "";
+      if (!link.startsWith("https://cdn.discordapp.com/attachments/")) return;
+      event.preventDefault();
+      beginImport(() => importLink(link));
+    };
+    const removeDragFinished = window.electronAPI?.recordings?.onDragFinished?.(finishOutboundDrag);
+    document.addEventListener("dragstart", onDragStart, true);
+    document.addEventListener("dragend", finishOutboundDrag, true);
     document.addEventListener("dragenter", onDragEnter, true);
     document.addEventListener("dragover", onDragOver, true);
     document.addEventListener("drop", onDrop, true);
+    document.addEventListener("paste", onPaste, true);
     return () => {
       if (hideDropOverlay !== null) window.clearTimeout(hideDropOverlay);
+      removeDragFinished?.();
+      document.removeEventListener("dragstart", onDragStart, true);
+      document.removeEventListener("dragend", finishOutboundDrag, true);
       document.removeEventListener("dragenter", onDragEnter, true);
       document.removeEventListener("dragover", onDragOver, true);
       document.removeEventListener("drop", onDrop, true);
+      document.removeEventListener("paste", onPaste, true);
     };
   }, [replayImportBusy]);
   const refreshRecordings = useCallback(() => {
@@ -1465,7 +1588,11 @@ function App() {
             bgcolor: "rgba(12, 20, 31, 0.9)",
           }}
         >
-          <Typography variant="h5">Drop replay .dlr files, a replay folder, or a ZIP</Typography>
+          <Typography variant="h5">
+            {developerTabsAvailable
+              ? "Drop replay .dlr files, a ZIP, or a Discord attachment link"
+              : "Drop replay .dlr files, a replay folder, or a ZIP"}
+          </Typography>
         </Box>
       )}
       {(!settingsOpen || replayImportBusy || replayImportMessage) && (
@@ -1534,7 +1661,10 @@ function App() {
           <Tab label="Match history" />
           {recordingTabAvailable && <Tab label="Recordings" value={recordingsTabIndex} />}
           <Tab label="Tech" value={publishedTechTabIndex} />
-          <Tab label="Combos" value={combosTabIndex} />
+          <Tab
+            label={comboPreviewAccess ? "Combos" : "Combos · Coming soon"}
+            value={combosTabIndex}
+          />
           {developerTabsAvailable && <Tab label="Dev-only capture" value={captureTabIndex} />}
           {developerTabsAvailable && <Tab label="Nerd processing" value={nerdProcessingTabIndex} />}
           {developerTabsAvailable && <Tab label="Tech editor" value={techTabIndex} />}
@@ -1899,7 +2029,33 @@ function App() {
               />
             </Box>
           )}
-          {!comboEditorMode && <CombosPage active={tab === combosTabIndex} />}
+          {!comboPreviewAccess && (
+            <Card sx={{ maxWidth: 560, mx: "auto", mt: 6, textAlign: "center" }}>
+              <CardContent sx={{ py: 5 }}>
+                <Typography variant="h5" gutterBottom>
+                  Combos are coming soon
+                </Typography>
+                <Typography color="text.secondary" sx={{ mb: 3 }}>
+                  We’re still preparing this page for everyone.
+                </Typography>
+                {window.electronAPI?.comboPreview && (
+                  <Button
+                    variant="outlined"
+                    disabled={comboPreviewChecking}
+                    onClick={() => void signInForComboPreview()}
+                  >
+                    {comboPreviewChecking ? "Checking access…" : "Have preview access? Sign in"}
+                  </Button>
+                )}
+                {comboPreviewError && (
+                  <Alert severity="info" sx={{ mt: 2, textAlign: "left" }}>
+                    {comboPreviewError}
+                  </Alert>
+                )}
+              </CardContent>
+            </Card>
+          )}
+          {comboPreviewAccess && !comboEditorMode && <CombosPage active={tab === combosTabIndex} />}
         </Box>
       )}
       {developerTabsAvailable && (mountedTabs.tech || mountedTabs.combos) && (
