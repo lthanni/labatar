@@ -50,6 +50,7 @@ const EMPTY_SUMMARY: AnalysisSummary = {
   opponents: 0,
   winRate: 0,
 };
+const showMmrInUnrankedGamesStorageKey = "labatar-show-mmr-in-unranked-games-v1";
 const EMPTY_GAMES: ReplayRow[] = [];
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -129,6 +130,9 @@ function WebApp() {
   const [summary, setSummary] = useState<AnalysisSummary>(EMPTY_SUMMARY);
   const [rankedOnly, setRankedOnly] = useState(false);
   const [rankAffectingOnly, setRankAffectingOnly] = useState(false);
+  const [showMmrInUnrankedGames, setShowMmrInUnrankedGames] = useState(
+    () => localStorage.getItem(showMmrInUnrankedGamesStorageKey) === "true",
+  );
   const [playerOverride, setPlayerOverride] = useState<string | null>(null);
   const [dateFromOverride, setDateFromOverride] = useState<string | null>(null);
   const [dateToOverride, setDateToOverride] = useState<string | null>(null);
@@ -400,11 +404,21 @@ function WebApp() {
           )}
         </Stack>
       </Stack>
+      {folder && !folder.subfolders && folder.name.toLowerCase() === "replays" && (
+        <Alert severity="warning" sx={{ mb: 1.5, textAlign: "left" }}>
+          You selected the replays folder. For the full Labatar experience, choose the game
+          installation folder, usually one folder up, so Labatar can find artwork and game logs.
+        </Alert>
+      )}
       {(!folder || folder.subfolders) && (
         <Alert severity="info" sx={{ mb: 1.5, textAlign: "left" }}>
           Choose the game folder, or select its replays folder here and optionally add logs and
           data_packages. The rescan picker may block game installs under Program Files. Files are
           read locally and are not uploaded.
+          <Typography variant="body2" sx={{ mt: 1, overflowWrap: "anywhere" }}>
+            Usual Steam location (you can paste this into the folder dialog):
+            {" C:\\Program Files (x86)\\Steam\\steamapps\\common\\Avatar Legends The Fighting Game"}
+          </Typography>
           <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap", gap: 1 }}>
             <Button
               size="small"
@@ -542,6 +556,21 @@ function WebApp() {
               label="Games which affect rank only"
               sx={{ m: 0 }}
             />
+            <FormControlLabel
+              control={
+                <Checkbox
+                  size="small"
+                  checked={showMmrInUnrankedGames}
+                  onChange={(event) => {
+                    const value = event.target.checked;
+                    localStorage.setItem(showMmrInUnrankedGamesStorageKey, String(value));
+                    setShowMmrInUnrankedGames(value);
+                  }}
+                />
+              }
+              label="Show MMR in unranked games"
+              sx={{ m: 0 }}
+            />
           </Stack>
           {availableFrom !== null && availableTo !== null && (
             <Slider
@@ -597,6 +626,7 @@ function WebApp() {
           active
           recordingsRefreshToken={0}
           webMode
+          showMmrInUnrankedGames={showMmrInUnrankedGames}
           webPortraits={portraits}
           playerOfInterest={player}
           playerCounts={playerCounts}

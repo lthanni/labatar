@@ -13,6 +13,8 @@ export type TechMove = {
   character: string;
   input: string;
   isStanceParent: boolean;
+  /** The move changes state without being an attack, such as a stance entry. */
+  isNonAttack?: boolean;
   /** Flow stance is a stance parent with its own timing windows. */
   isFlowStance?: boolean;
   /** Explicit move-type choice; absent values use the input-based default. */
@@ -82,13 +84,35 @@ export type TechCombo = {
   id: string;
   character: string;
   support: string;
+  name?: string;
+  difficulty?: number | null;
+  editorPickReason?: string;
+  editorPickContext?: string;
   moveIds: Array<string | null>;
   route: string;
+  routingMode?: "autopilot" | "unique";
   screenPosition: string;
   damage: string;
+  notes?: ComboNote[];
+  requiresCounterhit?: boolean;
+  initialConversionHitconfirmable?: boolean;
+  initialConversionSafeOnBlock?: boolean;
   resourceCosts: TechResourceCosts;
   recordingId: string | null;
   properties?: Record<string, unknown>;
+};
+
+export type ComboNoteCategory = "general" | "execution" | "situational";
+export type ComboNoteRange = {
+  startToken: number;
+  endToken: number;
+  excerpt: string;
+};
+export type ComboNote = {
+  id: string;
+  text: string;
+  category: ComboNoteCategory;
+  range?: ComboNoteRange;
 };
 
 export type CharacterTechData = {

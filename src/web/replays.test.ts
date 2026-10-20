@@ -98,6 +98,33 @@ describe("browser replay scanning", () => {
     expect(result.playerCounts).toEqual({ Alice: 1, Bob: 1 });
   });
 
+  it("maps Zuko's replay support slots to Ran and Shaw and June", async () => {
+    const result = await rescanReplayFolder({
+      name: "replays",
+      files: [
+        {
+          relativePath: "replays/ran-and-shaw.dlr",
+          file: replay({ P1: "ZUKO", P1_SupportCharId: "2" }),
+        },
+        {
+          relativePath: "replays/june.dlr",
+          file: replay({ P2: "ZUKO", P2_SupportCharId: "3" }),
+        },
+      ],
+    });
+    expect(
+      Object.fromEntries(
+        result.games.map(({ id, player1Support, player2Support }) => [
+          id,
+          [player1Support, player2Support],
+        ]),
+      ),
+    ).toEqual({
+      "replays/ran-and-shaw.dlr": ["Ran and Shaw", "None"],
+      "replays/june.dlr": ["None", "June"],
+    });
+  });
+
   it("keeps malformed replay files with desktop-compatible defaults and reports cancellation", async () => {
     const selection: ReplayFolderSelection = {
       name: "replays",

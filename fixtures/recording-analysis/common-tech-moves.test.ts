@@ -27,6 +27,9 @@ describe("assumed Tech moves", () => {
       "214B",
       "214C",
       "214EX",
+      "j.A",
+      "j.B",
+      "j.C",
       "j.236A",
       "j.236B",
       "j.236C",
@@ -39,9 +42,21 @@ describe("assumed Tech moves", () => {
     const initial = withCommonTechMoves("Aang", []);
     const savedMove = { ...initial[0], id: "existing-2a", startup: 7 };
     const moves = withCommonTechMoves("Aang", [savedMove]);
-    expect(moves).toHaveLength(22);
+    expect(moves).toHaveLength(25);
     expect(moves[0]).toEqual(savedMove);
     expect(withCommonTechMoves("Aang", moves)).toEqual(moves);
+  });
+
+  it("preserves an existing neutral jump attack instead of adding a duplicate", () => {
+    const savedJump = {
+      ...withCommonTechMoves("Korra", []).find((move) => move.input === "j.A")!,
+      id: "saved-j-a",
+      startup: 5,
+    };
+    const moves = withCommonTechMoves("Korra", [savedJump]);
+    expect(moves.filter((move) => move.input === "j.A")).toEqual([savedJump]);
+    expect(moves.some((move) => move.input === "j.B")).toBe(true);
+    expect(moves.some((move) => move.input === "j.C")).toBe(true);
   });
 
   it("keeps an existing 2AA but does not recreate it after removal", () => {

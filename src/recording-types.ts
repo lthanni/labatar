@@ -1,5 +1,5 @@
 import type { RecordingMetadata } from "./obs-types";
-import type { RecordingAnalysis } from "./recording-analysis-types";
+import type { RecordingAnalysis, RecordingFramebarSequence } from "./recording-analysis-types";
 import type { RecordingMoveTake } from "./move-capture-types";
 
 export type RecordingTagCategory = "match" | "lab" | "combo" | "pressure";
@@ -44,6 +44,11 @@ export type RecordedGame = {
   metadata: RecordingMetadata | null;
   replayPath: string | null;
   replayFileName: string | null;
+  replay?: {
+    player1?: string;
+    player2?: string;
+    winner?: string;
+  } | null;
 };
 
 export type RecordingPortraitSide = {
@@ -63,7 +68,9 @@ export type RecordingPortraitMatchup = {
 
 export type RecordedVideo = {
   id: string;
+  sessionId?: string | null;
   name: string;
+  mediaKind?: "local" | "youtube";
   source?: "automatic" | "manual" | null;
   url: string;
   size: number;
@@ -72,6 +79,8 @@ export type RecordedVideo = {
   portraitMatchup?: RecordingPortraitMatchup | null;
   tags: RecordingTags;
   analysis: RecordingAnalysis | null;
+  framebarSequence?: RecordingFramebarSequence | null;
+  framebarSequenceHistory?: RecordingFramebarSequence[];
   analysisHistory?: Array<{
     processedAt: string;
     inputs: string[];
@@ -79,6 +88,8 @@ export type RecordedVideo = {
     warnings: string[];
     processorVersion: string | null;
     processorFingerprint: string | null;
+    interpretationVersion?: string | null;
+    framebarSequenceId?: string | null;
   }>;
   games: RecordedGame[];
   replays: Array<{
@@ -90,6 +101,7 @@ export type RecordedVideo = {
   replayPath: string | null;
   replayFileName: string | null;
   youtubeUrl?: string | null;
+  youtubeDurationMs?: number | null;
   moveTake?: RecordingMoveTake | null;
   clip: RecordingClipMetadata | null;
   capture?: RecordingCaptureMetadata | null;

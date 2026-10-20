@@ -187,7 +187,7 @@ describe("automated whiff eligibility", () => {
       eligible: true,
       validation: "needs-validation",
     });
-    for (const input of ["j.5A", "j.236A", "j.214EX"]) {
+    for (const input of ["j.A", "j.B", "j.C", "j.5A", "j.236A", "j.214EX"]) {
       expect(automatedWhiffEligibility({ ...moves[0], input }, [], "aang-gyatso")).toEqual({
         eligible: true,
         validation: "needs-validation",
@@ -269,6 +269,10 @@ describe("automated whiff eligibility", () => {
     expect(
       automatedWhiffEligibility({ ...move, input: "j.236SUP" }, [], "aang-gyatso"),
     ).toMatchObject({ eligible: false, kind: "unsupported" });
+    expect(automatedWhiffEligibility({ ...move, input: "j.F" }, [], "aang-gyatso")).toMatchObject({
+      eligible: false,
+      kind: "unsupported",
+    });
     for (const input of ["1AA", "236AA", "j.5AA"]) {
       expect(automatedWhiffEligibility({ ...move, input }, [], "aang-gyatso")).toMatchObject({
         eligible: false,

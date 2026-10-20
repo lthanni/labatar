@@ -1,4 +1,4 @@
-export const MOVE_BUTTONS = ["A", "AA", "B", "C", "F", "EX", "SUP", "X"] as const;
+export const MOVE_BUTTONS = ["A", "AA", "B", "C", "F", "EX", "SUP", "TH", "X"] as const;
 
 export type MoveButton = (typeof MOVE_BUTTONS)[number];
 
@@ -15,10 +15,10 @@ export type ParsedMoveNotation = {
 export type MoveNotationResult = ({ ok: true } & ParsedMoveNotation) | { ok: false; error: string };
 
 const INVALID_MOVE_NOTATION_MESSAGE =
-  "Use j.1-9, 1-9, 214, 236, or 22 followed by A, AA, B, C, F, EX, SUP, or X; charged buttons use brackets, such as 5[C].";
+  "Use TH or j.TH for throws, or j.1-9, 1-9, 214, 236, or 22 followed by A, AA, B, C, F, EX, SUP, TH, or X; 1-9X matches any numbered direction with A/B/C. Charged buttons use brackets, such as 5[C].";
 
 export type MoveNotationOptions = {
-  /** Bare buttons are only valid as stance followups. */
+  /** Bare buttons other than TH are only valid as stance followups. */
   allowDirectionless?: boolean;
 };
 
@@ -36,16 +36,17 @@ export function parseMoveNotation(
   options: MoveNotationOptions = {},
 ): MoveNotationResult {
   const compact = compactMoveInput(input);
-  const match = /^(j\.)?(214|236|22|[1-9])?(\[(?:EX|SUP|A|B|C|F|X)\]|EX|SUP|AA|A|B|C|F|X)$/i.exec(
-    compact,
-  );
+  const match =
+    /^(j\.)?(214|236|22|1-9|[1-9])?(\[(?:EX|SUP|A|B|C|F|X)\]|EX|SUP|TH|AA|A|B|C|F|X)$/i.exec(
+      compact,
+    );
   if (!match) {
     return { ok: false, error: INVALID_MOVE_NOTATION_MESSAGE };
   }
 
   const isAirborne = Boolean(match[1]);
   const prefix = match[2] ?? "";
-  if (!prefix && !isAirborne && !options.allowDirectionless) {
+  if (!prefix && !isAirborne && match[3].toUpperCase() !== "TH" && !options.allowDirectionless) {
     return { ok: false, error: INVALID_MOVE_NOTATION_MESSAGE };
   }
   const isCharged = match[3].startsWith("[");
@@ -56,7 +57,7 @@ export function parseMoveNotation(
     prefix,
     button,
     isAirborne,
-    isDirectional: /^[1-9]$/.test(prefix),
+    isDirectional: /^[1-9]$/.test(prefix) || prefix === "1-9",
     isDirectionless: prefix === "" && !isAirborne,
     isCharged,
   };
@@ -72,13 +73,19 @@ export function moveNotationsMatch(knownInput: string, observedInput: string) {
   const observed = parseMoveNotation(observedInput, { allowDirectionless: true });
   if (!known.ok || !observed.ok) return false;
   if (known.notation === observed.notation) return true;
+  const sameOrAnyDirection =
+    known.prefix === observed.prefix ||
+    (known.prefix === "1-9" && /^[1-9]$/.test(observed.prefix)) ||
+    (observed.prefix === "1-9" && /^[1-9]$/.test(known.prefix));
+  const anyAttackButtonMatch =
+    (known.button === "X" && ["A", "B", "C", "X"].includes(observed.button)) ||
+    (observed.button === "X" && ["A", "B", "C", "X"].includes(known.button));
   return (
     !known.isCharged &&
     !observed.isCharged &&
-    known.prefix === observed.prefix &&
+    sameOrAnyDirection &&
     known.isAirborne === observed.isAirborne &&
-    known.button === "X" &&
-    ["A", "B", "C"].includes(observed.button)
+    anyAttackButtonMatch
   );
 }
 

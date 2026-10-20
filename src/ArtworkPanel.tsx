@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, LinearProgress, Paper, Stack, Typography } from "@mui/material";
+import { Alert, Button, LinearProgress, Paper, Stack, TextField, Typography } from "@mui/material";
 
 type ArtworkProgress = {
   runId: string;
@@ -12,9 +12,18 @@ type ArtworkProgress = {
 export function ArtworkPanel({ onImported }: { onImported: () => void }) {
   const api = window.electronAPI?.artwork;
   const [progress, setProgress] = useState<ArtworkProgress | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<"import" | "browse" | null>(null);
+  const busy = busyAction !== null;
   const [cancelling, setCancelling] = useState(false);
   const [savedPortraits, setSavedPortraits] = useState<number | null>(null);
+  const [flowIconImported, setFlowIconImported] = useState(false);
+  const [pipsIconImported, setPipsIconImported] = useState(false);
+  const [filenameContains, setFilenameContains] = useState("flow");
+  const [browseResult, setBrowseResult] = useState<{
+    folderPath: string;
+    decoded: number;
+    skipped: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -26,18 +35,48 @@ export function ArtworkPanel({ onImported }: { onImported: () => void }) {
     if (!api) return;
     setError(null);
     setSavedPortraits(null);
-    setBusy(true);
+    setBrowseResult(null);
+    setBusyAction("import");
     setCancelling(false);
     setProgress(null);
     try {
       const result = await api.extract();
       setSavedPortraits(result.savedPortraits);
+      setFlowIconImported(result.flowIconImported);
+      setPipsIconImported(result.pipsIconImported);
+      window.dispatchEvent(new Event("labatar-artwork-imported"));
       onImported();
     } catch (importError) {
       const message = importError instanceof Error ? importError.message : String(importError);
-      if (message !== "Artwork extraction cancelled.") setError(message);
+      if (!message.includes("Artwork extraction cancelled.")) setError(message);
     } finally {
-      setBusy(false);
+      setBusyAction(null);
+      setCancelling(false);
+    }
+  };
+
+  const browseDecodedMatches = async () => {
+    if (!api) return;
+    setError(null);
+    setSavedPortraits(null);
+    setBrowseResult(null);
+    setBusyAction("browse");
+    setCancelling(false);
+    setProgress(null);
+    try {
+      const result = await api.browseMatches({ filenameContains });
+      if (!result.cancelled && result.folderPath) {
+        setBrowseResult({
+          folderPath: result.folderPath,
+          decoded: result.decoded,
+          skipped: result.skipped,
+        });
+      }
+    } catch (browseError) {
+      const message = browseError instanceof Error ? browseError.message : String(browseError);
+      if (!message.includes("Artwork extraction cancelled.")) setError(message);
+    } finally {
+      setBusyAction(null);
       setCancelling(false);
     }
   };
@@ -61,16 +100,16 @@ export function ArtworkPanel({ onImported }: { onImported: () => void }) {
         <div>
           <Typography variant="h6">Game artwork</Typography>
           <Typography variant="body2" color="text.secondary">
-            Decode the game&apos;s encoded files to display character and support portraits. You
-            should only need to do this once, or again if a game update adds new characters or
-            supports. The app reads the data_packages folder inside your selected game folder
-            automatically. Decoded artwork stays on this computer and is not added to the
-            repository.
+            Decode the game&apos;s encoded files to display character and support portraits and the
+            Flow and Pips icons. You should only need to do this once, or again if a game update
+            adds new characters or supports. The app reads the data_packages folder inside your
+            selected game folder automatically. Decoded artwork stays on this computer and is not
+            added to the repository.
           </Typography>
         </div>
         <Stack direction="row" spacing={1}>
           <Button variant="contained" onClick={() => void importArtwork()} disabled={busy}>
-            {busy ? "Importing artwork..." : "Import game artwork"}
+            {busyAction === "import" ? "Importing artwork..." : "Import game artwork"}
           </Button>
           {busy && (
             <Button
@@ -83,9 +122,30 @@ export function ArtworkPanel({ onImported }: { onImported: () => void }) {
             </Button>
           )}
         </Stack>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+          <TextField
+            label="Filename contains"
+            helperText="PNGs go directly into your chosen folder. Use * for all images."
+            size="small"
+            value={filenameContains}
+            onChange={(event) => setFilenameContains(event.target.value)}
+            disabled={busy}
+            sx={{ width: { sm: 220 } }}
+          />
+          <Button
+            variant="outlined"
+            onClick={() => void browseDecodedMatches()}
+            disabled={busy || !filenameContains.trim()}
+          >
+            Browse decoded images
+          </Button>
+        </Stack>
         {busy && (
           <Stack spacing={0.75} aria-live="polite">
-            <Typography variant="body2">{progress?.message ?? "Starting import..."}</Typography>
+            <Typography variant="body2">
+              {progress?.message ??
+                (busyAction === "browse" ? "Choose an output folder..." : "Starting import...")}
+            </Typography>
             <LinearProgress
               variant={progress?.total ? "determinate" : "indeterminate"}
               value={
@@ -100,7 +160,16 @@ export function ArtworkPanel({ onImported }: { onImported: () => void }) {
           <Alert severity="info">Artwork import cancelled.</Alert>
         )}
         {savedPortraits !== null && (
-          <Alert severity="success">Imported {savedPortraits} portraits.</Alert>
+          <Alert severity="success">
+            Imported {savedPortraits} portraits{flowIconImported ? ", Flow icon" : ""}
+            {pipsIconImported ? ", Pips icon" : ""}.
+          </Alert>
+        )}
+        {browseResult && (
+          <Alert severity="success">
+            Opened {browseResult.decoded} decoded PNGs in {browseResult.folderPath}.
+            {browseResult.skipped > 0 && ` Skipped ${browseResult.skipped} unsupported matches.`}
+          </Alert>
         )}
         {error && <Alert severity="error">{error}</Alert>}
       </Stack>

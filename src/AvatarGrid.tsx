@@ -228,10 +228,20 @@ function getSessionMode(games: ReplayRow[]) {
   return [...new Set(games.map(getReplayMode).filter(Boolean))].join(", ");
 }
 
-function getSessionMmrAtStart(games: ReplayRow[], poi: string | null) {
+function getSessionMmrAtStart(
+  games: ReplayRow[],
+  poi: string | null,
+  showMmrInUnrankedGames = false,
+) {
   const rankedGames = games.filter((game) => getReplayMode(game) === "ranked");
-  if (rankedGames.length === 0) return "";
-  const firstGame = rankedGames.at(-1)!;
+  const mmrGames =
+    rankedGames.length > 0
+      ? rankedGames
+      : showMmrInUnrankedGames
+        ? games.filter((game) => getReplayMode(game) !== "ranked")
+        : [];
+  if (mmrGames.length === 0) return "";
+  const firstGame = mmrGames.at(-1)!;
   const postGameMmr = getReplayCharacterMmr(firstGame, poi);
   const firstGameChange = getReplayMmrChange(firstGame, poi);
   const startMmr =
@@ -288,10 +298,17 @@ function getMmrChangeCellStyle(value: unknown) {
   };
 }
 
-function getPlayerMmrParts(data: DisplayRow | undefined, poi: string | null) {
+function getPlayerMmrParts(
+  data: DisplayRow | undefined,
+  poi: string | null,
+  showMmrInUnrankedGames: boolean,
+) {
   if (!data) return { mmr: "", change: "" };
   return data.kind === "session"
-    ? { mmr: data.playerMmrAtStart, change: data.playerMmrChange }
+    ? {
+        mmr: getSessionMmrAtStart(data.games, poi, showMmrInUnrankedGames),
+        change: data.playerMmrChange,
+      }
     : { mmr: "", change: formatMmrChange(getReplayMmrChange(data, poi)) };
 }
 
@@ -300,10 +317,17 @@ function getOpponentForRow(data: DisplayRow, poi: string | null) {
   return poi === data.player1 ? data.player2 : data.player1;
 }
 
-function getOpponentMmrForRow(data: DisplayRow, poi: string | null) {
+function getOpponentMmrForRow(
+  data: DisplayRow,
+  poi: string | null,
+  showMmrInUnrankedGames: boolean,
+) {
   const opponent = getOpponentForRow(data, poi);
+  if (data.kind === "game" && getReplayMode(data) !== "ranked" && !showMmrInUnrankedGames) {
+    return "";
+  }
   return data.kind === "session"
-    ? getSessionMmrAtStart(data.games, opponent)
+    ? getSessionMmrAtStart(data.games, opponent, showMmrInUnrankedGames)
     : (formatRatingValue(getReplayMmr(data, opponent)) ?? "");
 }
 
@@ -605,6 +629,7 @@ export function AvatarGrid({
   active,
   recordingsRefreshToken,
   webMode = false,
+  showMmrInUnrankedGames = false,
   webPortraits = {},
   playerOfInterest,
   playerCounts,
@@ -615,7 +640,6 @@ export function AvatarGrid({
   invalidDateRange,
   onSummaryChange,
   onReplaysChanged,
-  onOpenGuide,
 }: {
   rowData: ReplayRow[];
   interruptedMatchIds?: string[];
@@ -623,6 +647,7 @@ export function AvatarGrid({
   active: boolean;
   recordingsRefreshToken: number;
   webMode?: boolean;
+  showMmrInUnrankedGames?: boolean;
   webPortraits?: Readonly<Record<string, PortraitUrls>>;
   playerOfInterest: string | null;
   playerCounts: Record<string, number>;
@@ -1038,7 +1063,7 @@ export function AvatarGrid({
                 replayHashesById,
               )
             : null;
-          const { mmr, change } = getPlayerMmrParts(data, playerOfInterest);
+          const { mmr, change } = getPlayerMmrParts(data, playerOfInterest, showMmrInUnrankedGames);
           return (
             <Box
               sx={{
@@ -1220,16 +1245,16 @@ export function AvatarGrid({
         valueGetter: ({ data }: ValueGetterParams<DisplayRow>) => {
           if (!data) return "";
           const name = getOpponentForRow(data, playerOfInterest);
-          const mmr = getOpponentMmrForRow(data, playerOfInterest);
+          const mmr = getOpponentMmrForRow(data, playerOfInterest, showMmrInUnrankedGames);
           const portraits = characterSupportPairsForRow(data, playerOfInterest, "opponent")
             .map(({ character, support }) => `${character}/${support}`)
             .join(", ");
-          return [name, mmr ? `(${mmr})` : "", portraits].filter(Boolean).join(" ");
+          return [name, mmr, portraits].filter(Boolean).join(" ");
         },
         cellRenderer: ({ data }: ICellRendererParams<DisplayRow>) => {
           if (!data) return null;
           const name = getOpponentForRow(data, playerOfInterest);
-          const mmr = getOpponentMmrForRow(data, playerOfInterest);
+          const mmr = getOpponentMmrForRow(data, playerOfInterest, showMmrInUnrankedGames);
           return (
             <Box
               sx={{
@@ -1254,7 +1279,7 @@ export function AvatarGrid({
                   component="span"
                   sx={{ color: "common.white", whiteSpace: "nowrap", flexShrink: 0 }}
                 >
-                  ({mmr})
+                  {mmr}
                 </Box>
               )}
               <Box
@@ -1287,6 +1312,7 @@ export function AvatarGrid({
       replayFolder,
       replayHashesById,
       webMode,
+      showMmrInUnrankedGames,
       interruptedSetMatches,
       ragequitLabels,
     ],
@@ -1361,16 +1387,6 @@ export function AvatarGrid({
             ? ` Game folder: ${stagingStatus.gameFolder}`
             : ""}
         </Alert>
-      )}
-      {!webMode && (
-        <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: "center", textAlign: "left" }}>
-          <Typography variant="caption" color="text.secondary">
-            Tip: Right-click a set or game for file, ZIP, and playback actions.
-          </Typography>
-          <Button size="small" onClick={() => onOpenGuide("staging")}>
-            How staging works
-          </Button>
-        </Stack>
       )}
       <AnalyticsSection
         fillHeight

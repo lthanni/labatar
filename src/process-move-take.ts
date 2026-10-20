@@ -1,47 +1,42 @@
-import { processRecording, type RecordingFrameProvider } from "./recording-processor";
+import type { RecordingAnalysis } from "./recording-analysis-types";
+import { processMoveTakeFramebarSequence } from "./recording-processor";
 import type { RecordedVideo } from "./recording-types";
 
+function analysisFromSequence(recording: RecordedVideo): RecordingAnalysis {
+  const sequence = recording.framebarSequence;
+  const take = recording.moveTake;
+  if (!sequence || !take)
+    throw new Error("Capture a framebar sequence before determining move data.");
+  if (sequence.status !== "approved")
+    throw new Error("Approve the framebar sequence before processing it.");
+  const moves = processMoveTakeFramebarSequence(sequence, take.moveLabel);
+  return {
+    schemaVersion: 1,
+    processingMode: "move-take",
+    framebarSequenceId: sequence.id,
+    interpretationVersion: "move-take-framebar-v2",
+    processedAt: new Date().toISOString(),
+    duration: sequence.duration,
+    sourceWidth: sequence.sourceWidth,
+    sourceHeight: sequence.sourceHeight,
+    sampledFrames: sequence.sampledFrames,
+    timing: sequence.timing,
+    trainingFrameRatio: sequence.trainingFrameRatio,
+    moves,
+    inputEvents: [],
+    warnings: [...sequence.warnings],
+    processingSnapshot: sequence.processingSnapshot,
+    detectorConfig: sequence.detectorConfig,
+    detectorConfigSource: sequence.detectorConfig ? "persistent" : undefined,
+  };
+}
+
+/** Determine move data from the saved approved sequence; this never opens the video. */
 export async function processMoveTake(recording: RecordedVideo): Promise<RecordedVideo> {
   const recordingsApi = window.electronAPI?.recordings;
   if (!recordingsApi) throw new Error("Recording processing requires the desktop app.");
-  const take = recording.moveTake;
-  if (!take) throw new Error("This recording is not a move take.");
-  if (
-    take.captureMethod === "automated" &&
-    take.captureReviewStatus !== "approved-for-processing"
-  ) {
-    throw new Error("Review and approve this automated video before processing it.");
-  }
-  const reader = await recordingsApi.openFrameReader({ recordingId: recording.id });
-  try {
-    const provider: RecordingFrameProvider = {
-      frameRate: reader.frameRate,
-      readFrame: async (frameIndex) => {
-        let encodedFrame;
-        try {
-          encodedFrame = await recordingsApi.readFrame({ sessionId: reader.sessionId, frameIndex });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (message.includes("past the end of the recording")) return null;
-          throw error;
-        }
-        const binary = atob(encodedFrame.data);
-        const bytes = new Uint8Array(binary.length);
-        for (let index = 0; index < binary.length; index += 1)
-          bytes[index] = binary.charCodeAt(index);
-        return createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
-      },
-    };
-    const analysis = await processRecording(
-      recording.url,
-      undefined,
-      undefined,
-      provider,
-      undefined,
-      take.moveLabel,
-    );
-    return await recordingsApi.saveAnalysis({ recordingId: recording.id, analysis });
-  } finally {
-    await recordingsApi.closeFrameReader({ sessionId: reader.sessionId });
-  }
+  return await recordingsApi.saveAnalysis({
+    recordingId: recording.id,
+    analysis: analysisFromSequence(recording),
+  });
 }

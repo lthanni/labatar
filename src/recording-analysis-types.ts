@@ -1,6 +1,7 @@
 import type { InputDisplaySegmentLayout } from "./input-display-config";
 import type { InputSegmentCheckReason } from "./input-display";
 import type { ProcessingSnapshot } from "./processing-config-types";
+import type { DetectorConfig } from "./detector-config";
 
 export type RecordingAnalysisPhases = {
   startup: number;
@@ -190,10 +191,50 @@ export type RecordingAnalysisTiming = {
   maximumSeekErrorSeconds: number;
 };
 
+export type RecordingFramebarSequenceStatus = "awaiting-review" | "approved" | "rejected";
+
+/** Ordered run-length state segments captured before move phase interpretation. */
+export type RecordingFramebarSequence = {
+  schemaVersion: 1;
+  id: string;
+  status: RecordingFramebarSequenceStatus;
+  observationMethod?: "visual-review";
+  extractedAt: string;
+  reviewedAt: string | null;
+  duration: number;
+  sourceWidth: number;
+  sourceHeight: number;
+  frameRate: number;
+  sampledFrames: number;
+  /** Zero-based video frames whose crops were reviewed for the transcribed counts. */
+  evidenceFrames?: number[];
+  /** Approximate video frame where the observed move begins. */
+  startVideoFrame?: number;
+  trainingFrameRatio: number;
+  timing: RecordingAnalysisTiming;
+  detectorConfig?: DetectorConfig;
+  processingSnapshot?: ProcessingSnapshot;
+  warnings: string[];
+  /** Independent overlay observations captured during the same video pass. */
+  hitboxSamples: RecordingAnalysisHitboxSample[];
+  segments: Array<{
+    timestamp: number;
+    frames: number;
+    player1: string;
+    player2: string;
+  }>;
+};
+
 export type RecordingAnalysis = {
   schemaVersion: 1;
   /** Per-move takes use the selected capture for identity, without reading input history. */
   processingMode?: "move-take";
+  /** Sequence revision used for move-take determinations. */
+  framebarSequenceId?: string;
+  /** Bump when the framebar sequence interpretation rules change. */
+  interpretationVersion?: string;
+  /** Captured observations emitted by the framebar extraction stage. */
+  framebarSequence?: RecordingFramebarSequence;
   processedAt: string;
   duration: number;
   sourceWidth: number;
@@ -220,4 +261,3 @@ export type RecordingAnalysis = {
   };
   diagnostics?: RecordingAnalysisDiagnosticFrame[];
 };
-import type { DetectorConfig } from "./detector-config";

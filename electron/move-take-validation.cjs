@@ -8,7 +8,7 @@ function normalizedNotation(value) {
 function stanceInputMatches(expectedInput, observedInput) {
   const expected = normalizedNotation(expectedInput).replaceAll("[", "").replaceAll("]", "");
   const observed = normalizedNotation(observedInput);
-  const match = /^([1-9])(EX|SUP|AA|A|B|C|F|X)$/.exec(observed);
+  const match = /^([1-9])(EX|SUP|TH|AA|A|B|C|F|X)$/.exec(observed);
   return Boolean(match && match[2] === expected);
 }
 

@@ -65,7 +65,10 @@ export type ReplayScanOptions = {
 };
 
 type PickerWindow = Window & {
-  showDirectoryPicker?: (options?: { mode?: "read" }) => Promise<FileSystemDirectoryHandle>;
+  showDirectoryPicker?: (options?: {
+    mode?: "read";
+    id?: string;
+  }) => Promise<FileSystemDirectoryHandle>;
 };
 type DirectoryInput = HTMLInputElement & { webkitdirectory: boolean };
 
@@ -183,7 +186,7 @@ export async function selectReplayFolder(
 ): Promise<ReplayFolderSelection> {
   const picker = (window as PickerWindow).showDirectoryPicker;
   if (picker && !useFileInput) {
-    const directory = await picker.call(window, { mode: "read" });
+    const directory = await picker.call(window, { mode: "read", id: "labatar-game-folder" });
     return { name: directory.name, directory, files: [] };
   }
   return pickWithDirectoryInput(prefix);

@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { createTrainingInputClient } = require("./training-input-client.cjs");
 
-void test("charged move dry run holds the attack buttons and keeps the motion", async () => {
+void test("training input dry run keeps charged timing and starts jump attacks within 100 ms of Up", async () => {
   const gameRoot = await mkdtemp(path.join(os.tmpdir(), "labatar-input-check-"));
   let client;
   try {
@@ -45,6 +45,53 @@ void test("charged move dry run holds the attack buttons and keeps the motion", 
     assert.equal(normal.steps.at(-2).Ms, 50);
     const defaultCharge = await client.send({ kind: "move", notation: "5[C]" });
     assert.equal(defaultCharge.steps.at(-2).Ms, 1000);
+    const jumpNormal = await client.send({ kind: "move", notation: "j.5A" });
+    assert.deepEqual(
+      jumpNormal.steps.slice(0, 3).map(({ Keys, Ms }) => [Keys, Ms]),
+      [
+        [["S"], 40],
+        [["W"], 25],
+        [["J"], 50],
+      ],
+    );
+    for (const [notation, attackKey] of [
+      ["j.A", "J"],
+      ["j.B", "K"],
+      ["j.C", "L"],
+    ]) {
+      const bareJumpNormal = await client.send({ kind: "move", notation });
+      assert.deepEqual(
+        bareJumpNormal.steps.slice(0, 3).map(({ Keys, Ms }) => [Keys, Ms]),
+        [
+          [["S"], 40],
+          [["W"], 25],
+          [[attackKey], 50],
+        ],
+      );
+    }
+    for (const [notation, facing, expectedMotion] of [
+      ["j.236A", "Right", [["S"], ["S", "D"], ["D"], ["D", "J"]]],
+      ["j.214B", "Left", [["S"], ["S", "D"], ["D"], ["D", "K"]]],
+    ]) {
+      const jumpSpecial = await client.send({ kind: "move", notation, facing });
+      assert.deepEqual(
+        jumpSpecial.steps.slice(0, 2).map(({ Keys }) => Keys),
+        [["S"], ["W"]],
+      );
+      assert.deepEqual(
+        jumpSpecial.steps.slice(2, 6).map(({ Keys }) => Keys),
+        expectedMotion,
+      );
+      const millisecondsFromUpToAttack = jumpSpecial.steps
+        .slice(1, 5)
+        .reduce((sum, step) => sum + step.Ms, 0);
+      assert.equal(millisecondsFromUpToAttack, 85);
+    }
+    const groundedSpecial = await client.send({ kind: "move", notation: "236A" });
+    assert.deepEqual(
+      groundedSpecial.steps.slice(0, 3).map(({ Ms }) => Ms),
+      [50, 50, 50],
+    );
     await assert.rejects(
       client.send({ kind: "move", notation: "5[C]", chargeHoldMs: 5100 }),
       /Charge hold must be between/,

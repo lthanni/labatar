@@ -48,8 +48,12 @@ function Send-Tap([string]$key) {
 }
 
 function Invoke-Move($request, [bool]$dryRun = $false) {
-  $match = [regex]::Match([string]$request.notation, '^(j\.)?(236|214|[1-9])(AA|\[(?:EX|[ABCF])\]|EX|[ABCF])$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
-  if (-not $match.Success) { throw 'Move notation must be 1-9, 236, or 214 followed by A, B, C, F, or EX; charged buttons use brackets. 2AA and 5AA are also supported.' }
+  $notation = [string]$request.notation
+  if ([regex]::IsMatch($notation, '^j\.[ABC]$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+    $notation = 'j.5' + $notation.Substring(2)
+  }
+  $match = [regex]::Match($notation, '^(j\.)?(236|214|[1-9])(AA|\[(?:EX|[ABCF])\]|EX|[ABCF])$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  if (-not $match.Success) { throw 'Move notation must be 1-9, 236, or 214 followed by A, B, C, F, or EX; charged buttons use brackets. Neutral jump A, B, C and grounded 2AA, 5AA are also supported.' }
   $facing = if ($request.facing) { [string]$request.facing } else { 'Right' }
   if ($facing -notin @('Right','Left')) { throw 'Facing must be Right or Left.' }
   $jump = $match.Groups[1].Success
@@ -80,24 +84,28 @@ function Invoke-Move($request, [bool]$dryRun = $false) {
   }
   $requiredActions = @($attackActions)
   if($motion -ne '5') { $requiredActions += @($directionActions) }
-  if($jump) { $requiredActions += 'Up' }
+  if($jump) { $requiredActions += @('Down','Up') }
   foreach($action in $requiredActions) { if(-not $keys.ContainsKey($action)) { throw "No Player 1 keyboard binding for $action." } }
   $attackKeys = @($attackActions | ForEach-Object { $keys[$_] })
   $steps = [System.Collections.Generic.List[object]]::new()
   if($jump) {
-    $steps.Add(@{Keys=@($keys.Up);Ms=50})
-    $steps.Add(@{Keys=@();Ms=100})
+    # Release Down before pressing Up. At 60 fps, each 20 ms direction is
+    # intended to be visible to a game poll; the motion attack starts 85 ms
+    # after Up in the scheduled sequence (25 + 3 * 20).
+    $steps.Add(@{Keys=@($keys.Down);Ms=40})
+    $steps.Add(@{Keys=@($keys.Up);Ms=25})
   }
+  $directionMs = if($jump) { 20 } else { 50 }
   if($motion -eq '236' -or $motion -eq '214') {
     $dir=if($motion -eq '236'){$forward}else{$away}
-    $steps.Add(@{Keys=@($keys.Down);Ms=50});$steps.Add(@{Keys=@($keys.Down,$keys[$dir]);Ms=50});$steps.Add(@{Keys=@($keys[$dir]);Ms=50});$steps.Add(@{Keys=@($keys[$dir]) + $attackKeys;Ms=$attackMs})
+    $steps.Add(@{Keys=@($keys.Down);Ms=$directionMs});$steps.Add(@{Keys=@($keys.Down,$keys[$dir]);Ms=$directionMs});$steps.Add(@{Keys=@($keys[$dir]);Ms=$directionMs});$steps.Add(@{Keys=@($keys[$dir]) + $attackKeys;Ms=$attackMs})
   } elseif($motion -eq '5') {
     $steps.Add(@{Keys=$attackKeys;Ms=$attackMs})
     if($button -eq 'AA') { $steps.Add(@{Keys=@();Ms=100});$steps.Add(@{Keys=$attackKeys;Ms=50}) }
   }
   else {
     $directionKeys = @($directionActions | ForEach-Object { $keys[$_] })
-    $steps.Add(@{Keys=$directionKeys;Ms=50});$steps.Add(@{Keys=$directionKeys + $attackKeys;Ms=$attackMs})
+    $steps.Add(@{Keys=$directionKeys;Ms=$directionMs});$steps.Add(@{Keys=$directionKeys + $attackKeys;Ms=$attackMs})
     if($button -eq 'AA') { $steps.Add(@{Keys=$directionKeys;Ms=100});$steps.Add(@{Keys=$directionKeys + $attackKeys;Ms=50}) }
   }
   $steps.Add(@{Keys=@();Ms=0})

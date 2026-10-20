@@ -35,7 +35,7 @@ function inputList(value, field) {
 }
 
 function bareStanceInput(value) {
-  return /^(EX|SUP|AA|A|B|C|F|X)$/i.test(value);
+  return /^(EX|SUP|TH|AA|A|B|C|F|X)$/i.test(value);
 }
 
 function defaultCatalog() {

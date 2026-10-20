@@ -1,4 +1,4 @@
-/** A narrow reader for the PAK and type-6 munged assets used by the portrait importer. */
+/** A PAK reader and type-6 munged image decoder for artwork import and browsing. */
 
 export type PakEntry = { name: string; offset: number; size: number };
 export type DecodedPortrait = {
@@ -14,7 +14,6 @@ const maxImageBytes = 64 * 1024 * 1024;
 const textDecoder = new TextDecoder("utf-8");
 const portraitEntryPattern =
   /^srcdata\/munged\/frames\/sprites~[a-z0-9_]+~hud~art~(?:portraitart|support[1-3](?:-[a-z0-9_-]+)?)\.munged$/i;
-
 export function portraitPakRelativePath(
   archiveName: string,
   filters: readonly string[],
@@ -177,6 +176,92 @@ export function decodePortraitMunged(raw: Uint8Array): DecodedPortrait {
       const sourceAt = (packedY * packedWidth + packedX) * 4;
       pixels.set(packed.subarray(sourceAt, sourceAt + 4), (y * width + x) * 4);
     }
+  }
+  return { sourcePath, width, height, pixels };
+}
+
+export function decodeMungedImage(raw: Uint8Array): DecodedPortrait {
+  if (raw.length < 96 || raw[0x1a] !== 6) {
+    throw new Error("Only type-6 munged images are supported.");
+  }
+  const nameLength = raw[0x1b] - 1;
+  if (nameLength < 1 || nameLength > 240 || 0x20 + nameLength + 68 > raw.length) {
+    throw new Error("Invalid munged image header.");
+  }
+  const sourcePath = textDecoder.decode(raw.subarray(0x20, 0x20 + nameLength));
+  if (!sourcePath.toLowerCase().endsWith(".png")) throw new Error("Not a PNG artwork frame.");
+  const dimensionsAt = 0x20 + nameLength + 8;
+  const width = readU32(raw, dimensionsAt);
+  const height = readU32(raw, dimensionsAt + 4);
+  const packedWidth = readU32(raw, dimensionsAt + 16);
+  const packedHeight = readU32(raw, dimensionsAt + 20);
+  const tileColumns = readU32(raw, dimensionsAt + 28);
+  const tileRows = readU32(raw, dimensionsAt + 32);
+  const tileCount = readU32(raw, dimensionsAt + 48);
+  const atlasBytes = packedWidth * packedHeight * 4;
+  if (
+    width < 1 ||
+    height < 1 ||
+    width > 4096 ||
+    height > 4096 ||
+    tileColumns !== Math.ceil(width / 32) ||
+    tileRows !== Math.ceil(height / 32) ||
+    tileCount !== tileColumns * tileRows ||
+    packedWidth < 34 ||
+    packedHeight < 34 ||
+    packedWidth % 34 !== 0 ||
+    packedHeight % 34 !== 0 ||
+    atlasBytes > maxImageBytes
+  ) {
+    throw new Error("Invalid munged image geometry.");
+  }
+
+  const occupancyAt = dimensionsAt + 52;
+  const occupancyBytes = Math.ceil(tileCount / 8);
+  const chunkCountAt = occupancyAt + occupancyBytes;
+  const chunkCount = readU32(raw, chunkCountAt);
+  if (chunkCount < 1 || chunkCount > 4096) throw new Error("Invalid munged chunk count.");
+  const atlas = new Uint8Array(atlasBytes);
+  let rawAt = chunkCountAt + 4;
+  let atlasAt = 0;
+  for (let chunk = 0; chunk < chunkCount; chunk++) {
+    const sectionBytes = readU32(raw, rawAt);
+    const rawBytes = readU32(raw, rawAt + 4);
+    const streamBytes = readU32(raw, rawAt + 8);
+    rawAt += 12;
+    if (
+      sectionBytes !== streamBytes + 8 ||
+      rawAt + streamBytes > raw.length ||
+      atlasAt + rawBytes > atlas.length
+    ) {
+      throw new Error("Invalid munged image chunk.");
+    }
+    atlas.set(decodeLz4Block(raw.subarray(rawAt, rawAt + streamBytes), rawBytes), atlasAt);
+    rawAt += streamBytes;
+    atlasAt += rawBytes;
+  }
+  if (atlasAt !== atlas.length || rawAt !== raw.length) {
+    throw new Error("Incomplete munged image atlas.");
+  }
+
+  const pixels = new Uint8Array(width * height * 4);
+  const packedColumns = packedWidth / 34;
+  const packedTileCapacity = packedColumns * (packedHeight / 34);
+  let packedIndex = 0;
+  for (let tileIndex = 0; tileIndex < tileCount; tileIndex++) {
+    if ((raw[occupancyAt + (tileIndex >> 3)] & (1 << (tileIndex & 7))) === 0) continue;
+    if (packedIndex >= packedTileCapacity) throw new Error("Invalid munged tile occupancy.");
+    const tileX = (tileIndex % tileColumns) * 32;
+    const tileY = Math.floor(tileIndex / tileColumns) * 32;
+    const packedX = (packedIndex % packedColumns) * 34 + 1;
+    const packedY = Math.floor(packedIndex / packedColumns) * 34 + 1;
+    for (let y = 0; y < Math.min(32, height - tileY); y++) {
+      for (let x = 0; x < Math.min(32, width - tileX); x++) {
+        const sourceAt = ((packedY + y) * packedWidth + packedX + x) * 4;
+        pixels.set(atlas.subarray(sourceAt, sourceAt + 4), ((tileY + y) * width + tileX + x) * 4);
+      }
+    }
+    packedIndex += 1;
   }
   return { sourcePath, width, height, pixels };
 }

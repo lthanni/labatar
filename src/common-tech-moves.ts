@@ -15,12 +15,15 @@ export function resolveFlowStance(move: TechMove) {
 }
 
 export const commonMoveInputs = [
+  "TH",
+  "j.TH",
   ...["A", "B", "C"].map((button) => `2${button}`),
   ...["A", "AA", "B", "C"].map((button) => `5${button}`),
   ...["2", "4", "6"].map((direction) => `${direction}F`),
   ...["236", "214"].flatMap((motion) =>
     ["A", "B", "C", "EX"].map((button) => `${motion}${button}`),
   ),
+  ...["A", "B", "C"].map((button) => `j.${button}`),
   ...["A", "B", "C", "EX"].map((button) => `j.236${button}`),
 ];
 

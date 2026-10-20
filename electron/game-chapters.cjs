@@ -94,9 +94,12 @@ function escapeMetadata(value) {
   return value.replace(/([\\=;#])/g, "\\$1").replace(/\r?\n/g, "\\\n");
 }
 
-function buildChapterMetadata(existing, generated, durationMs) {
+function buildChapterMetadata(existing, generated, durationMs, preserveExisting = false) {
   const chapters = existing
-    .filter((chapter) => !/^Labatar Game \d+(?: \(start not captured\))?$/.test(chapter.title))
+    .filter(
+      (chapter) =>
+        preserveExisting || !/^Labatar Game \d+(?: \(start not captured\))?$/.test(chapter.title),
+    )
     .concat(generated)
     .filter(
       (chapter) =>

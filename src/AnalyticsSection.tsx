@@ -10,6 +10,12 @@ import {
   MenuItem,
   Select,
   Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
   Typography,
 } from "@mui/material";
 import {
@@ -26,6 +32,7 @@ import {
   YAxis,
 } from "recharts";
 import type { ReplayRow } from "./AvatarGrid";
+import { summarizeOpponents } from "./opponent-summary";
 import supportMap from "../electron/support-map.json";
 
 const ENABLE_OPPONENT_WIN_RATE_CHART = false;
@@ -953,6 +960,10 @@ export function AnalyticsSection({
   );
   const [disabledOpponentSupports, setDisabledOpponentSupports] = useState<Set<string>>(new Set());
   const [disabledPoiSupports, setDisabledPoiSupports] = useState<Set<string>>(new Set());
+  const [disabledOpponents, setDisabledOpponents] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setDisabledOpponents(new Set());
+  }, [playerOfInterest]);
   useEffect(() => {
     setDisabledMatchups((current) => {
       const next = new Set([...current].filter((key) => matchupData.cells.has(key)));
@@ -1069,6 +1080,7 @@ export function AnalyticsSection({
         const opponentCharacter = getOpponentCharacter(game, playerOfInterest) || "Unknown";
         const opponentSupport = getOpponentSupport(game, playerOfInterest) || "Unknown";
         return (
+          !disabledOpponents.has(getOpponent(game, playerOfInterest)) &&
           !disabledMatchups.has(getMatchupKey(game, playerOfInterest)) &&
           !disabledOpponentCharacters.has(opponentCharacter) &&
           !disabledOpponentSupports.has(getPoiSupportKey(opponentCharacter, opponentSupport)) &&
@@ -1078,6 +1090,7 @@ export function AnalyticsSection({
       .map((game) => game.id);
   }, [
     disabledMatchups,
+    disabledOpponents,
     disabledOpponentCharacters,
     disabledOpponentSupports,
     disabledPoiSupports,
@@ -1087,7 +1100,43 @@ export function AnalyticsSection({
   useEffect(() => {
     onMatchupGameIdsChange(selectedMatchupGameIds);
   }, [onMatchupGameIdsChange, selectedMatchupGameIds]);
-  const chartGames = playerOfInterest ? selectedMatchupGames : analysisGames;
+  const opponentRows = useMemo(
+    () =>
+      playerOfInterest ? summarizeOpponents(selectedMatchupGames, sessions, playerOfInterest) : [],
+    [playerOfInterest, selectedMatchupGames, sessions],
+  );
+  const toggleOpponent = (name: string) => {
+    setDisabledOpponents((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+  const selectedOpponentCount = opponentRows.filter(
+    (row) => !disabledOpponents.has(row.name),
+  ).length;
+  const chartGames = useMemo(
+    () =>
+      playerOfInterest
+        ? selectedMatchupGames.filter(
+            (game) => !disabledOpponents.has(getOpponent(game, playerOfInterest)),
+          )
+        : analysisGames,
+    [analysisGames, disabledOpponents, playerOfInterest, selectedMatchupGames],
+  );
+  const chartMatchupData = useMemo(
+    () =>
+      playerOfInterest && disabledOpponents.size > 0
+        ? buildMatchupData(
+            analysisGames.filter(
+              (game) => !disabledOpponents.has(getOpponent(game, playerOfInterest)),
+            ),
+            playerOfInterest,
+          )
+        : matchupData,
+    [analysisGames, disabledOpponents, matchupData, playerOfInterest],
+  );
   const opponentData = useMemo(
     () =>
       ENABLE_OPPONENT_WIN_RATE_CHART && playerOfInterest
@@ -1101,7 +1150,7 @@ export function AnalyticsSection({
     () => (playerOfInterest ? buildTimeline(chartGames, playerOfInterest) : []),
     [chartGames, playerOfInterest],
   );
-  const matchupPanelHeight = Math.min(500, Math.max(320, matchupData.rows.length * 72 + 175));
+  const matchupPanelHeight = Math.min(500, Math.max(320, chartMatchupData.rows.length * 72 + 175));
 
   return (
     <Stack
@@ -1114,7 +1163,7 @@ export function AnalyticsSection({
     >
       <ChartPanel height={matchupPanelHeight}>
         <MatchupHeatmap
-          data={matchupData}
+          data={chartMatchupData}
           getPortrait={getPortrait}
           playerOfInterest={playerOfInterest}
           playerCounts={playerCounts}
@@ -1160,10 +1209,7 @@ export function AnalyticsSection({
             overflowY: fillHeight ? "auto" : undefined,
           }}
         >
-          <ChartPanel
-            title="Activity, win rate, and MMR"
-            subtitle="Games, win rate, and ranked MMR grouped by week for selected matchups"
-          >
+          <ChartPanel height={230}>
             {timelineData.length === 0 ? (
               <EmptyChart />
             ) : (
@@ -1218,6 +1264,91 @@ export function AnalyticsSection({
               </ResponsiveContainer>
             )}
           </ChartPanel>
+          <Card variant="outlined" sx={{ minWidth: 0 }}>
+            <CardContent>
+              <TableContainer sx={{ maxHeight: 360 }}>
+                <Table
+                  size="small"
+                  stickyHeader
+                  aria-label="Opponents matching the current filters"
+                >
+                  <TableHead>
+                    <TableRow>
+                      <TableCell padding="checkbox">
+                        <Checkbox
+                          size="small"
+                          slotProps={{
+                            input: {
+                              "aria-label": "Include all opponents in charts and match table",
+                            },
+                          }}
+                          checked={
+                            opponentRows.length > 0 && selectedOpponentCount === opponentRows.length
+                          }
+                          indeterminate={
+                            selectedOpponentCount > 0 && selectedOpponentCount < opponentRows.length
+                          }
+                          disabled={opponentRows.length === 0}
+                          onChange={(_, checked) =>
+                            setDisabledOpponents((current) => {
+                              const next = new Set(current);
+                              for (const row of opponentRows) {
+                                if (checked) next.delete(row.name);
+                                else next.add(row.name);
+                              }
+                              return next;
+                            })
+                          }
+                        />
+                      </TableCell>
+                      <TableCell>Opponent</TableCell>
+                      <TableCell align="right">Sets</TableCell>
+                      <TableCell align="right">Games</TableCell>
+                      <TableCell>Characters played</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {opponentRows.map((row) => (
+                      <TableRow
+                        key={row.name}
+                        hover
+                        selected={!disabledOpponents.has(row.name)}
+                        onClick={() => toggleOpponent(row.name)}
+                        sx={{ cursor: "pointer" }}
+                      >
+                        <TableCell padding="checkbox">
+                          <Checkbox
+                            size="small"
+                            slotProps={{
+                              input: {
+                                "aria-label": `Include ${row.name} in charts and match table`,
+                              },
+                            }}
+                            checked={!disabledOpponents.has(row.name)}
+                            onClick={(event) => event.stopPropagation()}
+                            onChange={() => toggleOpponent(row.name)}
+                          />
+                        </TableCell>
+                        <TableCell component="th" scope="row" sx={{ whiteSpace: "nowrap" }}>
+                          {row.name}
+                        </TableCell>
+                        <TableCell align="right">{row.sets}</TableCell>
+                        <TableCell align="right">{row.games}</TableCell>
+                        <TableCell>{row.characters.map(({ name }) => name).join(", ")}</TableCell>
+                      </TableRow>
+                    ))}
+                    {opponentRows.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={5} align="center">
+                          No opponents match the current filters.
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </CardContent>
+          </Card>
           {ENABLE_OPPONENT_WIN_RATE_CHART && (
             <ChartPanel title="Opponent win rate" subtitle="Top opponents by game count">
               {opponentData.length === 0 ? (

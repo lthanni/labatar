@@ -64,6 +64,16 @@ describe("local portrait library", () => {
     });
   });
 
+  it("resolves Zuko's named supports to their matching portrait slots", () => {
+    const catalog = { zuko: new Set(["support2.png", "support3.png"]) };
+    expect(portraitArtwork("Zuko", "Ran and Shaw", catalog).supportUrl).toBe(
+      "labatar-media://portrait/zuko/support2.png",
+    );
+    expect(portraitArtwork("Zuko", "June", catalog).supportUrl).toBe(
+      "labatar-media://portrait/zuko/support3.png",
+    );
+  });
+
   it("organizes only character and numbered support portraits", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "labatar-portraits-"));
     try {

@@ -62,10 +62,8 @@ describe("chapterless recording trim planning", () => {
     expect(planRecordingTrim(recording, 2, 8, 10_000, [])).toEqual(recording);
   });
 
-  it("refuses chapters, linked timing data, and invalid ranges", () => {
-    expect(() => planRecordingTrim(recording, 2, 8, 10_000, [{ startMs: 1000 }])).toThrow(
-      /without chapters/,
-    );
+  it("allows chapters and refuses linked timing data and invalid ranges", () => {
+    expect(planRecordingTrim(recording, 2, 8, 10_000, [{ startMs: 1000 }])).toEqual(recording);
     expect(() =>
       planRecordingTrim({ ...recording, moveTake: { id: "5A" } }, 2, 8, 10_000, []),
     ).toThrow(/linked/);

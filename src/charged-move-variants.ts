@@ -3,7 +3,7 @@ import type { TechMove } from "./tech-types";
 
 export function chargedInputFor(input: string): string | null {
   const parsed = parseMoveNotation(input, { allowDirectionless: true });
-  if (!parsed.ok || parsed.isCharged) return null;
+  if (!parsed.ok || parsed.isCharged || parsed.button === "TH") return null;
   return `${parsed.isAirborne ? "j." : ""}${parsed.prefix}[${parsed.button}]`;
 }
 

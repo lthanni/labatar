@@ -30,6 +30,7 @@ import {
   summarizeDefensivePhases,
   summarizeFramePhases,
   type FramebarPixel,
+  type FramebarGroup,
   type FramebarTimelineSample,
 } from "./framebar-detector";
 import {
@@ -56,6 +57,7 @@ import type {
   RecordingAnalysisInputEvent,
   RecordingAnalysisMove,
   RecordingAnalysisPhases,
+  RecordingFramebarSequence,
 } from "./recording-analysis-types";
 import {
   findInputForStartup,
@@ -159,6 +161,22 @@ function drawRegion(
   if (canvas.height !== canvasHeight) canvas.height = canvasHeight;
   context.drawImage(source, x, y, width, height, 0, 0, canvasWidth, canvasHeight);
   return { width: canvasWidth, height: canvasHeight };
+}
+
+function temporalFramebarState(groups: FramebarGroup[], player: 1 | 2) {
+  const names = groups.map((group) => group.state.toLowerCase());
+  const current =
+    [...names].reverse().find((name) => name !== "idle" && name !== "unmapped") ?? "idle";
+  if (current.includes("startup") || current.includes("start")) return "startup";
+  if (current.includes("hitpause")) return "hitpause";
+  if (current.includes("multihit-gap")) return "gap";
+  if (player === 2 && current.includes("blockstun")) return "blockstun";
+  if (player === 2 && current.includes("hitstun")) return "hitstun";
+  if (current.includes("active") || (player === 1 && current.includes("hit"))) return "active";
+  if (current.includes("recovery") || current.includes("recover")) return "recovery";
+  if (current.includes("airborne")) return "airborne";
+  if (current.includes("flow-stance")) return "flow-stance";
+  return current === "idle" ? "idle" : "other";
 }
 
 function createMove(
@@ -293,6 +311,108 @@ function createMove(
   };
 }
 
+/** Interpret an already captured framebar sequence without opening the source video. */
+export function processMoveTakeFramebarSequence(
+  sequence: RecordingFramebarSequence,
+  moveLabel: string,
+): RecordingAnalysisMove[] {
+  let frameOffset = 0;
+  let player1Groups: FramebarGroup[] = [];
+  let player2Groups: FramebarGroup[] = [];
+  const timeline: FramebarTimelineSample[] = sequence.segments.map((segment) => {
+    if (segment.player1 !== "idle")
+      player1Groups = [
+        ...player1Groups,
+        { state: segment.player1, start: frameOffset, length: segment.frames },
+      ];
+    if (segment.player2 !== "idle")
+      player2Groups = [
+        ...player2Groups,
+        { state: segment.player2, start: frameOffset, length: segment.frames },
+      ];
+    const timestamp = segment.timestamp;
+    frameOffset += segment.frames;
+    return {
+      timestamp,
+      player1: player1Groups.map((group) => `${group.state}x${group.length}`).join(" "),
+      player1Groups,
+      player2: player2Groups.map((group) => `${group.state}x${group.length}`).join(" "),
+      player1Phases: summarizeFramePhases(player1Groups),
+      postHitpauseActiveFrames: countPostHitpauseActiveFrames(player1Groups),
+      player2Phases: summarizeDefensivePhases(player2Groups),
+    };
+  });
+  const isMoveState = (sample: FramebarTimelineSample) =>
+    sample.player1Groups.some((group) =>
+      /startup|active|gap|recovery|airborne|flow-stance/i.test(group.state),
+    );
+  const startIndex = timeline.findIndex(isMoveState);
+  let endIndex = -1;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    if (isMoveState(timeline[index])) {
+      endIndex = index;
+      break;
+    }
+  }
+  if (startIndex < 0 || endIndex < startIndex) return [];
+
+  const startTime = timeline[startIndex].timestamp;
+  const endSegment = sequence.segments.at(-1);
+  const endTime = Math.min(
+    sequence.duration,
+    endSegment
+      ? endSegment.timestamp + endSegment.frames / Math.max(1, sequence.frameRate)
+      : sequence.duration,
+  );
+  const episode = timeline.slice(startIndex, endIndex + 1);
+  const aaBaseDirection = /^(2|5)AA$/i.exec(moveLabel)?.[1];
+  const split = aaBaseDirection ? splitAaFollowupFramebarTimeline(episode) : null;
+  const moves = split
+    ? [
+        createMove(
+          { startTime, framebarStartTime: startTime, input: null },
+          split.followupStartTime,
+          split.base,
+          0,
+          sequence.hitboxSamples.filter((sample) => sample.time < split.followupStartTime),
+          sequence.frameRate,
+        ),
+        createMove(
+          {
+            startTime: split.followupStartTime,
+            framebarStartTime: split.followupStartTime,
+            input: null,
+          },
+          endTime,
+          split.followup,
+          1,
+          sequence.hitboxSamples.filter((sample) => sample.time >= split.followupStartTime),
+          sequence.frameRate,
+        ),
+      ]
+    : [
+        createMove(
+          { startTime, framebarStartTime: startTime, input: null },
+          endTime,
+          episode,
+          0,
+          sequence.hitboxSamples,
+          sequence.frameRate,
+          /^j\./i.test(moveLabel),
+        ),
+      ];
+  moves.forEach((move, index) => {
+    const notation =
+      split && aaBaseDirection ? `${aaBaseDirection}${index === 0 ? "A" : "AA"}` : moveLabel;
+    move.notation = notation;
+    move.observedNotation = notation;
+    move.hits?.forEach((hit) => {
+      hit.notation = move.hits!.length > 1 ? `${notation}(${hit.index})` : notation;
+    });
+  });
+  return moves;
+}
+
 function boxIntersectionOverUnion(left: RecordingAnalysisHitbox, right: RecordingAnalysisHitbox) {
   const intersectionLeft = Math.max(left.x, right.x);
   const intersectionTop = Math.max(left.y, right.y);
@@ -347,6 +467,7 @@ export async function processRecording(
   frameProvider?: RecordingFrameProvider,
   configuration?: ProcessingConfiguration,
   moveTakeLabel?: string,
+  sequenceOnly = false,
 ): Promise<RecordingAnalysis> {
   const moveTakeMode = moveTakeLabel !== undefined;
   const processingConfiguration = structuredClone(
@@ -432,6 +553,7 @@ export async function processRecording(
   const p2CandidateStates: string[] = [];
   const p2CandidateCounts: number[] = [];
   const timeline: FramebarTimelineSample[] = [];
+  const framebarSequenceSegments: RecordingFramebarSequence["segments"] = [];
   const hitboxTimeline: HitboxFrameObservation[] = [];
   const diagnostics: NonNullable<RecordingAnalysis["diagnostics"]> = [];
   const inputTimeline: InputPoint[] = [];
@@ -714,6 +836,13 @@ export async function processRecording(
     );
     const p1Groups = groupFramebarStates(p1States);
     const p2Groups = groupFramebarStates(p2States);
+    if (moveTakeMode) {
+      const player1 = temporalFramebarState(p1Groups, 1);
+      const player2 = temporalFramebarState(p2Groups, 2);
+      const previous = framebarSequenceSegments.at(-1);
+      if (previous?.player1 === player1 && previous.player2 === player2) previous.frames += 1;
+      else framebarSequenceSegments.push({ timestamp: time, frames: 1, player1, player2 });
+    }
     updateTrainingMeterTracker(
       meterTracker,
       { player1: p1Reading.meterPresence, player2: p2Reading.meterPresence },
@@ -743,7 +872,14 @@ export async function processRecording(
     const hasRecognizedMoveState = p1Groups.some((group) =>
       /startup|active|recovery|flow-stance/i.test(group.state),
     );
-    if (changed && hasRecognizedMoveState && !framebarIdle && !activeMove && !pendingMoveStart) {
+    if (
+      !sequenceOnly &&
+      changed &&
+      hasRecognizedMoveState &&
+      !framebarIdle &&
+      !activeMove &&
+      !pendingMoveStart
+    ) {
       if (moveTakeMode) {
         activeMove = { startTime: time, framebarStartTime: time, input: null };
         moveEvent = "start";
@@ -752,7 +888,7 @@ export async function processRecording(
         pendingMoveStart = { framebarStartTime: time };
       }
     }
-    if (pendingMoveStart && !activeMove) {
+    if (!sequenceOnly && pendingMoveStart && !activeMove) {
       // The newest button row can appear just before startup, with its counter
       // at zero or one. Track its first decoded frame because digit OCR is not
       // reliable enough to use the displayed counter as the event timestamp.
@@ -810,6 +946,7 @@ export async function processRecording(
       }
     }
     if (
+      !sequenceOnly &&
       activeMove &&
       !changed &&
       !isSaturatedSingleStateFramebar(p1Groups, config.sampleCount) &&
@@ -818,7 +955,7 @@ export async function processRecording(
       finishMove(time);
       moveEvent = "end";
     }
-    if (frame % diagnosticStep === 0 || moveEvent) {
+    if (!sequenceOnly && (frame % diagnosticStep === 0 || moveEvent)) {
       diagnostics.push({
         time,
         inputSignature,
@@ -876,7 +1013,7 @@ export async function processRecording(
     sampledFrameCount = frame + 1;
     exactFrame?.close();
   }
-  finishMove(duration);
+  if (!sequenceOnly) finishMove(duration);
   const sourceWidth = processingVideo.videoWidth;
   const sourceHeight = processingVideo.videoHeight;
   if (!usingFallbackVideo) {
@@ -896,29 +1033,77 @@ export async function processRecording(
   const trainingFrameRatio = trainingFrames / processedFrameTotal;
   if (trainingFrameRatio < 0.2)
     warnings.push("Training mode could not be confirmed for most frames.");
-  if (moves.length === 0) warnings.push("No move episodes were detected.");
+  if (!sequenceOnly && moves.length === 0) warnings.push("No move episodes were detected.");
   if (unmappedFramebarColors.size) {
     const commonColors = [...unmappedFramebarColors].sort((a, b) => b[1] - a[1]).slice(0, 5);
     warnings.push(
       `Some sampled framebar colors did not match calibration and were left unknown: ${commonColors.map(([color, count]) => `RGB(${color}) x${count}`).join("; ")}. Check the sample positions and color palette.`,
     );
   }
+  const timing = {
+    mode: frameProvider
+      ? ("logical-source-frame-ffmpeg" as const)
+      : ("logical-60fps-browser-seeking" as const),
+    nominalFrameRate: frameRate,
+    sourceFrameRate: frameProvider ? frameRate : null,
+    sourceTimestampsAvailable: false as const,
+    requestedFrameCount: total,
+    maximumSeekErrorSeconds,
+  };
   return {
     schemaVersion: 1,
     ...(moveTakeMode ? { processingMode: "move-take" as const } : {}),
+    ...(moveTakeMode
+      ? {
+          framebarSequence: {
+            schemaVersion: 1 as const,
+            id:
+              globalThis.crypto?.randomUUID?.() ??
+              `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            status: "awaiting-review" as const,
+            extractedAt: new Date().toISOString(),
+            reviewedAt: null,
+            duration,
+            sourceWidth,
+            sourceHeight,
+            frameRate,
+            sampledFrames: sampledFrameCount,
+            trainingFrameRatio,
+            timing,
+            detectorConfig: config,
+            processingSnapshot: {
+              processorVersion: recordingProcessorVersion,
+              processorFingerprint: recordingProcessorFingerprint,
+              configuration: processingConfiguration,
+              effectiveDetector: config,
+              sourceSize: { width: sourceWidth, height: sourceHeight },
+            },
+            warnings: [...warnings],
+            hitboxSamples: hitboxTimeline,
+            segments: (() => {
+              const isMoveState = (segment: (typeof framebarSequenceSegments)[number]) =>
+                /startup|active|gap|recovery|airborne|flow-stance/i.test(segment.player1);
+              const startIndex = framebarSequenceSegments.findIndex(isMoveState);
+              let endIndex = -1;
+              for (let index = framebarSequenceSegments.length - 1; index >= 0; index -= 1) {
+                if (isMoveState(framebarSequenceSegments[index])) {
+                  endIndex = index;
+                  break;
+                }
+              }
+              return startIndex >= 0 && endIndex >= startIndex
+                ? framebarSequenceSegments.slice(startIndex, endIndex + 1)
+                : framebarSequenceSegments;
+            })(),
+          },
+        }
+      : {}),
     processedAt: new Date().toISOString(),
     duration,
     sourceWidth,
     sourceHeight,
     sampledFrames: sampledFrameCount,
-    timing: {
-      mode: frameProvider ? "logical-source-frame-ffmpeg" : "logical-60fps-browser-seeking",
-      nominalFrameRate: frameRate,
-      sourceFrameRate: frameProvider ? frameRate : null,
-      sourceTimestampsAvailable: false,
-      requestedFrameCount: total,
-      maximumSeekErrorSeconds,
-    },
+    timing,
     trainingFrameRatio,
     moves,
     inputEvents,

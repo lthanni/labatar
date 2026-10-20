@@ -28,7 +28,6 @@ import {
   moveTakeOutcomeSummary,
   slotStatus,
   takesForSlot,
-  unprocessedMoveTakes,
 } from "./move-capture-workflow";
 import { processMoveTake } from "./process-move-take";
 import {
@@ -136,13 +135,56 @@ function takeWorkflowStatus(recording: RecordedVideo, processingError?: string) 
   if (recording.analysis) {
     return { label: "Processed · review evidence", color: "info.main" };
   }
-  if (take?.evidenceStatus === "active") {
-    return { label: "Accepted · needs processing", color: "warning.main" };
+  if (recording.framebarSequence?.status === "awaiting-review") {
+    return { label: "Framebar sequence review required", color: "warning.main" };
   }
-  if (take?.captureMethod === "automated") {
-    return { label: "Approved for processing", color: "info.main" };
+  if (recording.framebarSequence?.status === "approved") {
+    return { label: "Sequence approved, ready to determine", color: "info.main" };
   }
-  return { label: "Ready to process", color: "text.secondary" };
+  return { label: "Framebar review needed", color: "warning.main" };
+}
+
+function needsFramebarReview(recording: RecordedVideo) {
+  const take = recording.moveTake;
+  return Boolean(
+    take?.status === "captured" &&
+    (take.evidenceStatus === "pending" || take.evidenceStatus === "active") &&
+    !take.storageError &&
+    (take.captureMethod !== "automated" ||
+      take.captureReviewStatus === "approved-for-processing") &&
+    (!recording.framebarSequence || recording.framebarSequence.status === "rejected"),
+  );
+}
+
+function framebarReviewRequest(recordings: RecordedVideo[], folder: string) {
+  return [
+    `Please visually review the numbered framebars for these ${recordings.length} Labatar move takes.`,
+    `Recordings folder: ${folder}`,
+    "For each take, use scripts/framebar-review.mjs to inspect the video and save compact game-frame state/count runs as a sequence awaiting my approval.",
+    "Read counts printed beneath the colored runs; do not count how long a color remains on screen. Review both players when visible. Do not approve sequences, determine move data, or accept evidence.",
+    "Report any take whose framebar cannot be transcribed confidently.",
+    "",
+    ...recordings.map(
+      (recording) =>
+        `- ${recording.moveTake?.characterLabel ?? "Unknown character"} | ${recording.moveTake?.moveLabel ?? "Unknown move"} | ${recording.moveTake?.outcome ?? "unknown outcome"} | ${recording.id}`,
+    ),
+  ].join("\n");
+}
+
+function framebarSequencePreview(recording: RecordedVideo) {
+  const segments = recording.framebarSequence?.segments;
+  if (!segments?.length) return null;
+  const format = (player: "player1" | "player2") => {
+    const runs: Array<{ state: string; frames: number }> = [];
+    for (const segment of segments) {
+      const state = segment[player];
+      const last = runs.at(-1);
+      if (last?.state === state) last.frames += segment.frames;
+      else runs.push({ state, frames: segment.frames });
+    }
+    return `[${runs.map(({ state, frames }) => `${state}: ${frames}`).join(", ")}]`;
+  };
+  return { player1: format("player1"), player2: format("player2") };
 }
 
 function MoveTakeCard({
@@ -162,7 +204,10 @@ function MoveTakeCard({
   armAllowed = true,
   onArm,
   onWatch,
+  onRequestReview,
+  copiedReviewId,
   onReviewCapture,
+  onReviewSequence,
   onProcess,
   onReviewEvidence,
   onDelete,
@@ -183,7 +228,10 @@ function MoveTakeCard({
   armAllowed?: boolean;
   onArm: () => void;
   onWatch: (id: string) => void;
+  onRequestReview: (recording: RecordedVideo) => void;
+  copiedReviewId: string | null;
   onReviewCapture: (id: string, action: "approve" | "reject") => void;
+  onReviewSequence: (id: string, sequenceId: string, action: "approve" | "reject") => void;
   onProcess: (recording: RecordedVideo) => void;
   onReviewEvidence: (id: string) => void;
   onDelete: (recording: RecordedVideo) => void;
@@ -239,10 +287,12 @@ function MoveTakeCard({
                 take.evidenceStatus === "pending" &&
                 !take.storageError;
               const canProcess =
-                (take?.evidenceStatus === "pending" ||
-                  (take?.evidenceStatus === "active" && !recording.analysis)) &&
+                (take?.evidenceStatus === "pending" || take?.evidenceStatus === "active") &&
                 !awaitingVideoReview &&
-                !take.storageError;
+                !take?.storageError;
+              const sequence = recording.framebarSequence;
+              const sequencePreview = framebarSequencePreview(recording);
+              const canDetermine = canProcess && sequence?.status === "approved";
               const canDelete = take?.status === "captured" && !awaitingVideoReview;
               const summary = recording.analysis ? moveTakeOutcomeSummary(recording) : null;
               return (
@@ -260,6 +310,49 @@ function MoveTakeCard({
                     {state.label}
                     {summary ? ` · ${summary.result}` : ""}
                   </Typography>
+                  {sequence && (
+                    <Box sx={{ p: 0.75, borderRadius: 1, bgcolor: "action.hover" }}>
+                      <Typography variant="caption" sx={{ display: "block" }}>
+                        Framebar sequence:{" "}
+                        {sequence.observationMethod === "visual-review"
+                          ? `${sequence.sampledFrames} reviewed video frames`
+                          : `${sequence.sampledFrames} sampled video frames`}{" "}
+                        | {sequence.status}
+                      </Typography>
+                      {sequence.evidenceFrames?.length ? (
+                        <Typography variant="caption" color="text.secondary">
+                          Video frames reviewed: {sequence.evidenceFrames.join(", ")}
+                        </Typography>
+                      ) : null}
+                      {sequence.status === "awaiting-review" && (
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ display: "block" }}
+                        >
+                          Click the take above to view its last video frame.
+                        </Typography>
+                      )}
+                      {sequencePreview && (
+                        <Stack spacing={0.25}>
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ overflowWrap: "anywhere" }}
+                          >
+                            P1 {sequencePreview.player1}
+                          </Typography>
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ overflowWrap: "anywhere" }}
+                          >
+                            P2 {sequencePreview.player2}
+                          </Typography>
+                        </Stack>
+                      )}
+                    </Box>
+                  )}
                   {(failure || take?.storageError || summary?.detail) && (
                     <Typography
                       variant="caption"
@@ -267,6 +360,13 @@ function MoveTakeCard({
                       sx={{ overflowWrap: "anywhere" }}
                     >
                       {failure ?? take?.storageError ?? summary?.detail}
+                    </Typography>
+                  )}
+                  {needsFramebarReview(recording) && (
+                    <Typography variant="caption" color="text.secondary">
+                      {sequence?.status === "rejected"
+                        ? "The prior framebar sequence was rejected. Request a new visual review to continue."
+                        : "This take needs a visual framebar sequence before move data can be determined."}
                     </Typography>
                   )}
                   <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap", gap: 0.5 }}>
@@ -289,7 +389,34 @@ function MoveTakeCard({
                         </Button>
                       </>
                     )}
-                    {canProcess && (
+                    {needsFramebarReview(recording) && (
+                      <Button size="small" onClick={() => onRequestReview(recording)}>
+                        {copiedReviewId === recording.id
+                          ? "Review request copied"
+                          : "Copy AI review request"}
+                      </Button>
+                    )}
+                    {sequence?.status === "awaiting-review" && (
+                      <>
+                        <Button
+                          size="small"
+                          variant="contained"
+                          disabled={reviewBusy || batchActive || Boolean(processingTakeId)}
+                          onClick={() => onReviewSequence(recording.id, sequence.id, "approve")}
+                        >
+                          Approve sequence
+                        </Button>
+                        <Button
+                          size="small"
+                          color="error"
+                          disabled={reviewBusy || batchActive || Boolean(processingTakeId)}
+                          onClick={() => onReviewSequence(recording.id, sequence.id, "reject")}
+                        >
+                          Reject sequence
+                        </Button>
+                      </>
+                    )}
+                    {canDetermine && (
                       <Button
                         size="small"
                         disabled={
@@ -298,10 +425,10 @@ function MoveTakeCard({
                         onClick={() => onProcess(recording)}
                       >
                         {processingTakeId === recording.id
-                          ? "Processing..."
+                          ? "Determining..."
                           : recording.analysis
-                            ? "Reprocess"
-                            : "Process"}
+                            ? "Reprocess determinations"
+                            : "Determine move data"}
                       </Button>
                     )}
                     {take?.evidenceStatus === "pending" && recording.analysis && (
@@ -413,8 +540,14 @@ export function MoveCapturePanel({
   const [selectedCharacterId, setSelectedCharacterId] = useState("");
   const [selectedMoveId, setSelectedMoveId] = useState("");
   const [allRecordings, setAllRecordings] = useState<RecordedVideo[]>([]);
+  const [recordingsFolder, setRecordingsFolder] = useState<string | null>(null);
   const [recordingsRevision, setRecordingsRevision] = useState(0);
   const [selectedPlaybackId, setSelectedPlaybackId] = useState<string | null>(null);
+  const [lastFrameRequest, setLastFrameRequest] = useState<{
+    recordingId: string;
+    requestId: number;
+  } | null>(null);
+  const lastFrameRequestId = useRef(0);
   const [showCompletedMoves, setShowCompletedMoves] = useState(false);
   const [selectedOutcome, setSelectedOutcome] = useState<MoveTakeOutcome>(() => {
     const saved = localStorage.getItem(selectedOutcomeStorageKey);
@@ -428,6 +561,8 @@ export function MoveCapturePanel({
   const [deletingTakeId, setDeletingTakeId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [processingTakeId, setProcessingTakeId] = useState<string | null>(null);
+  const [copiedReviewId, setCopiedReviewId] = useState<string | null>(null);
+  const [copiedReviewBatchKey, setCopiedReviewBatchKey] = useState<string | null>(null);
   const [processingErrors, setProcessingErrors] = useState<Record<string, string>>({});
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
   const [batchResults, setBatchResults] = useState<Record<string, string>>({});
@@ -555,11 +690,27 @@ export function MoveCapturePanel({
   const visibleMoves = showCompletedMoves
     ? availableMoves
     : availableMoves.filter((move) => !completedMoveIds.has(move.id));
-  const unprocessedTakes = useMemo(
+  const takesNeedingFramebarReview = useMemo(
+    () =>
+      allRecordings
+        .filter(needsFramebarReview)
+        .sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true })),
+    [allRecordings],
+  );
+  const reviewBatchKey = [
+    recordingsFolder,
+    ...takesNeedingFramebarReview.map((recording) => recording.id),
+  ].join("\n");
+  const approvedTakesToDetermine = useMemo(
     () =>
       selectedKnownVariant
-        ? unprocessedMoveTakes(allRecordings, selectedKnownVariant.id).filter(
-            (recording) => recording.moveTake?.outcome === selectedOutcome,
+        ? allRecordings.filter(
+            (recording) =>
+              recording.moveTake?.characterId === selectedKnownVariant.id &&
+              recording.moveTake.outcome === selectedOutcome &&
+              !recording.moveTake.storageError &&
+              recording.framebarSequence?.status === "approved" &&
+              !recording.analysis,
           )
         : [],
     [allRecordings, selectedKnownVariant, selectedOutcome],
@@ -590,6 +741,7 @@ export function MoveCapturePanel({
     try {
       const result = await window.electronAPI.recordings.list({ analysisScope: "move-takes" });
       setAllRecordings(result.recordings);
+      setRecordingsFolder(result.folder);
       setRecordingsRevision((revision) => revision + 1);
       return result.recordings;
     } catch (loadError) {
@@ -624,6 +776,7 @@ export function MoveCapturePanel({
       setAutomaticRun(nextRun);
       if (nextRun.status === "completed" || nextRun.status === "cancelled") {
         setSelectedPlaybackId(null);
+        setLastFrameRequest(null);
         void loadMoveEvidence();
       }
     });
@@ -794,6 +947,77 @@ export function MoveCapturePanel({
     await loadMoveEvidence();
   };
 
+  const requestFramebarReview = async (recording: RecordedVideo) => {
+    if (!recordingsFolder) {
+      setError("The recordings folder is unavailable. Refresh the take list and try again.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(framebarReviewRequest([recording], recordingsFolder));
+      setCopiedReviewId(recording.id);
+    } catch (copyError) {
+      setError(copyError instanceof Error ? copyError.message : String(copyError));
+    }
+  };
+
+  const copyAllFramebarReviews = async () => {
+    if (!recordingsFolder || takesNeedingFramebarReview.length === 0) return;
+    try {
+      await navigator.clipboard.writeText(
+        framebarReviewRequest(takesNeedingFramebarReview, recordingsFolder),
+      );
+      setCopiedReviewBatchKey(reviewBatchKey);
+    } catch (copyError) {
+      setError(copyError instanceof Error ? copyError.message : String(copyError));
+    }
+  };
+
+  const determineAllApproved = async () => {
+    if (batchRunning.current || processingTakeId || obsState.recording.active) return;
+    const recordings = await loadMoveEvidence();
+    if (!recordings || !selectedKnownVariant) return;
+    const pending = recordings.filter(
+      (recording) =>
+        recording.moveTake?.characterId === selectedKnownVariant.id &&
+        recording.moveTake.outcome === selectedOutcome &&
+        !recording.moveTake.storageError &&
+        recording.framebarSequence?.status === "approved" &&
+        !recording.analysis,
+    );
+    if (pending.length === 0) return;
+    batchRunning.current = true;
+    setBatchResults({});
+    setBatchProgress({ done: 0, total: pending.length });
+    try {
+      for (const [index, recording] of pending.entries()) {
+        await processOneTake(recording);
+        setBatchProgress({ done: index + 1, total: pending.length });
+        await loadMoveEvidence();
+      }
+    } finally {
+      batchRunning.current = false;
+    }
+  };
+
+  const reviewFramebarSequence = async (
+    recordingId: string,
+    sequenceId: string,
+    action: "approve" | "reject",
+  ) => {
+    const recordingsApi = window.electronAPI?.recordings;
+    if (!recordingsApi?.reviewFramebarSequence) return;
+    setReviewBusy(true);
+    setError(null);
+    try {
+      await recordingsApi.reviewFramebarSequence({ recordingId, sequenceId, action });
+      await loadMoveEvidence();
+    } catch (reviewError) {
+      setError(reviewError instanceof Error ? reviewError.message : String(reviewError));
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
   const reviewAutomatedCapture = async (recordingId: string, action: "approve" | "reject") => {
     const recordingsApi = window.electronAPI?.recordings;
     if (!recordingsApi?.reviewCapture) return;
@@ -900,28 +1124,6 @@ export function MoveCapturePanel({
     }
   };
 
-  const processAll = async () => {
-    if (batchRunning.current || processingTakeId || obsState.recording.active) return;
-    const recordings = await loadMoveEvidence();
-    if (!recordings || !selectedKnownVariant) return;
-    const pending = unprocessedMoveTakes(recordings, selectedKnownVariant.id).filter(
-      (recording) => recording.moveTake?.outcome === selectedOutcome,
-    );
-    if (pending.length === 0) return;
-    batchRunning.current = true;
-    setBatchResults({});
-    setBatchProgress({ done: 0, total: pending.length });
-    try {
-      for (const [index, recording] of pending.entries()) {
-        await processOneTake(recording);
-        setBatchProgress({ done: index + 1, total: pending.length });
-        await loadMoveEvidence();
-      }
-    } finally {
-      batchRunning.current = false;
-    }
-  };
-
   const skipGatherMove = async () => {
     if (!gatherMode || !selectedKnownVariant || !selectedMove) return;
     const attempted = new Set(attemptedMoveIds);
@@ -995,8 +1197,13 @@ export function MoveCapturePanel({
 
   const openRecording = (recordingId: string) => {
     setSelectedPlaybackId(recordingId);
-    const moveId = allRecordings.find((recording) => recording.id === recordingId)?.moveTake
-      ?.moveId;
+    const recording = allRecordings.find((item) => item.id === recordingId);
+    setLastFrameRequest(
+      recording?.framebarSequence?.status === "awaiting-review"
+        ? { recordingId, requestId: ++lastFrameRequestId.current }
+        : null,
+    );
+    const moveId = recording?.moveTake?.moveId;
     if (moveId) setSelectedMoveId(moveId);
   };
 
@@ -1198,6 +1405,7 @@ export function MoveCapturePanel({
                     setSelectedCharacterId(event.target.value);
                     setSelectedMoveId("");
                     setSelectedPlaybackId(null);
+                    setLastFrameRequest(null);
                     setShowCompletedMoves(false);
                   }}
                 >
@@ -1221,6 +1429,7 @@ export function MoveCapturePanel({
                   onChange={(event) => {
                     setSelectedOutcome(event.target.value as MoveTakeOutcome);
                     setSelectedPlaybackId(null);
+                    setLastFrameRequest(null);
                     setShowCompletedMoves(false);
                   }}
                 >
@@ -1240,23 +1449,35 @@ export function MoveCapturePanel({
               </Button>
               <Button
                 size="small"
+                onClick={() => void copyAllFramebarReviews()}
+                disabled={
+                  !recordingsFolder || takesNeedingFramebarReview.length === 0 || evidenceLoading
+                }
+              >
+                {copiedReviewBatchKey === reviewBatchKey
+                  ? `Copied ${takesNeedingFramebarReview.length} review requests`
+                  : `Copy all AI review requests (${takesNeedingFramebarReview.length})`}
+              </Button>
+              <Button
+                size="small"
                 variant="contained"
-                onClick={() => void processAll()}
+                onClick={() => void determineAllApproved()}
                 disabled={
                   !selectedKnownVariant ||
-                  unprocessedTakes.length === 0 ||
+                  approvedTakesToDetermine.length === 0 ||
                   Boolean(processingTakeId) ||
                   batchActive ||
                   obsState.recording.active ||
                   automaticRunOpen
                 }
               >
-                Process all ({unprocessedTakes.length})
+                Determine approved ({approvedTakesToDetermine.length})
               </Button>
             </Stack>
             <Typography variant="caption" color="text.secondary">
-              Review automated videos before processing. Processed takes still need evidence
-              acceptance. The requested outcome is separate from what processing observed.
+              Copy one request for all eligible move takes, then paste it into Codex. After Codex
+              saves the reviewed counts, refresh this list, approve each sequence, and determine
+              move data. The requested outcome is separate from what processing observed.
             </Typography>
             {batchProgress && (
               <Alert
@@ -1531,6 +1752,7 @@ export function MoveCapturePanel({
                         onClick={() => {
                           setSelectedMoveId(move.id);
                           setSelectedPlaybackId(null);
+                          setLastFrameRequest(null);
                         }}
                         sx={{ borderRadius: 1, px: 0.5, textAlign: "left" }}
                         aria-label={"Select move " + move.input}
@@ -1589,8 +1811,13 @@ export function MoveCapturePanel({
                               }
                             }}
                             onWatch={openRecording}
+                            onRequestReview={(recording) => void requestFramebarReview(recording)}
+                            copiedReviewId={copiedReviewId}
                             onReviewCapture={(id, action) =>
                               void reviewAutomatedCapture(id, action)
+                            }
+                            onReviewSequence={(id, sequenceId, action) =>
+                              void reviewFramebarSequence(id, sequenceId, action)
                             }
                             onProcess={(recording) => void processTake(recording)}
                             onReviewEvidence={(id) => void reviewTake(id)}
@@ -1621,6 +1848,7 @@ export function MoveCapturePanel({
               mode="recordings"
               panelOnly
               selectedRecordingId={selectedPlayback?.id ?? null}
+              seekToLastFrameRequest={lastFrameRequest}
               refreshToken={recordingsRevision}
             />
           </Box>

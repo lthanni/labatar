@@ -23,4 +23,12 @@ describe("matchup portrait support slots", () => {
       extra: [{ name: "None", games: 3 }],
     });
   });
+
+  it("labels Zuko's numbered portrait slots in replay order", () => {
+    expect(supportFilters("Zuko", [{ name: "June", games: 1 }]).slots).toEqual([
+      { slot: 1, name: "Mai", games: 0 },
+      { slot: 2, name: "Ran and Shaw", games: 0 },
+      { slot: 3, name: "June", games: 1 },
+    ]);
+  });
 });

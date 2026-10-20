@@ -125,7 +125,9 @@ export function automatedMoveEligibility(
   if (
     move.dependsOnMoveId ||
     move.isStanceParent ||
-    !/^(?:(?:2|5)AA|(?:J\.)?(?:236|214|[1-9])(?:\[(?:EX|[ABCF])\]|EX|[ABCF]))$/.test(input) ||
+    !/^(?:(?:2|5)AA|J\.[ABC]|(?:J\.)?(?:236|214|[1-9])(?:\[(?:EX|[ABCF])\]|EX|[ABCF]))$/.test(
+      input,
+    ) ||
     move.isCharged !== input.includes("[")
   ) {
     return {
@@ -152,7 +154,7 @@ export function automatedWhiffEligibility(
   return automatedMoveEligibility(move, recordings, variantId, "whiff", attemptedMoveIds, facing);
 }
 
-/** Captured, pending videos that have not had an analysis saved yet. */
+/** Captured, pending takes that need a fresh framebar sequence extracted. */
 export function unprocessedMoveTakes(recordings: RecordedVideo[], variantId: string) {
   return recordings
     .filter(
@@ -163,7 +165,7 @@ export function unprocessedMoveTakes(recordings: RecordedVideo[], variantId: str
         (recording.moveTake.captureMethod !== "automated" ||
           recording.moveTake.captureReviewStatus === "approved-for-processing") &&
         !recording.moveTake.storageError &&
-        !recording.analysis,
+        (!recording.framebarSequence || recording.framebarSequence.status === "rejected"),
     )
     .sort((left, right) => left.modifiedAt - right.modifiedAt);
 }
