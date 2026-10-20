@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 function sendRendererProfileSnapshot() {
   try {
@@ -81,6 +81,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   replays: {
     getFolder: () => ipcRenderer.invoke("replays:get-folder"),
+    importDropped: (files) => {
+      const paths = files.map((file) => webUtils.getPathForFile(file));
+      if (paths.some((filePath) => !filePath)) {
+        throw new Error("Could not read a dropped file from disk. Use Import replays instead.");
+      }
+      return ipcRenderer.invoke("replays:import-dropped", paths);
+    },
+    chooseImport: () => ipcRenderer.invoke("replays:choose-import"),
     getGameFolderStatus: () => ipcRenderer.invoke("replays:get-game-folder-status"),
     selectFolder: () => ipcRenderer.invoke("replays:select-folder"),
     getCachedScan: (folder) => ipcRenderer.invoke("replays:get-cached-scan", folder),
@@ -110,7 +118,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.on("recordings:changed", handler);
       return () => ipcRenderer.removeListener("recordings:changed", handler);
     },
+    onFinalized: (listener) => {
+      const handler = (_, result) => listener(result);
+      ipcRenderer.on("recordings:finalized", handler);
+      return () => ipcRenderer.removeListener("recordings:finalized", handler);
+    },
     list: (request) => ipcRenderer.invoke("recordings:list", request),
+    importComboMp4: () => ipcRenderer.invoke("recordings:import-combo-mp4"),
     getChapters: (request) => ipcRenderer.invoke("recordings:get-chapters", request),
     openFrameReader: (request) => ipcRenderer.invoke("recordings:frame-reader-open", request),
     readFrame: (request) => ipcRenderer.invoke("recordings:frame-reader-read", request),
@@ -122,10 +136,28 @@ contextBridge.exposeInMainWorld("electronAPI", {
     reprocessName: (request) => ipcRenderer.invoke("recordings:reprocess-name", request),
     addGameChapters: (request) => ipcRenderer.invoke("recordings:add-game-chapters", request),
     openYouTubeStudio: (request) => ipcRenderer.invoke("recordings:open-youtube-studio", request),
+    getYouTubeUploadStatus: (request) =>
+      ipcRenderer.invoke("recordings:youtube-upload-status", request),
+    configureYouTube: (request) => ipcRenderer.invoke("recordings:youtube-configure", request),
+    connectYouTube: (request) => ipcRenderer.invoke("recordings:youtube-connect", request),
+    disconnectYouTube: (request) => ipcRenderer.invoke("recordings:youtube-disconnect", request),
+    uploadToYouTube: (request) => ipcRenderer.invoke("recordings:youtube-upload", request),
+    cancelYouTubeUpload: (request) =>
+      ipcRenderer.invoke("recordings:youtube-upload-cancel", request),
+    dismissYouTubeUploadError: (request) =>
+      ipcRenderer.invoke("recordings:youtube-upload-dismiss-error", request),
+    openYouTubeTerms: () => ipcRenderer.invoke("recordings:open-youtube-terms"),
+    openYouTubeUrl: (request) => ipcRenderer.invoke("recordings:open-youtube-url", request),
+    getYouTubeReplacementInfo: (request) =>
+      ipcRenderer.invoke("recordings:youtube-replacement-info", request),
     setYouTubeLink: (request) => ipcRenderer.invoke("recordings:set-youtube-link", request),
     openYouTubeVideo: (request) => ipcRenderer.invoke("recordings:open-youtube-video", request),
     setTags: (request) => ipcRenderer.invoke("recordings:set-tags", request),
     saveAnalysis: (request) => ipcRenderer.invoke("recordings:save-analysis", request),
+    saveFramebarSequence: (request) =>
+      ipcRenderer.invoke("recordings:save-framebar-sequence", request),
+    reviewFramebarSequence: (request) =>
+      ipcRenderer.invoke("recordings:review-framebar-sequence", request),
     setMoveEvidence: (request) => ipcRenderer.invoke("recordings:set-move-evidence", request),
     reviewCapture: (request) => ipcRenderer.invoke("recordings:review-capture", request),
     deleteRecording: (request) => ipcRenderer.invoke("recordings:delete", request),
@@ -133,9 +165,28 @@ contextBridge.exposeInMainWorld("electronAPI", {
     deleteMoveTake: (request) => ipcRenderer.invoke("recordings:delete-move-take", request),
     startDrag: (request) => ipcRenderer.send("recordings:start-drag", request),
   },
+  catalogPublisher: {
+    publishCombo: (request) => ipcRenderer.invoke("catalog:publish-combo", request),
+  },
+  comboCandidates: {
+    status: () => ipcRenderer.invoke("combo-candidates:status"),
+    submit: (request) => ipcRenderer.invoke("combo-candidates:submit", request),
+    onUploadProgress: (listener) => {
+      const handler = (_, progress) => listener(progress);
+      ipcRenderer.on("combo-candidates:upload-progress", handler);
+      return () => ipcRenderer.removeListener("combo-candidates:upload-progress", handler);
+    },
+    list: (request) => ipcRenderer.invoke("combo-candidates:list", request),
+    approve: (request) => ipcRenderer.invoke("combo-candidates:approve", request),
+    reject: (request) => ipcRenderer.invoke("combo-candidates:reject", request),
+    markUploaded: (request) => ipcRenderer.invoke("combo-candidates:uploaded", request),
+    removeUploaded: (request) => ipcRenderer.invoke("combo-candidates:remove-uploaded", request),
+    download: (request) => ipcRenderer.invoke("combo-candidates:download", request),
+  },
   artwork: {
     getStatus: () => ipcRenderer.invoke("artwork:get-status"),
     extract: () => ipcRenderer.invoke("artwork:extract"),
+    browseMatches: (request) => ipcRenderer.invoke("artwork:browse-matches", request),
     cancel: (request) => ipcRenderer.invoke("artwork:cancel", request),
     onProgress: (listener) => {
       const handler = (_, progress) => listener(progress);

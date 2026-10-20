@@ -1,6 +1,7 @@
 const {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -23,12 +24,37 @@ const ffmpegStaticPath = require("ffmpeg-static");
 const { MatchLogWatcher } = require("./match-watcher.cjs");
 const { createInterruptedMatchScanner } = require("./interrupted-match-scanner.cjs");
 const { createUnnamedRecordChapter } = require("./record-chapter.cjs");
-const { addGameChaptersToMp4, probeChapters } = require("./game-chapters.cjs");
+const {
+  addGameChaptersToMp4,
+  buildChapterMetadata,
+  probeChapters,
+} = require("./game-chapters.cjs");
 const { buildClipExportFfmpegArgs } = require("./clip-export.cjs");
-const { planClipTrim, planRecordingTrim, replaceClipAndRollback } = require("./clip-trim.cjs");
+const { buildFastTrimFfmpegArgs, probeFastTrimStart } = require("./clip-fast-trim.cjs");
+const {
+  mapChaptersToTrim,
+  planChildClipMapping,
+  planClipTrim,
+  planRecordingTrim,
+  replaceTrimmedFiles,
+} = require("./clip-trim.cjs");
 const { createMissingManualChapterClips } = require("./manual-chapter-clips.cjs");
 const { noGameStartedRecordingBaseName } = require("./automatic-recording-outcome.cjs");
 const { normalizeYouTubeVideoUrl, readYouTubeVideoUrl } = require("./recording-youtube.cjs");
+const { replaceLocalRecordingWithYouTube } = require("./youtube-recording-replacement.cjs");
+const { createYouTubeUploadService } = require("./youtube-upload.cjs");
+const { publishCombo } = require("./catalog-publisher.cjs");
+const {
+  candidateServiceStatus,
+  submitComboCandidate,
+  listComboCandidates,
+  approveComboCandidate,
+  rejectComboCandidate,
+  markComboCandidateUploaded,
+  removeUploadedComboCandidate,
+  downloadComboCandidate,
+  previewComboCandidate,
+} = require("./combo-candidates.cjs");
 const {
   takePendingReplayMatch,
   replayMatchesGame,
@@ -39,6 +65,9 @@ const {
   recordingMatchesAutomaticGame,
 } = require("./lobbyless-recording.cjs");
 const { normalizeRendererSnapshot, summarizeProcessMetric } = require("./renderer-profile.cjs");
+const { createRecordingResponse, getMediaStreamMetrics } = require("./recording-media.cjs");
+const { importComboMp4 } = require("./recording-import.cjs");
+const { importReplays } = require("./replay-import.cjs");
 const supportMap = require("./support-map.json");
 const characterMap = require("./character-map.json");
 const { createProcessingConfigurationStore } = require("./processing-config.cjs");
@@ -82,6 +111,7 @@ const {
   parsePakDirectory,
   portraitPakRelativePath,
   decodePortraitMunged,
+  decodeMungedImage,
   encodePngRgba,
 } = app.isPackaged
   ? require("./generated/artwork-extractor.cjs")
@@ -97,6 +127,7 @@ const processingConfigurationStore = () =>
   createProcessingConfigurationStore(app.getPath("userData"), detectorKeys);
 const moveCatalogStore = () => createMoveCatalogStore(app.getPath("userData"));
 const replayStagingStore = () => createReplayStagingStore(app.getPath("userData"));
+const youtubeUploader = createYouTubeUploadService({ app, safeStorage, shell });
 const execFileAsync = promisify(execFile);
 
 function startupDiagnosticLogFile() {
@@ -670,7 +701,7 @@ function armMoveCapture(request = {}) {
     throw new Error("The selected Tech move has an invalid id.");
   }
   if (
-    !/^(?:j\.)?(?:214|236|22|[1-9])?(?:\[(?:EX|SUP|A|B|C|F|X)\]|EX|SUP|AA|A|B|C|F|X)$/i.test(
+    !/^(?:j\.)?(?:214|236|22|[1-9])?(?:\[(?:EX|SUP|A|B|C|F|X)\]|EX|SUP|TH|AA|A|B|C|F|X)$/i.test(
       moveInput,
     )
   ) {
@@ -821,7 +852,11 @@ function validateAutomaticMoveQueue(request = {}) {
     if (!/^[a-z0-9][a-z0-9-]*$/i.test(id) || seen.has(id)) {
       throw new Error("The automatic capture queue has an invalid or repeated move ID.");
     }
-    if (!/^(?:(?:2|5)AA|(?:J\.)?(?:236|214|[1-9])(?:\[(?:EX|[ABCF])\]|EX|[ABCF]))$/.test(input)) {
+    if (
+      !/^(?:(?:2|5)AA|J\.[ABC]|(?:J\.)?(?:236|214|[1-9])(?:\[(?:EX|[ABCF])\]|EX|[ABCF]))$/.test(
+        input,
+      )
+    ) {
       throw new Error(`No supported automatic recipe for ${input}.`);
     }
     seen.add(id);
@@ -1430,6 +1465,25 @@ async function finalizeObsRecordingOnce(outputPath, reason) {
   if (recording.outputPath && path.extname(recording.outputPath).toLowerCase() === ".mp4") {
     queueFinalizedChapterJobs(recording);
   }
+  if (canSendToRenderer()) {
+    const folder = path.resolve(getObsSettings().recordDirectory);
+    const relativePath = lastFinalizedObsRecording.outputPath
+      ? path.relative(folder, lastFinalizedObsRecording.outputPath)
+      : null;
+    const recordingId =
+      relativePath &&
+      relativePath !== ".." &&
+      !relativePath.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relativePath)
+        ? relativePath.split(path.sep).join("/")
+        : null;
+    mainWindow.webContents.send("recordings:finalized", {
+      sessionId: recording.sessionId,
+      recordingId,
+      manifestError,
+    });
+    mainWindow.webContents.send("recordings:changed");
+  }
   sendMoveCaptureState();
   return lastFinalizedObsRecording;
 }
@@ -1716,7 +1770,9 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
     source: options.manual ? "manual" : "automatic",
     metadata: normalizedMetadata,
     tags,
-    fileNameBase: options.manual ? manualRecordingBaseName(startedAt) : null,
+    fileNameBase: options.manual
+      ? safeRecordingNamePart(options.fileNameBase, manualRecordingBaseName(startedAt))
+      : null,
     games: [],
     replays: [],
     lobbyId: normalizedMetadata?.lobbyId || null,
@@ -1774,13 +1830,13 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
   return { sessionId, startedAt, metadata: normalizedMetadata, moveTake };
 }
 
-async function startManualObsRecording(setup = {}) {
+async function startManualObsRecording(setup = {}, fileNameBase = null) {
   if (automaticMoveRunIsOpen()) {
     throw new Error("Finish or cancel the automatic move capture pass first.");
   }
   const moveTake = publicArmedMoveCapture();
   if (moveTake) await requireDevBlackoutCapture(moveTake.characterId);
-  return startObsRecording(null, setup, { manual: true, moveTake });
+  return startObsRecording(null, setup, { manual: true, moveTake, fileNameBase });
 }
 
 async function waitForObsRecordingState(client, expectedActive, timeoutMs = 5000) {
@@ -3268,6 +3324,13 @@ async function getGameFolderStatus() {
         "The selected game folder is unavailable. Choose the game's installation folder in Settings.",
     };
   }
+  if (path.basename(path.resolve(folder)).toLowerCase() === "replays") {
+    return {
+      folder,
+      issue:
+        "You selected the replays folder. For the full Labatar experience, choose the game installation folder, usually one folder up, so Labatar can find artwork and game logs.",
+    };
+  }
   const packagesFolder = path.join(folder, "data_packages");
   const packagesStat = await fs.promises.stat(packagesFolder).catch(() => null);
   if (!packagesStat?.isDirectory()) {
@@ -3561,7 +3624,7 @@ ipcMain.handle("obs:start-recording", async (_, request) => {
   return startObsRecording(request?.metadata, request?.setup ?? {});
 });
 ipcMain.handle("obs:start-manual-recording", async (_, request) => {
-  return startManualObsRecording(request?.setup ?? {});
+  return startManualObsRecording(request?.setup ?? {}, request?.fileNameBase);
 });
 ipcMain.handle("obs:stop-recording", async () => {
   if (automaticMoveRunIsOpen()) {
@@ -3958,6 +4021,49 @@ async function findRecordingFiles(folder) {
   return files;
 }
 
+async function findYouTubeRecordingPaths(folder) {
+  const paths = [];
+  const directories = [folder];
+  while (directories.length > 0) {
+    const currentDirectory = directories.pop();
+    let entries;
+    try {
+      entries = await fs.promises.readdir(currentDirectory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(currentDirectory, entry.name);
+      if (entry.isDirectory()) {
+        if (!entry.name.startsWith(".labatar-")) directories.push(entryPath);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith(".labatar.json")) continue;
+      const videoPath = entryPath.slice(0, -".labatar.json".length);
+      if (!recordingExtensions.has(path.extname(videoPath).toLowerCase())) continue;
+      if (
+        await fs.promises.stat(videoPath).then(
+          () => true,
+          () => false,
+        )
+      )
+        continue;
+      try {
+        const manifest = JSON.parse(await fs.promises.readFile(entryPath, "utf8"));
+        if (
+          manifest?.youtubeMedia?.kind === "youtube" &&
+          readYouTubeVideoUrl(manifest.youtubeUrl)
+        ) {
+          paths.push(videoPath);
+        }
+      } catch {
+        // An unreadable sidecar is not a playable library entry.
+      }
+    }
+  }
+  return paths;
+}
+
 function recordingIdForPath(filePath, folder) {
   return path.relative(folder, filePath).split(path.sep).join("/");
 }
@@ -4021,7 +4127,12 @@ async function repairDanglingClipLinks(folder) {
     }
   }
 
-  const ids = new Set(entries.map(({ filePath }) => recordingIdForPath(filePath, folder)));
+  const ids = new Set([
+    ...entries.map(({ filePath }) => recordingIdForPath(filePath, folder)),
+    ...(await findYouTubeRecordingPaths(folder)).map((filePath) =>
+      recordingIdForPath(filePath, folder),
+    ),
+  ]);
   for (const entry of entries) {
     const clip = entry.manifest?.clip;
     if (!clip || typeof clip.sourceRecordingId !== "string" || ids.has(clip.sourceRecordingId)) {
@@ -4150,78 +4261,6 @@ function queueFinalizedChapterJobs(recording) {
     }
   };
   setTimeout(() => void attempt(), 2000);
-}
-
-function recordingContentType(filePath) {
-  switch (path.extname(filePath).toLowerCase()) {
-    case ".mkv":
-      return "video/x-matroska";
-    case ".webm":
-      return "video/webm";
-    case ".mov":
-      return "video/quicktime";
-    case ".avi":
-      return "video/x-msvideo";
-    default:
-      return "video/mp4";
-  }
-}
-
-function createRecordingResponse(filePath, stat, request) {
-  const fileSize = stat.size;
-  const rangeHeader = request.headers.get("range");
-  let start = 0;
-  let end = Math.max(0, fileSize - 1);
-  let status = 200;
-
-  if (rangeHeader) {
-    const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
-    if (!match || fileSize === 0) {
-      return new Response(null, {
-        status: 416,
-        headers: { "Content-Range": `bytes */${fileSize}` },
-      });
-    }
-    if (match[1] === "") {
-      const suffixLength = Number(match[2]);
-      start = Math.max(0, fileSize - suffixLength);
-    } else {
-      start = Number(match[1]);
-      end = match[2] === "" ? end : Number(match[2]);
-    }
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start > end || start >= fileSize) {
-      return new Response(null, {
-        status: 416,
-        headers: { "Content-Range": `bytes */${fileSize}` },
-      });
-    }
-    end = Math.min(end, fileSize - 1);
-    status = 206;
-  }
-
-  const contentLength = Math.max(0, end - start + 1);
-  const headers = {
-    "Accept-Ranges": "bytes",
-    "Access-Control-Allow-Origin": "*",
-    "Cache-Control": "no-cache",
-    "Content-Length": String(contentLength),
-    "Content-Type": recordingContentType(filePath),
-  };
-  if (status === 206) headers["Content-Range"] = `bytes ${start}-${end}/${fileSize}`;
-  if (request.method === "HEAD") return new Response(null, { status, headers });
-
-  const fileStream = fs.createReadStream(filePath, { start, end });
-  const body = new ReadableStream({
-    start(controller) {
-      fileStream.on("data", (chunk) => controller.enqueue(new Uint8Array(chunk)));
-      fileStream.on("end", () => controller.close());
-      fileStream.on("error", (error) => controller.error(error));
-    },
-    cancel() {
-      fileStream.destroy();
-    },
-  });
-  return new Response(body, { status, headers });
 }
 
 function recordingManifestPathForVideo(videoPath) {
@@ -4543,7 +4582,89 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
 
 const clipTrimJobs = new Set();
 
+async function remuxTrimmedVideoWithChapters({
+  executable,
+  sourcePath,
+  outputPath,
+  chapters,
+  durationMs,
+  creationTime,
+}) {
+  const metadata = buildChapterMetadata(chapters, [], durationMs, true);
+  const metadataPath = `${outputPath}.ffmeta`;
+  const remuxedPath = `${outputPath}.remux.mp4`;
+  try {
+    await fs.promises.writeFile(metadataPath, metadata.text, "utf8");
+    const args = [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-y",
+      "-i",
+      sourcePath,
+      "-f",
+      "ffmetadata",
+      "-i",
+      metadataPath,
+      "-map",
+      "0",
+      "-map_metadata",
+      "0",
+      "-map_chapters",
+      "1",
+      "-c",
+      "copy",
+      "-movflags",
+      "+faststart",
+      "-f",
+      "mp4",
+    ];
+    if (creationTime) args.push("-metadata", `creation_time=${creationTime}`);
+    args.push(remuxedPath);
+    await runFfmpeg(args);
+    const candidateStat = await fs.promises.stat(remuxedPath);
+    const verified = await probeChapters(executable, remuxedPath);
+    const expected = [...metadata.chapters].sort(
+      (left, right) => left.startMs - right.startMs || left.title.localeCompare(right.title),
+    );
+    const actual = [...verified.chapters].sort(
+      (left, right) => left.startMs - right.startMs || left.title.localeCompare(right.title),
+    );
+    if (
+      !candidateStat.isFile() ||
+      candidateStat.size === 0 ||
+      Math.abs(verified.durationMs - durationMs) > 100 ||
+      actual.length !== expected.length ||
+      expected.some(
+        (chapter, index) =>
+          chapter.title !== actual[index].title ||
+          Math.abs(chapter.startMs - actual[index].startMs) > 5,
+      )
+    ) {
+      throw new Error(
+        "The trimmed recording failed chapter verification; the original was not replaced.",
+      );
+    }
+    if (
+      creationTime &&
+      Math.abs(Date.parse(verified.creationTime ?? "") - Date.parse(creationTime)) > 1000
+    ) {
+      throw new Error("The trimmed recording's timeline origin could not be preserved.");
+    }
+    await fs.promises.rm(outputPath, { force: true });
+    await fs.promises.rename(remuxedPath, outputPath);
+  } finally {
+    await fs.promises.rm(metadataPath, { force: true }).catch(() => undefined);
+    await fs.promises.rm(remuxedPath, { force: true }).catch(() => undefined);
+  }
+}
+
 async function trimRecordingClip(request = {}) {
+  const fast = request.mode === "fast";
+  if (request.mode !== undefined && request.mode !== "fast" && request.mode !== "precise") {
+    throw new Error("Unknown trim mode.");
+  }
   const videoPath = resolveRecordingPath(String(request.recordingId ?? ""));
   if (path.extname(videoPath).toLowerCase() !== ".mp4") {
     throw new Error("Only MP4 recordings can be trimmed in place.");
@@ -4562,6 +4683,7 @@ async function trimRecordingClip(request = {}) {
     throw new Error("Stop recording before trimming this clip.");
   }
   clipTrimJobs.add(videoPath);
+  const lockedClipPaths = [videoPath];
   let tempFolder = null;
   let preserveTempFolder = false;
   try {
@@ -4591,66 +4713,239 @@ async function trimRecordingClip(request = {}) {
         };
     const folder = path.resolve(getObsSettings().recordDirectory);
     const recordingId = recordingIdForPath(videoPath, folder);
-    for (const filePath of await findRecordingFiles(folder)) {
-      if (filePath === videoPath) continue;
-      const childManifest = await fs.promises
-        .readFile(recordingManifestPathForVideo(filePath), "utf8")
-        .then(JSON.parse)
-        .catch(() => null);
-      if (childManifest?.clip?.sourceRecordingId === recordingId) {
-        throw new Error("This clip has child clips. Remove or export them before trimming it.");
-      }
-    }
     const executable = resolveFfmpegPath();
     const probe = await probeChapters(executable, videoPath);
-    const startTime = Number(request.startTime);
-    const endTime = Number(request.endTime);
-    const nextManifest = manifest.clip
-      ? planClipTrim(manifest, startTime, endTime, probe.durationMs)
-      : planRecordingTrim(manifest, startTime, endTime, probe.durationMs, probe.chapters);
-    tempFolder = await fs.promises.mkdtemp(path.join(path.dirname(videoPath), ".labatar-trim-"));
-    const candidateVideoPath = path.join(tempFolder, "clip.mp4");
-    const candidateManifestPath = path.join(tempFolder, "clip.labatar.json");
-    await runFfmpeg(
-      buildClipExportFfmpegArgs({
-        sourcePath: videoPath,
-        startTime,
-        duration: endTime - startTime,
-        outputPath: candidateVideoPath,
-      }),
-    );
-    const candidateStat = await fs.promises.stat(candidateVideoPath);
-    const candidateProbe = await probeChapters(executable, candidateVideoPath);
-    if (
-      !candidateStat.isFile() ||
-      candidateStat.size === 0 ||
-      !Number.isFinite(candidateProbe.durationMs) ||
-      Math.abs(candidateProbe.durationMs - (endTime - startTime) * 1000) > 500 ||
-      candidateProbe.chapters.length > 0
-    ) {
-      throw new Error("The trimmed recording failed verification; the original was not replaced.");
+    const startTime = Math.round(Number(request.startTime) * 1000) / 1000;
+    const endTime = Math.round(Number(request.endTime) * 1000) / 1000;
+    // Validate the requested range before probing a seek position.
+    const validateRange = (start) =>
+      manifest.clip
+        ? planClipTrim(manifest, start, endTime, probe.durationMs)
+        : planRecordingTrim(manifest, start, endTime, probe.durationMs, probe.chapters);
+    validateRange(startTime);
+    const actualStart = fast
+      ? await probeFastTrimStart(executable, videoPath, startTime)
+      : startTime;
+    if (fast && actualStart < 0.05 && endTime * 1000 >= probe.durationMs - 50) {
+      throw new Error(
+        "The selected start snaps to the beginning. Choose a later start or use precise trim.",
+      );
     }
-    await fs.promises.writeFile(
-      candidateManifestPath,
-      JSON.stringify(nextManifest, null, 2),
-      "utf8",
-    );
-    await replaceClipAndRollback({
+    const nextManifest = validateRange(actualStart);
+    tempFolder = await fs.promises.mkdtemp(path.join(path.dirname(videoPath), ".labatar-trim-"));
+    const items = [];
+    const sourcePaths = await findRecordingFiles(folder);
+    const manifestsById = new Map();
+    for (const filePath of sourcePaths) {
+      if (filePath === videoPath) continue;
+      const linkedManifestPath = recordingManifestPathForVideo(filePath);
+      const content = await fs.promises.readFile(linkedManifestPath, "utf8").catch((error) => {
+        if (error?.code === "ENOENT") return null;
+        throw error;
+      });
+      if (content === null) continue;
+      let linkedManifest;
+      try {
+        linkedManifest = JSON.parse(content);
+      } catch {
+        continue;
+      }
+      if (typeof linkedManifest?.clip?.sourceRecordingId !== "string") continue;
+      const id = recordingIdForPath(filePath, folder);
+      const stat = await fs.promises.stat(filePath);
+      manifestsById.set(id, {
+        id,
+        videoPath: filePath,
+        manifestPath: linkedManifestPath,
+        originalStat: stat,
+        originalManifestContent: content,
+        manifest: linkedManifest,
+      });
+    }
+
+    const childrenByParent = new Map();
+    for (const child of manifestsById.values()) {
+      const parentId = child.manifest.clip.sourceRecordingId;
+      const children = childrenByParent.get(parentId) ?? [];
+      children.push(child);
+      childrenByParent.set(parentId, children);
+    }
+
+    let candidateNumber = 0;
+    const stageManifest = async (item, next) => {
+      item.candidateManifestPath = path.join(tempFolder, `item-${candidateNumber++}.labatar.json`);
+      await fs.promises.writeFile(
+        item.candidateManifestPath,
+        JSON.stringify(next, null, 2),
+        "utf8",
+      );
+    };
+    const encodeTrim = async ({
+      sourcePath,
+      outputPath,
+      localStart,
+      localEnd,
+      effectiveStart = localStart,
+      chapters,
+      creationTime,
+      fastCopy = false,
+    }) => {
+      const expectedDurationMs = Math.round((localEnd - effectiveStart) * 1000);
+      if (fastCopy) {
+        await runFfmpeg(
+          buildFastTrimFfmpegArgs({
+            sourcePath,
+            requestedStart: localStart,
+            requestedEnd: localEnd,
+            creationTime,
+            outputPath,
+          }),
+        );
+      } else {
+        await runFfmpeg(
+          buildClipExportFfmpegArgs({
+            sourcePath,
+            startTime: localStart,
+            duration: localEnd - localStart,
+            outputPath,
+          }),
+        );
+      }
+      if (chapters && (!fastCopy || chapters.length > 0)) {
+        await remuxTrimmedVideoWithChapters({
+          executable,
+          sourcePath: outputPath,
+          outputPath,
+          chapters,
+          durationMs: expectedDurationMs,
+          creationTime,
+        });
+      }
+      const stat = await fs.promises.stat(outputPath);
+      const result = await probeChapters(executable, outputPath);
+      if (
+        !stat.isFile() ||
+        stat.size === 0 ||
+        !Number.isFinite(result.durationMs) ||
+        Math.abs(result.durationMs - expectedDurationMs) > 500 ||
+        (chapters &&
+          (result.chapters.length !== chapters.length ||
+            chapters.some(
+              (chapter, index) =>
+                chapter.title !== result.chapters[index]?.title ||
+                Math.abs(chapter.startMs - result.chapters[index].startMs) > 100,
+            ))) ||
+        (creationTime &&
+          Math.abs(Date.parse(result.creationTime ?? "") - Date.parse(creationTime)) > 1000)
+      ) {
+        throw new Error(
+          "A trimmed recording or linked clip failed verification; nothing was replaced.",
+        );
+      }
+    };
+
+    const rootItem = {
+      id: recordingId,
       videoPath,
       manifestPath,
-      candidateVideoPath,
-      candidateManifestPath,
-      temporaryOriginalVideoPath: path.join(tempFolder, "original.mp4"),
-      temporaryOriginalManifestPath: path.join(tempFolder, "original.labatar.json"),
       originalStat,
       originalManifestContent,
+      manifest,
+    };
+    rootItem.candidateVideoPath = path.join(tempFolder, "item-root.mp4");
+    const mappedChapters = mapChaptersToTrim(probe.chapters, actualStart, endTime);
+    let shiftedCreationTime = null;
+    if (probe.creationTime && Number.isFinite(Date.parse(probe.creationTime))) {
+      shiftedCreationTime = new Date(
+        Date.parse(probe.creationTime) + actualStart * 1000,
+      ).toISOString();
+    }
+    await encodeTrim({
+      sourcePath: videoPath,
+      outputPath: rootItem.candidateVideoPath,
+      localStart: startTime,
+      localEnd: endTime,
+      effectiveStart: actualStart,
+      chapters: mappedChapters,
+      creationTime: shiftedCreationTime,
+      fastCopy: fast,
     });
-    return { recording: await getRecordedVideoForPath(videoPath) };
+    await stageManifest(rootItem, nextManifest);
+    rootItem.backupVideoPath = path.join(tempFolder, "original-root.mp4");
+    rootItem.backupManifestPath = path.join(tempFolder, "original-root.labatar.json");
+    items.push(rootItem);
+
+    const visitChildren = async (parentId, parentStart, parentEnd) => {
+      for (const child of childrenByParent.get(parentId) ?? []) {
+        if (child.visited) continue;
+        child.visited = true;
+        if (
+          clipTrimJobs.has(child.videoPath) ||
+          clipExportSourceCounts.has(child.videoPath) ||
+          gameChapterJobs.has(child.videoPath) ||
+          manualChapterClipJobs.has(child.videoPath)
+        ) {
+          throw new Error(
+            "Wait for linked clip processing to finish before trimming this recording.",
+          );
+        }
+        clipTrimJobs.add(child.videoPath);
+        lockedClipPaths.push(child.videoPath);
+        const mapping = planChildClipMapping(child.manifest.clip, parentStart, parentEnd);
+        const nextChildManifest = { ...child.manifest };
+        if (mapping.detached) {
+          nextChildManifest.clip = null;
+        } else {
+          nextChildManifest.clip = mapping.clip;
+          if (mapping.partial) {
+            const childProbe = await probeChapters(executable, child.videoPath);
+            // Cropping a clip that carries local match/analysis data needs a separate time remap.
+            planClipTrim(
+              child.manifest,
+              mapping.localStartTime,
+              mapping.localEndTime,
+              childProbe.durationMs,
+            );
+            child.candidateVideoPath = path.join(tempFolder, `item-${candidateNumber++}.mp4`);
+            let childCreationTime = null;
+            if (childProbe.creationTime && Number.isFinite(Date.parse(childProbe.creationTime))) {
+              childCreationTime = new Date(
+                Date.parse(childProbe.creationTime) + mapping.localStartTime * 1000,
+              ).toISOString();
+            }
+            await encodeTrim({
+              sourcePath: child.videoPath,
+              outputPath: child.candidateVideoPath,
+              localStart: mapping.localStartTime,
+              localEnd: mapping.localEndTime,
+              chapters: mapChaptersToTrim(
+                childProbe.chapters,
+                mapping.localStartTime,
+                mapping.localEndTime,
+              ),
+              creationTime: childCreationTime,
+            });
+            await visitChildren(child.id, mapping.localStartTime, mapping.localEndTime);
+          }
+        }
+        await stageManifest(child, nextChildManifest);
+        child.backupVideoPath = path.join(tempFolder, `original-${candidateNumber}.mp4`);
+        child.backupManifestPath = path.join(
+          tempFolder,
+          `original-${candidateNumber}.labatar.json`,
+        );
+        items.push(child);
+      }
+    };
+    await visitChildren(recordingId, actualStart, endTime);
+
+    await replaceTrimmedFiles(items);
+    return { recording: await getRecordedVideoForPath(videoPath), actualStartTime: actualStart };
   } catch (error) {
     preserveTempFolder = error?.preserveTempFolder === true;
     throw error;
   } finally {
-    clipTrimJobs.delete(videoPath);
+    for (const lockedPath of lockedClipPaths) clipTrimJobs.delete(lockedPath);
     if (tempFolder && !preserveTempFolder) {
       await fs.promises.rm(tempFolder, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -4745,8 +5040,6 @@ async function renameRecording(request = {}, updateManifest = null) {
   const recordingId = String(request.recordingId ?? "");
   const currentPath = resolveRecordingPath(recordingId);
   const currentStat = await fs.promises.stat(currentPath).catch(() => null);
-  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
-
   const manifestPath = recordingManifestPathForVideo(currentPath);
   const hasManifest = await fs.promises
     .access(manifestPath)
@@ -4760,6 +5053,13 @@ async function renameRecording(request = {}, updateManifest = null) {
       throw new Error("The recording metadata could not be read.");
     }
     updateManifest?.(manifest);
+  }
+  const youtubeOnly =
+    !currentStat?.isFile() &&
+    manifest?.youtubeMedia?.kind === "youtube" &&
+    Boolean(readYouTubeVideoUrl(manifest.youtubeUrl));
+  if (!currentStat?.isFile() && !youtubeOnly) {
+    throw new Error("The recording no longer exists.");
   }
 
   const requestedName = String(request.name ?? "").trim();
@@ -4787,7 +5087,7 @@ async function renameRecording(request = {}, updateManifest = null) {
   const nextName = path.basename(availableTargetPath);
   const targetManifestPath = recordingManifestPathForVideo(availableTargetPath);
 
-  await fs.promises.rename(currentPath, availableTargetPath);
+  if (!youtubeOnly) await fs.promises.rename(currentPath, availableTargetPath);
   let updatedLinkedManifests = [];
   try {
     if (hasManifest) {
@@ -4801,7 +5101,9 @@ async function renameRecording(request = {}, updateManifest = null) {
     for (const { manifestPath, originalContent } of updatedLinkedManifests.reverse()) {
       await fs.promises.writeFile(manifestPath, originalContent, "utf8").catch(() => undefined);
     }
-    await fs.promises.rename(availableTargetPath, currentPath).catch(() => undefined);
+    if (!youtubeOnly) {
+      await fs.promises.rename(availableTargetPath, currentPath).catch(() => undefined);
+    }
     if (hasManifest) {
       await fs.promises.rename(targetManifestPath, manifestPath).catch(() => undefined);
     }
@@ -4814,7 +5116,6 @@ async function reprocessAutomaticRecordingName(request = {}) {
   const recordingId = String(request.recordingId ?? "");
   const currentPath = resolveRecordingPath(recordingId);
   const currentStat = await fs.promises.stat(currentPath).catch(() => null);
-  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
   let manifest;
   try {
     manifest = JSON.parse(
@@ -4822,6 +5123,12 @@ async function reprocessAutomaticRecordingName(request = {}) {
     );
   } catch {
     throw new Error("The recording metadata could not be read.");
+  }
+  if (
+    !currentStat?.isFile() &&
+    (manifest?.youtubeMedia?.kind !== "youtube" || !readYouTubeVideoUrl(manifest.youtubeUrl))
+  ) {
+    throw new Error("The recording no longer exists.");
   }
   if (manifest.source !== "automatic") {
     throw new Error("Only automatic recordings can rebuild their names.");
@@ -4902,9 +5209,16 @@ async function deleteRecording(request = {}) {
   const recordingId = String(request.recordingId ?? "");
   const currentPath = resolveRecordingPath(recordingId);
   const currentStat = await fs.promises.stat(currentPath).catch(() => null);
-  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+  if (!currentStat?.isFile()) {
+    const manifest = JSON.parse(
+      await fs.promises.readFile(recordingManifestPathForVideo(currentPath), "utf8"),
+    );
+    if (manifest?.youtubeMedia?.kind !== "youtube" || !readYouTubeVideoUrl(manifest.youtubeUrl)) {
+      throw new Error("The recording no longer exists.");
+    }
+  }
 
-  await fs.promises.rm(currentPath, { force: true });
+  if (currentStat?.isFile()) await fs.promises.rm(currentPath, { force: true });
   await fs.promises.rm(recordingManifestPathForVideo(currentPath), { force: true });
   return { id: recordingId };
 }
@@ -4963,7 +5277,6 @@ async function setRecordingTags(request = {}) {
   const recordingId = String(request.recordingId ?? "");
   const currentPath = resolveRecordingPath(recordingId);
   const currentStat = await fs.promises.stat(currentPath).catch(() => null);
-  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
 
   const manifestPath = recordingManifestPathForVideo(currentPath);
   let manifest;
@@ -4978,6 +5291,12 @@ async function setRecordingTags(request = {}) {
       replays: [],
     };
   }
+  if (
+    !currentStat?.isFile() &&
+    (manifest?.youtubeMedia?.kind !== "youtube" || !readYouTubeVideoUrl(manifest.youtubeUrl))
+  ) {
+    throw new Error("The recording no longer exists.");
+  }
   manifest.tags = normalizeRecordingTags(request.tags);
   await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
   return getRecordedVideoForPath(currentPath);
@@ -4986,30 +5305,128 @@ async function setRecordingTags(request = {}) {
 async function setRecordingYouTubeLink(request = {}) {
   const recordingId = String(request.recordingId ?? "");
   const currentPath = resolveRecordingPath(recordingId);
-  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
-  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
-
+  const sourceEntry = await fs.promises.lstat(currentPath).catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  if (sourceEntry && !sourceEntry.isFile()) {
+    throw new Error("The recording must be a regular file.");
+  }
+  const currentStat = sourceEntry ? await fs.promises.stat(currentPath) : null;
   const youtubeUrl = request.url === null ? null : normalizeYouTubeVideoUrl(request.url);
   const manifestPath = recordingManifestPathForVideo(currentPath);
+  const manifestEntry = await fs.promises.lstat(manifestPath).catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  if (manifestEntry && !manifestEntry.isFile()) {
+    throw new Error("The recording metadata must be a regular file.");
+  }
+  const originalContent = await fs.promises.readFile(manifestPath, "utf8").catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
   let manifest;
   try {
-    manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      throw new Error("The recording metadata could not be read.");
+    manifest = originalContent === null ? null : JSON.parse(originalContent);
+  } catch {
+    throw new Error("The recording metadata could not be read.");
+  }
+  if (
+    !currentStat?.isFile() &&
+    (manifest?.youtubeMedia?.kind !== "youtube" || !readYouTubeVideoUrl(manifest.youtubeUrl))
+  ) {
+    throw new Error("The recording no longer exists.");
+  }
+  if (!youtubeUrl) {
+    if (!currentStat?.isFile()) {
+      throw new Error("A YouTube recording needs a video link. Delete its library entry instead.");
     }
-    manifest = {
+    if (!manifest) return getRecordedVideoForPath(currentPath);
+    delete manifest.youtubeUrl;
+    await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    return getRecordedVideoForPath(currentPath);
+  }
+
+  if (request.keepLocalVideo === true) {
+    if (!currentStat?.isFile()) {
+      throw new Error("The local video is no longer available; verify the YouTube timeline first.");
+    }
+    manifest ??= {
       schemaVersion: 1,
       outputPath: currentPath,
       metadata: null,
       games: [],
       replays: [],
     };
+    manifest.youtubeUrl = youtubeUrl;
+    await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    return getRecordedVideoForPath(currentPath);
   }
-  if (youtubeUrl) manifest.youtubeUrl = youtubeUrl;
-  else delete manifest.youtubeUrl;
-  await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
-  return getRecordedVideoForPath(currentPath);
+
+  const youtubeDurationMs = Math.round(Number(request.youtubeDurationSeconds) * 1000);
+  if (!Number.isFinite(youtubeDurationMs) || youtubeDurationMs <= 0) {
+    throw new Error("Play the embedded YouTube preview before replacing this recording.");
+  }
+  if (!currentStat?.isFile()) {
+    const sourceDurationMs = Number(manifest.youtubeMedia.durationMs);
+    if (Math.abs(sourceDurationMs - youtubeDurationMs) > 1000) {
+      throw new Error("The YouTube video's duration differs from the saved recording timeline.");
+    }
+    manifest.youtubeUrl = youtubeUrl;
+    await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    return getRecordedVideoForPath(currentPath);
+  }
+
+  if (
+    clipTrimJobs.has(currentPath) ||
+    clipExportSourceCounts.has(currentPath) ||
+    gameChapterJobs.has(currentPath) ||
+    manualChapterClipJobs.has(currentPath) ||
+    (obsState.recording.active &&
+      [obsState.recording.outputPath, activeObsRecording?.outputPath].includes(currentPath))
+  ) {
+    throw new Error("Wait for recording and clip processing to finish before replacing the video.");
+  }
+  clipTrimJobs.add(currentPath);
+  try {
+    const probe = await probeChapters(resolveFfmpegPath(), currentPath);
+    if (!Number.isFinite(probe.durationMs) || probe.durationMs <= 0) {
+      throw new Error("The recording duration could not be read.");
+    }
+    if (Math.abs(probe.durationMs - youtubeDurationMs) > 1000) {
+      throw new Error(
+        "The YouTube video and local recording have different durations. Keep the local file until their timelines match.",
+      );
+    }
+    manifest ??= {
+      schemaVersion: 1,
+      outputPath: currentPath,
+      metadata: null,
+      games: [],
+      replays: [],
+    };
+    manifest.youtubeUrl = youtubeUrl;
+    manifest.youtubeMedia = {
+      kind: "youtube",
+      durationMs: probe.durationMs,
+      chapters: probe.chapters,
+      creationTime: probe.creationTime,
+      migratedAt: new Date().toISOString(),
+    };
+    await replaceLocalRecordingWithYouTube({
+      videoPath: currentPath,
+      manifestPath,
+      originalStat: currentStat,
+      originalManifestContent: originalContent,
+      nextManifestContent: JSON.stringify(manifest, null, 2),
+    });
+    const recording = await getRecordedVideoForPath(currentPath);
+    if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+    return recording;
+  } finally {
+    clipTrimJobs.delete(currentPath);
+  }
 }
 
 async function saveRecordingAnalysis(request = {}) {
@@ -5046,10 +5463,114 @@ async function saveRecordingAnalysis(request = {}) {
   ) {
     throw new Error("Review and approve this automated video before processing it.");
   }
+  if (manifest.moveTake) {
+    const sequence = manifest.framebarSequence;
+    if (
+      !sequence ||
+      sequence.schemaVersion !== 1 ||
+      sequence.status !== "approved" ||
+      analysis.framebarSequenceId !== sequence.id
+    ) {
+      throw new Error(
+        "Approve and use the current framebar sequence before saving determinations.",
+      );
+    }
+  }
   manifest.analysis = analysis;
   if (manifest.moveTake && typeof manifest.moveTake === "object") {
     manifest.moveTake.validation = validateCapturedMoveTake(manifest.moveTake, analysis);
   }
+  await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  return getRecordedVideoForPath(currentPath);
+}
+
+async function saveRecordingFramebarSequence(request = {}) {
+  const recordingId = String(request.recordingId ?? "");
+  const currentPath = resolveRecordingPath(recordingId);
+  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
+  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+  const sequence = request.sequence;
+  if (
+    !sequence ||
+    sequence.schemaVersion !== 1 ||
+    typeof sequence.id !== "string" ||
+    !sequence.id.trim() ||
+    sequence.status !== "awaiting-review" ||
+    !Number.isFinite(sequence.duration) ||
+    !Number.isFinite(sequence.frameRate) ||
+    !Number.isFinite(sequence.sourceWidth) ||
+    !Number.isFinite(sequence.sourceHeight) ||
+    !Number.isInteger(sequence.sampledFrames) ||
+    sequence.sampledFrames <= 0 ||
+    !Array.isArray(sequence.segments) ||
+    sequence.segments.length === 0 ||
+    sequence.segments.some(
+      (segment) =>
+        !Number.isFinite(segment?.timestamp) ||
+        !Number.isInteger(segment?.frames) ||
+        segment.frames <= 0 ||
+        typeof segment.player1 !== "string" ||
+        typeof segment.player2 !== "string",
+    )
+  ) {
+    throw new Error("Invalid framebar sequence.");
+  }
+  const manifestPath = recordingManifestPathForVideo(currentPath);
+  let manifest;
+  try {
+    manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+  } catch {
+    throw new Error("The move take manifest could not be read.");
+  }
+  if (!manifest.moveTake) throw new Error("Framebar sequences are only saved for move takes.");
+  if (
+    manifest.moveTake.captureMethod === "automated" &&
+    manifest.moveTake.captureReviewStatus !== "approved-for-processing"
+  ) {
+    throw new Error("Review and approve this automated video before processing it.");
+  }
+  if (manifest.framebarSequence) {
+    manifest.framebarSequenceHistory = Array.isArray(manifest.framebarSequenceHistory)
+      ? [...manifest.framebarSequenceHistory, manifest.framebarSequence]
+      : [manifest.framebarSequence];
+  }
+  if (manifest.analysis) {
+    manifest.analysisHistory = Array.isArray(manifest.analysisHistory)
+      ? [...manifest.analysisHistory, manifest.analysis]
+      : [manifest.analysis];
+  }
+  manifest.framebarSequence = { ...sequence, status: "awaiting-review", reviewedAt: null };
+  manifest.analysis = null;
+  manifest.moveTake.validation = {
+    status: "unprocessed",
+    message: "Framebar sequence extracted; review and approve it before determining move data.",
+    expectedInputs: manifest.moveTake.expectedInputs ?? [],
+    observedInputs: [],
+    matchedAnalysisMoveId: null,
+    processedAt: null,
+  };
+  await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  return getRecordedVideoForPath(currentPath);
+}
+
+async function reviewRecordingFramebarSequence(request = {}) {
+  const recordingId = String(request.recordingId ?? "");
+  const action = String(request.action ?? "");
+  if (action !== "approve" && action !== "reject")
+    throw new Error("Invalid sequence review action.");
+  const currentPath = resolveRecordingPath(recordingId);
+  const currentStat = await fs.promises.stat(currentPath).catch(() => null);
+  if (!currentStat?.isFile()) throw new Error("The recording no longer exists.");
+  const manifestPath = recordingManifestPathForVideo(currentPath);
+  const manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+  if (!manifest.moveTake || !manifest.framebarSequence) {
+    throw new Error("Capture a framebar sequence before reviewing it.");
+  }
+  if (manifest.framebarSequence.id !== String(request.sequenceId ?? "")) {
+    throw new Error("The framebar sequence changed. Refresh the take before reviewing it.");
+  }
+  manifest.framebarSequence.status = action === "approve" ? "approved" : "rejected";
+  manifest.framebarSequence.reviewedAt = new Date().toISOString();
   await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
   return getRecordedVideoForPath(currentPath);
 }
@@ -5143,14 +5664,22 @@ async function getRecordedVideoForPath(
   filePath,
   folder = path.resolve(getObsSettings().recordDirectory),
 ) {
-  const stat = await fs.promises.stat(filePath);
+  const videoStat = await fs.promises.stat(filePath).catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  const stat = videoStat ?? (await fs.promises.stat(recordingManifestPathForVideo(filePath)));
   const id = path.relative(folder, filePath).split(path.sep).join("/");
   const manifest = await readRecordingManifest(filePath);
+  if (!videoStat && (!manifest.youtubeUrl || !manifest.youtubeDurationMs)) {
+    throw new Error("The recording no longer exists.");
+  }
   return {
     id,
     name: path.basename(filePath),
-    url: `labatar-media://recording/${encodeURIComponent(id)}`,
-    size: stat.size,
+    url: videoStat ? `labatar-media://recording/${encodeURIComponent(id)}` : manifest.youtubeUrl,
+    mediaKind: videoStat ? "local" : "youtube",
+    size: videoStat?.size ?? 0,
     modifiedAt: stat.mtimeMs,
     ...manifest,
   };
@@ -5242,6 +5771,7 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
     const endTime = Number(clip?.endTime);
     const moveTake = readMoveTake(manifest?.moveTake);
     return {
+      sessionId: typeof manifest?.sessionId === "string" ? manifest.sessionId : null,
       source:
         manifest?.source === "automatic"
           ? "automatic"
@@ -5256,6 +5786,15 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
         manifest?.analysis?.schemaVersion === 1
           ? manifest.analysis
           : null,
+      framebarSequence:
+        (analysisScope === "all" || (analysisScope === "move-takes" && moveTake)) &&
+        manifest?.framebarSequence?.schemaVersion === 1
+          ? manifest.framebarSequence
+          : null,
+      framebarSequenceHistory:
+        analysisScope === "all" && Array.isArray(manifest?.framebarSequenceHistory)
+          ? manifest.framebarSequenceHistory.filter((sequence) => sequence?.schemaVersion === 1)
+          : [],
       analysisHistory: (analysisScope === "all" && Array.isArray(manifest?.analysisHistory)
         ? manifest.analysisHistory
         : []
@@ -5278,11 +5817,23 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
           warnings: Array.isArray(analysis.warnings) ? analysis.warnings : [],
           processorVersion: analysis.processingSnapshot?.processorVersion ?? null,
           processorFingerprint: analysis.processingSnapshot?.processorFingerprint ?? null,
+          interpretationVersion:
+            typeof analysis.interpretationVersion === "string"
+              ? analysis.interpretationVersion
+              : null,
+          framebarSequenceId:
+            typeof analysis.framebarSequenceId === "string" ? analysis.framebarSequenceId : null,
         })),
       tags: normalizeRecordingTags(manifest?.tags, manifest?.metadata),
       replayPath: typeof manifest?.replayPath === "string" ? manifest.replayPath : null,
       replayFileName: typeof manifest?.replayFileName === "string" ? manifest.replayFileName : null,
       youtubeUrl: readYouTubeVideoUrl(manifest?.youtubeUrl),
+      youtubeDurationMs:
+        manifest?.youtubeMedia?.kind === "youtube" &&
+        Number.isFinite(manifest.youtubeMedia.durationMs) &&
+        manifest.youtubeMedia.durationMs > 0
+          ? manifest.youtubeMedia.durationMs
+          : null,
       moveTake,
       clip:
         typeof clip?.sourceRecordingId === "string" &&
@@ -5306,6 +5857,7 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
     };
   } catch {
     return {
+      sessionId: null,
       source: null,
       metadata: null,
       games: [],
@@ -5316,6 +5868,7 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
       replayPath: null,
       replayFileName: null,
       youtubeUrl: null,
+      youtubeDurationMs: null,
       moveTake: null,
       clip: null,
     };
@@ -5347,7 +5900,10 @@ async function findReplayFiles(folder) {
   return replayFiles.sort((left, right) => left.localeCompare(right));
 }
 
-const REPLAY_SCAN_CACHE_VERSION = 1;
+const REPLAY_SCAN_CACHE_VERSION = 2;
+const replayScanSupportMapHash = createHash("sha256")
+  .update(JSON.stringify(supportMap))
+  .digest("hex");
 
 let replayScanCache = {
   folderKey: null,
@@ -5394,6 +5950,7 @@ async function loadReplayScanCache(folder) {
         const stored = JSON.parse(await fs.promises.readFile(replayScanCachePath(folder), "utf8"));
         if (
           stored?.version !== REPLAY_SCAN_CACHE_VERSION ||
+          stored.supportMapHash !== replayScanSupportMapHash ||
           typeof stored.folder !== "string" ||
           path.resolve(stored.folder).toLowerCase() !== cache.folderKey ||
           !Array.isArray(stored.replayFiles) ||
@@ -5430,6 +5987,7 @@ async function saveReplayScanCache(cache) {
   const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
   const stored = {
     version: REPLAY_SCAN_CACHE_VERSION,
+    supportMapHash: replayScanSupportMapHash,
     folder: cache.folderPath,
     replayFiles: [...cache.replayFiles],
     ratingLogs: [...cache.ratingLogs].map(([key, entry]) => [
@@ -5463,6 +6021,7 @@ function replayFileFingerprint(stat) {
 
 let replayScanCount = 0;
 let replayStagingBusy = false;
+let replayImportBusy = false;
 ipcMain.handle("replays:get-cached-scan", async (_, folder) => {
   if (!folder || !fs.existsSync(folder)) return null;
   const resolvedFolder = path.resolve(folder);
@@ -5474,6 +6033,8 @@ ipcMain.handle("replays:get-cached-scan", async (_, folder) => {
 ipcMain.handle("replays:scan-folder", async (event, folder) => {
   if (replayStagingBusy)
     throw new Error("Replay staging is in progress. Try scanning again shortly.");
+  if (replayImportBusy)
+    throw new Error("Replay import is in progress. Try scanning again shortly.");
   if (!folder || !fs.existsSync(folder)) return { games: [], playerCounts: {}, duplicateCount: 0 };
   const resolvedFolder = path.resolve(folder);
   if (!fs.statSync(resolvedFolder).isDirectory()) {
@@ -5641,7 +6202,7 @@ async function hydrateFirstPortraitReplay(manifest) {
   const game = manifest.games?.find(
     (entry) => entry?.replay?.player1Character || entry?.metadata?.player1Character,
   );
-  if (!game || (game.replay?.player1 && game.replay?.player2)) return;
+  if (!game) return;
   const replayEntry = game.matchId
     ? manifest.replays?.find((entry) => entry.matchId === game.matchId)
     : null;
@@ -5668,17 +6229,28 @@ ipcMain.handle("recordings:list", async (_, request) => {
   await ensurePortraitLibrary();
   const portraitCatalog = await readPortraitCatalog(portraitLibraryRoot());
   await repairDanglingClipLinks(folder);
-  const files = await findRecordingFiles(folder);
+  const files = [
+    ...(await findRecordingFiles(folder)),
+    ...(await findYouTubeRecordingPaths(folder)),
+  ];
   const recordings = [];
   for (const filePath of files) {
-    const stat = await fs.promises.stat(filePath);
+    const videoStat = await fs.promises.stat(filePath).catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    const stat = videoStat ?? (await fs.promises.stat(recordingManifestPathForVideo(filePath)));
     const manifest = await readRecordingManifest(filePath, analysisScope);
+    if (!videoStat && (!manifest.youtubeUrl || !manifest.youtubeDurationMs)) continue;
     await hydrateFirstPortraitReplay(manifest);
     recordings.push({
       id: path.relative(folder, filePath).split(path.sep).join("/"),
       name: path.basename(filePath),
-      url: `labatar-media://recording/${encodeURIComponent(path.relative(folder, filePath).split(path.sep).join("/"))}`,
-      size: stat.size,
+      url: videoStat
+        ? `labatar-media://recording/${encodeURIComponent(path.relative(folder, filePath).split(path.sep).join("/"))}`
+        : manifest.youtubeUrl,
+      mediaKind: videoStat ? "local" : "youtube",
+      size: videoStat?.size ?? 0,
       modifiedAt: stat.mtimeMs,
       ...manifest,
     });
@@ -5697,6 +6269,20 @@ ipcMain.handle("recordings:list", async (_, request) => {
   }
   recordings.sort((left, right) => right.modifiedAt - left.modifiedAt);
   return { folder, recordings };
+});
+
+ipcMain.handle("recordings:import-combo-mp4", async () => {
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: "Import combo MP4",
+    properties: ["openFile"],
+    filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+  });
+  if (selection.canceled || !selection.filePaths[0]) return null;
+  const folder = path.resolve(getObsSettings().recordDirectory);
+  await fs.promises.mkdir(folder, { recursive: true });
+  const result = await importComboMp4(selection.filePaths[0], folder);
+  if (result.imported && canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+  return result.recordingId;
 });
 
 ipcMain.handle("replays:resolve-portraits", async (_, request) => {
@@ -5722,11 +6308,19 @@ ipcMain.handle("replays:resolve-portraits", async (_, request) => {
 
 ipcMain.handle("recordings:get-chapters", async (_, request) => {
   const videoPath = resolveRecordingPath(String(request?.recordingId ?? ""));
-  if (path.extname(videoPath).toLowerCase() !== ".mp4") return [];
   const stat = await fs.promises.stat(videoPath).catch(() => null);
-  if (!stat?.isFile()) throw new Error("The recording no longer exists.");
-  const { chapters } = await probeChapters(resolveFfmpegPath(), videoPath);
-  return chapters;
+  if (stat?.isFile()) {
+    if (path.extname(videoPath).toLowerCase() !== ".mp4") return [];
+    const { chapters } = await probeChapters(resolveFfmpegPath(), videoPath);
+    return chapters;
+  }
+  const manifest = JSON.parse(
+    await fs.promises.readFile(recordingManifestPathForVideo(videoPath), "utf8"),
+  );
+  if (manifest?.youtubeMedia?.kind !== "youtube" || !readYouTubeVideoUrl(manifest.youtubeUrl)) {
+    throw new Error("The recording no longer exists.");
+  }
+  return Array.isArray(manifest.youtubeMedia.chapters) ? manifest.youtubeMedia.chapters : [];
 });
 
 ipcMain.handle("recordings:frame-reader-open", async (event, request) => {
@@ -5750,6 +6344,11 @@ ipcMain.handle("recordings:get-work-state", () => [...recordingWork.values()]);
 
 const devArtworkRoot = () => path.join(app.getPath("userData"), "dev-artwork");
 const portraitLibraryRoot = () => path.join(app.getPath("userData"), "portraits");
+const uiArtworkPakEntries = new Map([
+  ["srcdata/munged/frames/levels~mode_replay~replay_controls~icons~frames~btnd.munged", "flow"],
+  ["srcdata/munged/frames/sprites~hud~player_panel~chakrahud~chakradot_1.munged", "pips"],
+]);
+const uiArtworkLibraryPath = (name) => path.join(portraitLibraryRoot(), "ui", `${name}.png`);
 const artworkJobs = new Map();
 let portraitLibraryInitialization = null;
 
@@ -5851,27 +6450,112 @@ async function extractDevArtworkPak(
     let decodedCount = 0;
     for (const entry of entries) {
       if (signal.aborted) throw createArtworkCancelledError();
-      const relativePath = portraitPakRelativePath(entry.name, filters);
-      if (!relativePath) continue;
+      const portraitPath = portraitPakRelativePath(entry.name, filters);
+      const uiArtworkName = uiArtworkPakEntries.get(entry.name.toLowerCase());
+      if (!portraitPath && !uiArtworkName) continue;
       if (entry.size > 16 * 1024 * 1024)
-        throw new Error(`Portrait asset is too large: ${entry.name}`);
+        throw new Error(`Artwork asset is too large: ${entry.name}`);
       report(
         "decoding",
-        `Decoding ${path.basename(relativePath)} from ${path.basename(pakFile)}...`,
+        `Decoding ${path.basename(portraitPath ?? entry.name)} from ${path.basename(pakFile)}...`,
       );
       const raw = await readDevArtworkPakBytes(handle, entry.size, entry.offset, signal);
-      const image = decodePortraitMunged(raw);
+      const image = uiArtworkName ? decodeMungedImage(raw) : decodePortraitMunged(raw);
       const imageBytes = encodePngRgba(image.width, image.height, image.pixels, deflateSync);
-      const decodedPath = path.join(
-        decodedDirectory,
-        ...relativePath.replace(/\.munged$/i, ".png").split("/"),
-      );
+      const decodedPath = uiArtworkName
+        ? path.join(decodedDirectory, "ui", `${uiArtworkName}.png`)
+        : path.join(decodedDirectory, ...portraitPath.replace(/\.munged$/i, ".png").split("/"));
       await fs.promises.mkdir(path.dirname(decodedPath), { recursive: true });
       await fs.promises.writeFile(decodedPath, imageBytes);
       decodedCount += 1;
-      report("decoding", `Decoded ${decodedSoFar + decodedCount} portrait images.`);
+      report("decoding", `Decoded ${decodedSoFar + decodedCount} artwork images.`);
     }
     return decodedCount;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function extractMatchingDevArtworkPak(
+  pakFile,
+  filenameContains,
+  outputDirectory,
+  createdFiles,
+  signal,
+  report,
+  decodedSoFar,
+) {
+  const handle = await fs.promises.open(pakFile, "r");
+  try {
+    const stat = await handle.stat();
+    const header = await readDevArtworkPakBytes(handle, 12, 0, signal);
+    const { directoryOffset, directoryBytes } = parsePakHeader(header, stat.size);
+    const directory = await readDevArtworkPakBytes(handle, directoryBytes, directoryOffset, signal);
+    const entries = parsePakDirectory(directory, stat.size);
+    let decodedCount = 0;
+    let skippedCount = 0;
+    for (const entry of entries) {
+      if (signal.aborted) throw createArtworkCancelledError();
+      const filename = entry.name.split(/[\\/~]/).at(-1) ?? "";
+      if (
+        (filenameContains !== "*" && !filename.toLowerCase().includes(filenameContains)) ||
+        !filename.toLowerCase().endsWith(".munged")
+      ) {
+        continue;
+      }
+      if (entry.size > 16 * 1024 * 1024) {
+        skippedCount += 1;
+        continue;
+      }
+      report("decoding", `Decoding ${filename} from ${path.basename(pakFile)}...`);
+      const raw = await readDevArtworkPakBytes(handle, entry.size, entry.offset, signal);
+      let imageBytes;
+      try {
+        const image = decodeMungedImage(raw);
+        imageBytes = encodePngRgba(image.width, image.height, image.pixels, deflateSync);
+      } catch (error) {
+        if (signal.aborted) throw createArtworkCancelledError();
+        skippedCount += 1;
+        continue;
+      }
+      const pakName = path
+        .basename(pakFile, path.extname(pakFile))
+        .replace(/[<>:"|?*]/g, "_")
+        .slice(0, 40);
+      const imageName =
+        filename
+          .replace(/\.munged$/i, "")
+          .replace(/[<>:"|?*]/g, "_")
+          .slice(0, 140) || "image";
+      const sourceHash = createHash("sha256")
+        .update(pakFile)
+        .update("\0")
+        .update(entry.name)
+        .digest("hex")
+        .slice(0, 12);
+      const outputName = `${pakName}__${imageName}__${sourceHash}`;
+      let suffix = 0;
+      while (true) {
+        const decodedPath = path.join(
+          outputDirectory,
+          `${outputName}${suffix === 0 ? "" : `__${suffix + 1}`}.png`,
+        );
+        if (path.dirname(decodedPath) !== outputDirectory) {
+          throw new Error("A PAK entry resolved outside the chosen output folder.");
+        }
+        try {
+          await fs.promises.writeFile(decodedPath, imageBytes, { flag: "wx" });
+          createdFiles.push(decodedPath);
+          break;
+        } catch (error) {
+          if (error?.code !== "EEXIST") throw error;
+          suffix += 1;
+        }
+      }
+      decodedCount += 1;
+      report("decoding", `Decoded ${decodedSoFar + decodedCount} matching images.`);
+    }
+    return { decodedCount, skippedCount };
   } finally {
     await handle.close();
   }
@@ -5885,6 +6569,14 @@ ipcMain.handle("artwork:get-status", async () => {
   await ensurePortraitLibrary();
   const catalog = await readPortraitCatalog(portraitLibraryRoot());
   const missing = missingPortraitArtwork(catalog);
+  for (const [name, label] of [
+    ["flow", "Flow icon"],
+    ["pips", "Pips icon"],
+  ]) {
+    if (!(await fs.promises.stat(uiArtworkLibraryPath(name)).catch(() => null))?.isFile()) {
+      missing.push(label);
+    }
+  }
   return {
     ready: missing.length === 0,
     missing,
@@ -5934,16 +6626,35 @@ ipcMain.handle("artwork:extract", async (event) => {
         pakFiles.length,
       );
     }
-    if (decodedCount === 0) throw new Error("No character or support portraits were found.");
-    report("saving", "Saving character and support portraits to the local library...");
+    if (decodedCount === 0) throw new Error("No character portraits were found.");
+    report("saving", "Saving portraits to the local library...");
     const savedPortraits = await publishPortraits(
       decodedDirectory,
       portraitLibraryRoot(),
       controller.signal,
     );
+    if (savedPortraits === 0) throw new Error("No character portraits were found.");
+    const importedUiArtwork = [];
+    for (const name of ["flow", "pips"]) {
+      const decodedIcon = path.join(decodedDirectory, "ui", `${name}.png`);
+      if (!(await fs.promises.stat(decodedIcon).catch(() => null))?.isFile()) continue;
+      const target = uiArtworkLibraryPath(name);
+      await fs.promises.mkdir(path.dirname(target), { recursive: true });
+      const temporaryPath = path.join(path.dirname(target), `.${name}-${randomUUID()}.tmp`);
+      try {
+        await fs.promises.copyFile(decodedIcon, temporaryPath);
+        if (controller.signal.aborted) throw createArtworkCancelledError();
+        await fs.promises.rename(temporaryPath, target);
+        importedUiArtwork.push(name);
+      } finally {
+        await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
+      }
+    }
     report("complete", `Imported ${savedPortraits} portraits.`, 1, 1);
     return {
       savedPortraits,
+      flowIconImported: importedUiArtwork.includes("flow"),
+      pipsIconImported: importedUiArtwork.includes("pips"),
     };
   } catch (error) {
     report(
@@ -5961,6 +6672,98 @@ ipcMain.handle("artwork:extract", async (event) => {
       await fs.promises.rm(runDirectory, { recursive: true, force: true }).catch((error) => {
         console.warn(`Could not remove temporary artwork files: ${error.message}`);
       });
+    }
+  }
+});
+ipcMain.handle("artwork:browse-matches", async (event, request = {}) => {
+  const filenameContains = String(request.filenameContains ?? "")
+    .trim()
+    .toLowerCase();
+  if (!filenameContains) throw new Error("Enter text to search in the image filenames.");
+  const selection = await dialog.showOpenDialog({
+    title: "Choose where to save decoded game images",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (selection.canceled || selection.filePaths.length === 0) {
+    return { cancelled: true, folderPath: null, decoded: 0, skipped: 0 };
+  }
+
+  const outputDirectory = await fs.promises.realpath(selection.filePaths[0]);
+
+  const runId = `browse-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const controller = new AbortController();
+  artworkJobs.set(runId, controller);
+  const report = (stage, message, current = null, total = null) =>
+    sendArtworkProgress(event, { runId, stage, message, current, total });
+  const createdFiles = [];
+  try {
+    report("preparing", "Finding game PAK files...");
+    const sourceDirectory = await artworkSourceDirectory();
+    const pakFiles = await findDevArtworkPakFiles(
+      sourceDirectory,
+      sourceDirectory,
+      controller.signal,
+    );
+    if (pakFiles.length === 0) throw new Error("No .pak files found in the source folder.");
+    let decoded = 0;
+    let skipped = 0;
+    report("extracting", `Searching ${pakFiles.length} PAK files for “${filenameContains}”...`);
+    for (const [index, pakFile] of pakFiles.entries()) {
+      if (controller.signal.aborted) throw createArtworkCancelledError();
+      const result = await extractMatchingDevArtworkPak(
+        pakFile,
+        filenameContains,
+        outputDirectory,
+        createdFiles,
+        controller.signal,
+        report,
+        decoded,
+      );
+      decoded += result.decodedCount;
+      skipped += result.skippedCount;
+      report(
+        "extracting",
+        `Searched ${index + 1}/${pakFiles.length} PAK files; decoded ${decoded} images.`,
+        index + 1,
+        pakFiles.length,
+      );
+    }
+    if (controller.signal.aborted) throw createArtworkCancelledError();
+    if (decoded === 0) {
+      throw new Error(`No decodable images had “${filenameContains}” in the filename.`);
+    }
+    const openError = await shell.openPath(outputDirectory);
+    if (controller.signal.aborted) throw createArtworkCancelledError();
+    if (openError) {
+      throw new Error(
+        `Images were saved in ${outputDirectory}, but the folder could not be opened: ${openError}`,
+      );
+    }
+    report(
+      "complete",
+      `Opened ${decoded} decoded images. Skipped ${skipped} unsupported files.`,
+      1,
+      1,
+    );
+    return { cancelled: false, folderPath: outputDirectory, decoded, skipped };
+  } catch (error) {
+    report(
+      controller.signal.aborted ? "cancelled" : "error",
+      controller.signal.aborted
+        ? "Artwork extraction cancelled."
+        : error instanceof Error
+          ? error.message
+          : String(error),
+    );
+    throw error;
+  } finally {
+    artworkJobs.delete(runId);
+    if (controller.signal.aborted) {
+      for (const filePath of createdFiles) {
+        if (path.dirname(filePath) === outputDirectory) {
+          await fs.promises.rm(filePath, { force: true }).catch(() => undefined);
+        }
+      }
     }
   }
 });
@@ -5993,13 +6796,17 @@ ipcMain.handle("recordings:export-clip", async (_, request) => {
 });
 ipcMain.handle("recordings:trim-clip", async (_, request) => {
   const workId = `clip-trim:${randomUUID()}`;
-  let fileName = "Clip";
+  let fileName = "Recording";
   try {
     fileName = path.basename(resolveRecordingPath(String(request?.recordingId ?? "")));
   } catch {
     // The trim call will report an invalid ID.
   }
-  setRecordingWork(workId, { title: "Trimming clip", fileName, detail: "Replacing clip" });
+  setRecordingWork(workId, {
+    title: "Trimming recording",
+    fileName,
+    detail: "Replacing recording and updating linked clips",
+  });
   try {
     return await trimRecordingClip(request);
   } finally {
@@ -6022,22 +6829,271 @@ ipcMain.handle("recordings:open-youtube-studio", async (_, request) => {
   const filePath = resolveRecordingPath(String(request?.recordingId ?? ""));
   const stat = await fs.promises.stat(filePath).catch(() => null);
   if (!stat?.isFile()) throw new Error("The recording no longer exists.");
+  if (typeof request?.title === "string" && request.title.trim()) {
+    clipboard.writeText(request.title.trim());
+  }
   await shell.openExternal("https://studio.youtube.com/");
-  shell.showItemInFolder(filePath);
+});
+const youtubeConnectionsChanging = new Set();
+function ensureYouTubeConnectionCanChange(destination = null) {
+  const busy = [...recordingWork.values()].some(
+    (work) =>
+      work.kind === "youtube-upload" &&
+      ["queued", "uploading"].includes(work.phase) &&
+      (destination === null || work.destination === destination),
+  );
+  if (
+    busy ||
+    (destination === null
+      ? youtubeConnectionsChanging.size > 0
+      : youtubeConnectionsChanging.has(destination))
+  ) {
+    throw new Error(
+      "Wait for queued YouTube uploads or account changes to finish before changing this account.",
+    );
+  }
+}
+ipcMain.handle("recordings:youtube-upload-status", (_, request) =>
+  youtubeUploader.status(request?.destination ?? "sets"),
+);
+ipcMain.handle("recordings:youtube-configure", (_, request) => {
+  ensureYouTubeConnectionCanChange();
+  return youtubeUploader.configure(request);
+});
+ipcMain.handle("recordings:youtube-connect", async (_, request) => {
+  const destination = request?.destination ?? "sets";
+  ensureYouTubeConnectionCanChange(destination);
+  youtubeConnectionsChanging.add(destination);
+  try {
+    return await youtubeUploader.connect(destination);
+  } finally {
+    youtubeConnectionsChanging.delete(destination);
+  }
+});
+ipcMain.handle("recordings:youtube-disconnect", (_, request) => {
+  const destination = request?.destination ?? "sets";
+  ensureYouTubeConnectionCanChange(destination);
+  return youtubeUploader.disconnect(destination);
+});
+const youtubeUploadQueue = [];
+const youtubeUploadCancelledDuringValidation = new Set();
+let activeYouTubeUploadJob = null;
+
+function updateYouTubeQueueCards() {
+  youtubeUploadQueue.forEach((job, index) => {
+    setRecordingWork(job.workId, {
+      detail: `Waiting in queue (${index + 1} of ${youtubeUploadQueue.length})`,
+    });
+  });
+}
+
+function startNextYouTubeUpload() {
+  if (activeYouTubeUploadJob || youtubeUploadQueue.length === 0) return;
+  const job = youtubeUploadQueue.shift();
+  activeYouTubeUploadJob = job;
+  updateYouTubeQueueCards();
+  setRecordingWork(job.workId, {
+    phase: "uploading",
+    title: `Uploading to ${job.request.destination === "combos" ? "Labatar" : "Sets"} YouTube`,
+    detail: `Sending video to ${job.request.destination === "combos" ? "Labatar" : "sets"} account`,
+    completed: 0,
+    total: job.fileSize,
+  });
+  void (async () => {
+    try {
+      const current = await fs.promises.stat(job.filePath);
+      if (current.size !== job.fileSize || current.mtimeMs !== job.modifiedAt) {
+        throw new Error("The recording changed while waiting in the upload queue.");
+      }
+      if (job.cancelRequested) throw new Error("Upload cancelled.");
+      const result = await youtubeUploader.upload({
+        destination: job.request.destination,
+        filePath: job.filePath,
+        title: job.request.title,
+        description: job.request.description,
+        tags: job.request.tags,
+        privacyStatus: job.request.privacyStatus,
+        publishAt: job.request.publishAt,
+        madeForKids: job.request.madeForKids,
+        shouldCancel: () => job.cancelRequested,
+        onProgress: (progress) => {
+          setRecordingWork(job.workId, {
+            completed: progress.uploadedBytes,
+            total: progress.totalBytes,
+            detail:
+              progress.uploadedBytes >= progress.totalBytes
+                ? "Finishing upload with YouTube"
+                : `${Math.round(progress.uploadedBytes / 1024 / 1024)} of ${Math.round(progress.totalBytes / 1024 / 1024)} MB sent`,
+          });
+        },
+      });
+      clearRecordingWork(job.workId);
+      job.resolve({ ...result, url: `https://www.youtube.com/watch?v=${result.videoId}` });
+    } catch (error) {
+      if (
+        job.cancelRequested ||
+        error?.message === "Upload cancelled." ||
+        error?.name === "AbortError"
+      ) {
+        clearRecordingWork(job.workId);
+      } else {
+        setRecordingWork(job.workId, {
+          phase: "failed",
+          title: "YouTube upload failed",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+      job.reject(error);
+    } finally {
+      clipTrimJobs.delete(job.filePath);
+      activeYouTubeUploadJob = null;
+      startNextYouTubeUpload();
+    }
+  })();
+}
+
+ipcMain.handle("recordings:youtube-upload", async (_, request) => {
+  if (!["sets", "combos"].includes(request?.destination)) {
+    throw new Error("Choose a YouTube destination before uploading.");
+  }
+  if (youtubeConnectionsChanging.has(request.destination)) {
+    throw new Error(`Wait for the ${request.destination} account connection to finish.`);
+  }
+  if (!youtubeUploader.status(request.destination).connected) {
+    throw new Error(
+      `Connect the ${request.destination === "combos" ? "Labatar" : "sets"} YouTube account before uploading.`,
+    );
+  }
+  const recordingId = String(request?.recordingId ?? "");
+  const workId = `youtube-upload:${recordingId}`;
+  if (["queued", "uploading"].includes(recordingWork.get(workId)?.phase)) {
+    throw new Error("This recording is already queued for YouTube.");
+  }
+  setRecordingWork(workId, {
+    kind: "youtube-upload",
+    phase: "queued",
+    destination: request.destination,
+    recordingId,
+    title: `Queued for ${request.destination === "combos" ? "Labatar" : "Sets"} YouTube`,
+    fileName: path.basename(recordingId),
+    detail: "Checking recording",
+    completed: undefined,
+    total: undefined,
+  });
+  let filePath;
+  let entry;
+  try {
+    filePath = resolveRecordingPath(recordingId);
+    entry = await fs.promises.lstat(filePath).catch(() => null);
+    if (!entry?.isFile() || !filePath.toLowerCase().endsWith(".mp4")) {
+      throw new Error("Choose a local MP4 recording to upload.");
+    }
+    if (youtubeUploadCancelledDuringValidation.delete(recordingId)) {
+      throw new Error("Upload cancelled.");
+    }
+    if (
+      clipTrimJobs.has(filePath) ||
+      clipExportSourceCounts.has(filePath) ||
+      gameChapterJobs.has(filePath) ||
+      manualChapterClipJobs.has(filePath) ||
+      (obsState.recording.active &&
+        [obsState.recording.outputPath, activeObsRecording?.outputPath].includes(filePath))
+    ) {
+      throw new Error("Wait for recording and clip processing to finish before uploading.");
+    }
+  } catch (error) {
+    const cancelled = youtubeUploadCancelledDuringValidation.delete(recordingId);
+    if (cancelled || error?.message === "Upload cancelled.") {
+      clearRecordingWork(workId);
+      throw new Error("Upload cancelled.");
+    }
+    setRecordingWork(workId, {
+      phase: "failed",
+      title: "YouTube upload failed",
+      detail: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+  clipTrimJobs.add(filePath);
+  return new Promise((resolve, reject) => {
+    youtubeUploadQueue.push({
+      workId,
+      recordingId,
+      filePath,
+      fileSize: entry.size,
+      modifiedAt: entry.mtimeMs,
+      request,
+      resolve,
+      reject,
+      cancelRequested: false,
+    });
+    updateYouTubeQueueCards();
+    startNextYouTubeUpload();
+  });
+});
+ipcMain.handle("recordings:youtube-upload-cancel", (_, request) => {
+  const recordingId = String(request?.recordingId ?? activeYouTubeUploadJob?.recordingId ?? "");
+  if (activeYouTubeUploadJob?.recordingId === recordingId) {
+    activeYouTubeUploadJob.cancelRequested = true;
+    youtubeUploader.cancel();
+    return;
+  }
+  const index = youtubeUploadQueue.findIndex((job) => job.recordingId === recordingId);
+  if (index < 0) {
+    if (recordingWork.get(`youtube-upload:${recordingId}`)?.phase === "queued") {
+      youtubeUploadCancelledDuringValidation.add(recordingId);
+    }
+    return;
+  }
+  const [job] = youtubeUploadQueue.splice(index, 1);
+  clipTrimJobs.delete(job.filePath);
+  clearRecordingWork(job.workId);
+  job.reject(new Error("Upload cancelled."));
+  updateYouTubeQueueCards();
+});
+ipcMain.handle("recordings:youtube-upload-dismiss-error", (_, request) => {
+  const workId = `youtube-upload:${String(request?.recordingId ?? "")}`;
+  if (recordingWork.get(workId)?.phase === "failed") clearRecordingWork(workId);
+});
+ipcMain.handle("recordings:open-youtube-terms", () =>
+  shell.openExternal("https://www.youtube.com/t/terms"),
+);
+ipcMain.handle("recordings:open-youtube-url", (_, request) =>
+  shell.openExternal(normalizeYouTubeVideoUrl(request?.url)),
+);
+ipcMain.handle("recordings:youtube-replacement-info", async (_, request) => {
+  const videoPath = resolveRecordingPath(String(request?.recordingId ?? ""));
+  const stat = await fs.promises.stat(videoPath).catch(() => null);
+  if (stat?.isFile()) {
+    const probe = await probeChapters(resolveFfmpegPath(), videoPath);
+    if (!Number.isFinite(probe.durationMs) || probe.durationMs <= 0) {
+      throw new Error("The recording duration could not be read.");
+    }
+    return { durationMs: probe.durationMs, hasLocalVideo: true };
+  }
+  const manifest = await readRecordingManifest(videoPath, "none");
+  if (!manifest.youtubeUrl || !manifest.youtubeDurationMs) {
+    throw new Error("The recording no longer exists.");
+  }
+  return { durationMs: manifest.youtubeDurationMs, hasLocalVideo: false };
 });
 ipcMain.handle("recordings:set-youtube-link", async (_, request) =>
   setRecordingYouTubeLink(request),
 );
 ipcMain.handle("recordings:open-youtube-video", async (_, request) => {
   const filePath = resolveRecordingPath(String(request?.recordingId ?? ""));
-  const stat = await fs.promises.stat(filePath).catch(() => null);
-  if (!stat?.isFile()) throw new Error("The recording no longer exists.");
   const { youtubeUrl } = await readRecordingManifest(filePath, "none");
   if (!youtubeUrl) throw new Error("This recording has no linked YouTube video.");
   await shell.openExternal(youtubeUrl);
 });
 ipcMain.handle("recordings:set-tags", async (_, request) => setRecordingTags(request));
 ipcMain.handle("recordings:save-analysis", async (_, request) => saveRecordingAnalysis(request));
+ipcMain.handle("recordings:save-framebar-sequence", async (_, request) =>
+  saveRecordingFramebarSequence(request),
+);
+ipcMain.handle("recordings:review-framebar-sequence", async (_, request) =>
+  reviewRecordingFramebarSequence(request),
+);
 ipcMain.handle("recordings:set-move-evidence", async (_, request) => setMoveTakeEvidence(request));
 ipcMain.handle("recordings:review-capture", async (_, request) =>
   reviewAutomaticMoveVideo(request),
@@ -6110,6 +7166,99 @@ ipcMain.on("recordings:start-drag", async (event, request) => {
   } catch (error) {
     console.warn("Could not start recording drag:", obsErrorMessage(error));
   }
+});
+ipcMain.handle("catalog:publish-combo", async (event, request) => {
+  const startedAt = Date.now();
+  try {
+    const result = await publishCombo(request, BrowserWindow.fromWebContents(event.sender), () =>
+      startupDiagnostic("catalog-publish-connection-reset"),
+    );
+    startupDiagnostic("catalog-publish-complete", { durationMs: Date.now() - startedAt });
+    return result;
+  } catch (error) {
+    startupDiagnostic("catalog-publish-failed", {
+      durationMs: Date.now() - startedAt,
+      error: obsErrorMessage(error),
+    });
+    throw error;
+  }
+});
+ipcMain.handle("combo-candidates:status", () => candidateServiceStatus());
+ipcMain.handle("combo-candidates:submit", async (event, request) => {
+  const recordingPath = resolveRecordingPath(String(request?.recordingId ?? ""));
+  return submitComboCandidate({
+    recordingPath,
+    combo: request?.combo,
+    originCandidateId: request?.originCandidateId,
+    onProgress: (progress) => {
+      if (!event.sender.isDestroyed())
+        event.sender.send("combo-candidates:upload-progress", progress);
+    },
+  });
+});
+ipcMain.handle("combo-candidates:list", async (event, request) => {
+  const startedAt = Date.now();
+  try {
+    const result = await listComboCandidates(
+      BrowserWindow.fromWebContents(event.sender),
+      undefined,
+      undefined,
+      () => startupDiagnostic("candidate-list-connection-reset"),
+      request?.interactive === true,
+    );
+    startupDiagnostic("candidate-list-complete", { durationMs: Date.now() - startedAt });
+    return result;
+  } catch (error) {
+    startupDiagnostic("candidate-list-failed", {
+      durationMs: Date.now() - startedAt,
+      error: obsErrorMessage(error),
+    });
+    throw error;
+  }
+});
+ipcMain.handle("combo-candidates:approve", async (event, request) => {
+  const startedAt = Date.now();
+  try {
+    const result = await approveComboCandidate(
+      BrowserWindow.fromWebContents(event.sender),
+      request?.id,
+    );
+    startupDiagnostic("candidate-approve-complete", { durationMs: Date.now() - startedAt });
+    return result;
+  } catch (error) {
+    startupDiagnostic("candidate-approve-failed", {
+      durationMs: Date.now() - startedAt,
+      error: obsErrorMessage(error),
+    });
+    throw error;
+  }
+});
+ipcMain.handle("combo-candidates:reject", (event, request) =>
+  rejectComboCandidate(
+    BrowserWindow.fromWebContents(event.sender),
+    request?.id,
+    request?.reason ?? "",
+  ),
+);
+ipcMain.handle("combo-candidates:uploaded", (event, request) =>
+  markComboCandidateUploaded(
+    BrowserWindow.fromWebContents(event.sender),
+    request?.id,
+    request?.youtubeUrl,
+  ),
+);
+ipcMain.handle("combo-candidates:remove-uploaded", (event, request) =>
+  removeUploadedComboCandidate(BrowserWindow.fromWebContents(event.sender), request?.id),
+);
+ipcMain.handle("combo-candidates:download", async (event, request) => {
+  const recordingId = await downloadComboCandidate(
+    BrowserWindow.fromWebContents(event.sender),
+    request?.id,
+    getObsSettings().recordDirectory,
+    request?.fileSize,
+  );
+  if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+  return recordingId;
 });
 
 function safeZipName(value) {
@@ -6229,6 +7378,39 @@ ipcMain.handle("replays:get-folder", () => {
   return getReplayFolder();
 });
 
+async function runReplayImport(paths) {
+  if (replayStagingBusy || replayImportBusy) {
+    throw new Error("Another replay operation is in progress. Try again shortly.");
+  }
+  const deadline = Date.now() + 30000;
+  while (replayScanCount > 0) {
+    if (Date.now() >= deadline)
+      throw new Error("The replay scan is still running. Try again when it finishes.");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (replayStagingBusy || replayImportBusy) {
+    throw new Error("Another replay operation is in progress. Try again shortly.");
+  }
+  replayImportBusy = true;
+  try {
+    return await importReplays(paths, getReplayFolder());
+  } finally {
+    replayImportBusy = false;
+  }
+}
+
+ipcMain.handle("replays:import-dropped", (_, paths) => runReplayImport(paths));
+
+ipcMain.handle("replays:choose-import", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Import replay files or ZIP archives",
+    properties: ["openFile", "multiSelections"],
+    filters: [{ name: "Replay files and ZIP archives", extensions: ["dlr", "zip"] }],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return runReplayImport(result.filePaths);
+});
+
 ipcMain.handle("replays:get-game-folder-status", () => getGameFolderStatus());
 
 ipcMain.handle("replays:select-folder", async () => {
@@ -6255,12 +7437,29 @@ function createWindow() {
   const window = new BrowserWindow({
     width: 1200,
     height: 800,
+    icon: path.join(__dirname, "assets", "icon.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+  window.webContents.session.webRequest.onBeforeSendHeaders(
+    {
+      urls: ["https://www.youtube.com/embed/*", "https://www.youtube-nocookie.com/embed/*"],
+      types: ["subFrame"],
+    },
+    (details, callback) => {
+      const requestHeaders = { ...details.requestHeaders };
+      for (const name of Object.keys(requestHeaders)) {
+        if (name.toLowerCase() === "referer") delete requestHeaders[name];
+      }
+      requestHeaders.Referer = "https://com.labden.labatar/";
+      callback({
+        requestHeaders,
+      });
+    },
+  );
   mainWindow = window;
   latestRendererSnapshot = null;
   latestRendererSnapshotAt = null;
@@ -6281,6 +7480,7 @@ function createWindow() {
         snapshotAgeMs:
           latestRendererSnapshotAt == null ? null : Date.now() - latestRendererSnapshotAt,
         renderer: latestRendererSnapshot,
+        mediaStreams: getMediaStreamMetrics(),
         processes,
       };
       rendererProfileDiagnostic("sample", lastProfileSample);
@@ -6408,6 +7608,19 @@ void app.whenReady().then(() => {
         return new Response(await fs.promises.readFile(filePath), {
           headers: { "Content-Type": "image/png", "Cache-Control": "no-store" },
         });
+      }
+      if (url.hostname === "artwork" && /^\/(flow|pips)\.png$/.test(url.pathname)) {
+        const filePath = uiArtworkLibraryPath(url.pathname.slice(1, -4));
+        const stat = await fs.promises.stat(filePath);
+        if (!stat.isFile() || stat.size > 1024 * 1024) {
+          return new Response("Not found", { status: 404 });
+        }
+        return new Response(await fs.promises.readFile(filePath), {
+          headers: { "Content-Type": "image/png", "Cache-Control": "no-store" },
+        });
+      }
+      if (url.hostname === "candidate") {
+        return previewComboCandidate(url.pathname.replace(/^\/+/, ""), request);
       }
       if (url.hostname !== "recording") return new Response("Not found", { status: 404 });
       const filePath = resolveRecordingPath(url.pathname.replace(/^\/+/, ""));

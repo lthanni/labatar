@@ -11,7 +11,7 @@
     "web:dev": "vp dev web",
     "web:build": "vp build web",
     "web:preview": "vp preview web",
-    "electron:build": "vp run build && electron-builder --publish never",
+    "electron:build": "node electron/check-dist.cjs && vp run build && electron-builder --publish never",
     "preview": "vp preview",
     "prepare": "vp config"
   },
@@ -63,6 +63,7 @@
       "package.json"
     ],
     "win": {
+      "icon": "electron/assets/icon.ico",
       "target": "nsis"
     },
     "nsis": {

@@ -12,6 +12,7 @@ import {
   FormControl,
   FormControlLabel,
   IconButton,
+  InputAdornment,
   InputLabel,
   LinearProgress,
   List,
@@ -35,8 +36,11 @@ import {
 } from "@mui/material";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import YouTubeIcon from "@mui/icons-material/YouTube";
 import type { RecordedVideo, RecordingTagCategory, RecordingTags } from "./recording-types";
+import { processMoveTake } from "./process-move-take";
 import { timelineChapterMarkers, type RecordingChapter } from "./recording-chapters";
 import type {
   RecordingAnalysisDiagnosticFrame,
@@ -70,12 +74,7 @@ import {
 } from "./tech-types";
 import type { TechCatalog, TechCombo, TechMove } from "./tech-types";
 import { resolveFlowStance } from "./common-tech-moves";
-import {
-  isDirectionalButtonFollowup,
-  moveNotationsMatch,
-  normalizeMoveNotation,
-  stanceFollowupMatches,
-} from "./move-notation";
+import { moveNotationsMatch, normalizeMoveNotation, stanceFollowupMatches } from "./move-notation";
 import { inputButtonDisplayColors, inputButtonSlotRatios } from "./input-display-config";
 import {
   buildRecordingDisplayRows,
@@ -88,6 +87,18 @@ import {
 import { useObsRecording } from "./ObsRecordingContext";
 import { CalibrationNumberField } from "./CalibrationNumberField";
 import { RecordingPortraitMatchupView } from "./RecordingPortraitMatchup";
+import {
+  YouTubeRecordingPlayer,
+  youtubeVideoId,
+  type YouTubePlaybackHandle,
+} from "./YouTubeRecordingPlayer";
+import {
+  forgetPendingYouTubeUpload,
+  pendingYouTubeUploadsChangedEvent,
+  pendingYouTubeUploadUrl,
+  readPendingYouTubeUploads,
+  savePendingYouTubeUpload,
+} from "./youtube-pending-uploads";
 
 function readTechCatalog(): TechCatalog {
   try {
@@ -121,6 +132,94 @@ function readTechCatalog(): TechCatalog {
   }
 }
 
+function relinkTechRecording(previousId: string, nextId: string) {
+  if (!previousId || previousId === nextId) return;
+  try {
+    const stored = JSON.parse(localStorage.getItem(techCatalogStorageKey) ?? "null");
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return;
+    let changed = false;
+    const relinkMeasurements = (value: unknown) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+      let mapChanged = false;
+      const next = Object.fromEntries(
+        Object.entries(value).map(([field, entry]) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+            return [field, entry];
+          }
+          const measurement = entry as Record<string, unknown>;
+          if (measurement.recordingId !== previousId) return [field, entry];
+          mapChanged = true;
+          return [field, { ...measurement, recordingId: nextId }];
+        }),
+      );
+      if (mapChanged) changed = true;
+      return mapChanged ? next : value;
+    };
+    const nextCatalog = Object.fromEntries(
+      Object.entries(stored).map(([character, value]) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          return [character, value];
+        }
+        const data = value as Record<string, unknown>;
+        let changedCharacter = false;
+        let changedCombos = false;
+        const combos = Array.isArray(data.combos)
+          ? data.combos.map((entry) => {
+              if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+              const combo = entry as Record<string, unknown>;
+              const recordingIds = Array.isArray(combo.recordingIds)
+                ? combo.recordingIds.map((id) => (id === previousId ? nextId : id))
+                : combo.recordingIds;
+              const relinkedRecordingId = combo.recordingId === previousId;
+              const relinkedRecordingIds =
+                Array.isArray(combo.recordingIds) &&
+                combo.recordingIds.some((id) => id === previousId);
+              if (!relinkedRecordingId && !relinkedRecordingIds) return entry;
+              changed = true;
+              changedCharacter = true;
+              changedCombos = true;
+              return {
+                ...combo,
+                ...(relinkedRecordingId ? { recordingId: nextId } : {}),
+                ...(relinkedRecordingIds ? { recordingIds } : {}),
+              };
+            })
+          : data.combos;
+        const moves = Array.isArray(data.moves)
+          ? data.moves.map((entry) => {
+              if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+              const move = entry as Record<string, unknown>;
+              const evidence = relinkMeasurements(move.evidence);
+              if (evidence === move.evidence) return entry;
+              changedCharacter = true;
+              return { ...move, evidence };
+            })
+          : data.moves;
+        const supportMoves = Array.isArray(data.supportMoves)
+          ? data.supportMoves.map((entry) => {
+              if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+              const supportMove = entry as Record<string, unknown>;
+              const sources = relinkMeasurements(supportMove.sources);
+              const measurements = relinkMeasurements(supportMove.measurements);
+              if (sources === supportMove.sources && measurements === supportMove.measurements) {
+                return entry;
+              }
+              changedCharacter = true;
+              return { ...supportMove, sources, measurements };
+            })
+          : data.supportMoves;
+        if (changedCombos) changedCharacter = true;
+        return [character, changedCharacter ? { ...data, combos, moves, supportMoves } : value];
+      }),
+    );
+    if (!changed) return;
+    localStorage.setItem(techCatalogStorageKey, JSON.stringify(nextCatalog));
+    window.dispatchEvent(new Event(techCatalogUpdatedEvent));
+  } catch {
+    // A local catalog issue must not undo a successful recording rename.
+  }
+}
+
 function formatFileSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -133,6 +232,73 @@ function formatModifiedAt(timestamp: number) {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function formatYouTubeTitle(recording: RecordedVideo) {
+  const players = recording.portraitMatchup?.players;
+  if (!players) return recording.name.replace(/\.[^.]+$/, "");
+  const formatPlayer = (player: (typeof players)[number]) =>
+    `${player.playerName} (${player.character}/${player.support ?? "None"})`;
+  const replayByMatch = new Map(recording.replays.map((entry) => [entry.matchId, entry.replay]));
+  const firstGame = recording.games[0];
+  const setGames = firstGame
+    ? recording.games.filter(
+        (game) => game.lobbyId === firstGame.lobbyId && game.setNumber === firstGame.setNumber,
+      )
+    : [];
+  const wins = new Map<string, number>();
+  for (const game of setGames) {
+    const replay = game.replay ?? replayByMatch.get(game.matchId);
+    if (!replay || typeof replay !== "object") continue;
+    const winner = (replay as { winner?: unknown }).winner;
+    if (typeof winner !== "string" || !winner.trim()) continue;
+    const winnerKey = winner.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+    wins.set(winnerKey, (wins.get(winnerKey) ?? 0) + 1);
+  }
+  const setWinnerWins = Math.max(0, ...wins.values());
+  const ftLabel = setWinnerWins > 0 ? ` FT${setWinnerWins}` : "";
+  return `${formatPlayer(players[0])} vs ${formatPlayer(players[1])}${ftLabel}`;
+}
+
+function parseYouTubeTags(value: string): string[] {
+  return value
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+}
+
+function youtubeTagCharacterCount(tags: string[]): number {
+  return (
+    tags.reduce((count, tag) => count + tag.length + (/\s/.test(tag) ? 2 : 0), 0) +
+    Math.max(0, tags.length - 1)
+  );
+}
+
+function setYouTubeHashtags(
+  recording: RecordedVideo,
+  byId: ReadonlyMap<string, RecordedVideo>,
+): string[] {
+  let source = recording;
+  const seen = new Set<string>();
+  while (!source.portraitMatchup && source.clip && !seen.has(source.id)) {
+    seen.add(source.id);
+    source = byId.get(source.clip.sourceRecordingId) ?? source;
+  }
+  const names =
+    source.portraitMatchup?.players.flatMap((player) => [player.character, player.support]) ?? [];
+  const hashtags = names
+    .filter((name): name is string => Boolean(name && name !== "Unknown"))
+    .map((name) => `#${name.replace(/[^\p{L}\p{N}]/gu, "")}`)
+    .filter((tag) => tag.length > 1);
+  return [...new Set([...hashtags, "#Avatar"])];
+}
+
+function scheduledYouTubePublishAt(localDateTime: string): string | null {
+  if (!localDateTime) return null;
+  const date = new Date(localDateTime);
+  return Number.isFinite(date.getTime()) && date.getTime() > Date.now() + 60_000
+    ? date.toISOString()
+    : null;
 }
 
 function formatVideoTime(seconds: number) {
@@ -174,12 +340,7 @@ function formatParsedInputRoute(
         (moveNotationsMatch(move.input, event.notation) ||
           stanceFollowupMatches(move.input, event.notation)),
     );
-    if (
-      activeStanceParent &&
-      (followupMove ||
-        (activeStanceParent.stanceFollowupPattern === "directional-button" &&
-          isDirectionalButtonFollowup(event.notation)))
-    ) {
+    if (activeStanceParent && followupMove) {
       const notation =
         normalizeMoveNotation(followupMove?.input ?? event.notation, {
           allowDirectionless: Boolean(followupMove),
@@ -392,12 +553,18 @@ export function RecordingViewer({
   mode = "recordings",
   panelOnly = false,
   selectedRecordingId = null,
+  seekToLastFrameRequest = null,
+  youtubeReviewRequest = null,
+  youtubeUploadJobs = [],
 }: {
   active?: boolean;
   refreshToken?: number;
   mode?: "recordings" | "nerd-processing";
   panelOnly?: boolean;
   selectedRecordingId?: string | null;
+  seekToLastFrameRequest?: { recordingId: string; requestId: number } | null;
+  youtubeReviewRequest?: { recordingId: string; url: string; requestId: number } | null;
+  youtubeUploadJobs?: Array<{ recordingId: string; phase: "queued" | "uploading" }>;
 }) {
   const {
     state: obsState,
@@ -407,6 +574,10 @@ export function RecordingViewer({
   } = useObsRecording();
   const [folder, setFolder] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
+  const recordingById = useMemo(
+    () => new Map(recordings.map((recording) => [recording.id, recording])),
+    [recordings],
+  );
   const [techCatalog, setTechCatalog] = useState<TechCatalog>(readTechCatalog);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -416,7 +587,6 @@ export function RecordingViewer({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [chapters, setChapters] = useState<RecordingChapter[]>([]);
-  const [chaptersLoadedRecordingId, setChaptersLoadedRecordingId] = useState<string | null>(null);
   const [chapterLoadError, setChapterLoadError] = useState<string | null>(null);
   const [chapterRefreshToken, setChapterRefreshToken] = useState(0);
   const [reviewFrame, setReviewFrame] = useState<ExactReviewFrame | null>(null);
@@ -425,7 +595,7 @@ export function RecordingViewer({
   const [clipMode, setClipMode] = useState(false);
   const [exportingClip, setExportingClip] = useState(false);
   const [trimmingClip, setTrimmingClip] = useState(false);
-  const [confirmTrim, setConfirmTrim] = useState(false);
+  const [confirmTrim, setConfirmTrim] = useState<"fast" | "precise" | null>(null);
   const [mediaRevision, setMediaRevision] = useState(0);
   const [clipExportNotice, setClipExportNotice] = useState<string | null>(null);
   const [clipExportError, setClipExportError] = useState<string | null>(null);
@@ -434,9 +604,60 @@ export function RecordingViewer({
   const [selectedTagFilters, setSelectedTagFilters] = useState<RecordingTags>(emptyRecordingTags);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [youtubeError, setYoutubeError] = useState<string | null>(null);
+  const [youtubeUploadTarget, setYoutubeUploadTarget] = useState<RecordedVideo | null>(null);
+  const [youtubeDestination, setYoutubeDestination] = useState<"sets" | "combos">("sets");
+  const youtubeStatusRequestId = useRef(0);
+  const [youtubeUploadStatus, setYoutubeUploadStatus] = useState<{
+    clientId: string;
+    hasClientSecret: boolean;
+    connected: boolean;
+    uploading: boolean;
+  } | null>(null);
+  const [youtubeClientIdDraft, setYoutubeClientIdDraft] = useState("");
+  const [youtubeClientSecretDraft, setYoutubeClientSecretDraft] = useState("");
+  const [youtubeShowClientSecret, setYoutubeShowClientSecret] = useState(false);
+  const [youtubeEditCredentials, setYoutubeEditCredentials] = useState(false);
+  const [youtubeUploadTitle, setYoutubeUploadTitle] = useState("");
+  const [youtubeUploadDescription, setYoutubeUploadDescription] = useState("");
+  const [youtubeUploadTagsDraft, setYoutubeUploadTagsDraft] = useState("");
+  const [youtubeUploadPrivacy, setYoutubeUploadPrivacy] = useState<
+    "private" | "unlisted" | "public"
+  >("unlisted");
+  const [youtubeUploadAudience, setYoutubeUploadAudience] = useState<"yes" | "no">("no");
+  const [youtubeScheduleEnabled, setYoutubeScheduleEnabled] = useState(false);
+  const [youtubePublishLocal, setYoutubePublishLocal] = useState("");
+  const youtubeSetUpload = Boolean(
+    youtubeUploadTarget &&
+    youtubeDestination === "sets" &&
+    recordingLibraryTab(youtubeUploadTarget, recordingById) === "matches",
+  );
+  const youtubePublishAt =
+    youtubeSetUpload && youtubeScheduleEnabled
+      ? scheduledYouTubePublishAt(youtubePublishLocal)
+      : null;
+  const youtubeUploadTagCharacters = youtubeTagCharacterCount(
+    parseYouTubeTags(youtubeUploadTagsDraft),
+  );
+  const [youtubeUploadBusy, setYoutubeUploadBusy] = useState(false);
+  const [youtubeUploadError, setYoutubeUploadError] = useState<string | null>(null);
+  const [youtubeUploadedUrl, setYoutubeUploadedUrl] = useState<string | null>(null);
+  const [pendingYouTubeUploads, setPendingYouTubeUploads] = useState(readPendingYouTubeUploads);
+  const pendingYouTubeUploadById = useMemo(
+    () => new Map(pendingYouTubeUploads.map((upload) => [upload.recordingId, upload.url])),
+    [pendingYouTubeUploads],
+  );
+  const youtubeUploadJobById = new Map(
+    youtubeUploadJobs.map((job) => [job.recordingId, job.phase]),
+  );
   const [youtubeLinkTarget, setYoutubeLinkTarget] = useState<RecordedVideo | null>(null);
   const [youtubeUrlDraft, setYoutubeUrlDraft] = useState("");
   const [youtubeLinkError, setYoutubeLinkError] = useState<string | null>(null);
+  const [youtubePreviewDuration, setYoutubePreviewDuration] = useState<number | null>(null);
+  const [youtubePreviewError, setYoutubePreviewError] = useState<string | null>(null);
+  const [youtubeReplacementInfo, setYoutubeReplacementInfo] = useState<{
+    durationMs: number;
+    hasLocalVideo: boolean;
+  } | null>(null);
   const [savingYouTubeLink, setSavingYouTubeLink] = useState(false);
   const [editingRecordingId, setEditingRecordingId] = useState<string | null>(null);
   const [editingRecordingName, setEditingRecordingName] = useState("");
@@ -471,6 +692,9 @@ export function RecordingViewer({
     height: 0,
   });
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const youtubePlayerRef = useRef<YouTubePlaybackHandle | null>(null);
+  const youtubeInfoRequestId = useRef(0);
+  const handledYouTubeReviewRequestId = useRef(0);
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
   const focusPlayerAfterSelection = useRef(false);
   const steppingFrame = useRef(false);
@@ -534,7 +758,7 @@ export function RecordingViewer({
     setError(null);
     try {
       const result = await window.electronAPI.recordings.list({
-        analysisScope: mode === "nerd-processing" ? "all" : "none",
+        analysisScope: mode === "nerd-processing" ? "all" : panelOnly ? "move-takes" : "none",
       });
       if (generation !== loadGeneration.current) return;
       const tabRecordings =
@@ -562,11 +786,21 @@ export function RecordingViewer({
   }, [mode, panelOnly]);
 
   useEffect(() => {
-    if (active) void loadRecordings();
+    if (active || (mode === "recordings" && youtubeReviewRequest)) void loadRecordings();
     return () => {
       loadGeneration.current += 1;
     };
-  }, [active, loadRecordings, refreshToken]);
+  }, [active, loadRecordings, mode, refreshToken, youtubeReviewRequest]);
+
+  useEffect(() => {
+    const refresh = () => setPendingYouTubeUploads(readPendingYouTubeUploads());
+    window.addEventListener(pendingYouTubeUploadsChangedEvent, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(pendingYouTubeUploadsChangedEvent, refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
 
   const selectedRecording = useMemo(
     () => recordings.find((recording) => recording.id === selectedId) ?? null,
@@ -576,11 +810,11 @@ export function RecordingViewer({
   useEffect(() => {
     let cancelled = false;
     setChapters([]);
-    setChaptersLoadedRecordingId(null);
     setChapterLoadError(null);
     if (
       !active ||
-      !selectedRecording?.name.toLowerCase().endsWith(".mp4") ||
+      (!selectedRecording?.name.toLowerCase().endsWith(".mp4") &&
+        selectedRecording?.mediaKind !== "youtube") ||
       !window.electronAPI?.recordings
     ) {
       return () => {
@@ -591,7 +825,6 @@ export function RecordingViewer({
       (nextChapters) => {
         if (!cancelled) {
           setChapters(nextChapters);
-          setChaptersLoadedRecordingId(selectedRecording.id);
         }
       },
       (loadError) => {
@@ -699,6 +932,10 @@ export function RecordingViewer({
       video.removeAttribute("src");
       video.load();
     }
+    if (selectedRecording?.mediaKind === "youtube") {
+      savePlaybackPosition(selectedRecording.id, youtubePlayerRef.current?.getCurrentTime() ?? 0);
+      youtubePlayerRef.current?.pause();
+    }
     void closeFrameReader();
     setRecordings((current) => (current.length ? [] : current));
     setChapters((current) => (current.length ? [] : current));
@@ -712,11 +949,6 @@ export function RecordingViewer({
     setShowAnalysisDebug(false);
     setDebugFrameIndex(0);
   }, [selectedRecording?.id]);
-
-  const recordingById = useMemo(
-    () => new Map(recordings.map((recording) => [recording.id, recording])),
-    [recordings],
-  );
 
   const visibleRecordings = useMemo(
     () =>
@@ -814,6 +1046,10 @@ export function RecordingViewer({
       if (selectedRecording && videoRef.current) {
         savePlaybackPosition(selectedRecording.id, videoRef.current.currentTime);
       }
+      if (selectedRecording?.mediaKind === "youtube") {
+        savePlaybackPosition(selectedRecording.id, youtubePlayerRef.current?.getCurrentTime() ?? 0);
+        youtubePlayerRef.current?.pause();
+      }
       setPlaybackError(null);
       setClipExportNotice(null);
       setClipExportError(null);
@@ -825,7 +1061,7 @@ export function RecordingViewer({
       setDuration(0);
       setClipRange([0, 0]);
       setClipMode(false);
-      setConfirmTrim(false);
+      setConfirmTrim(null);
       restoredRecordingId.current = null;
       focusPlayerAfterSelection.current = true;
       setSelectedId(recordingId);
@@ -942,49 +1178,60 @@ export function RecordingViewer({
     }
   }, [clipRange, loadRecordings, selectedRecording]);
 
-  const trimClip = useCallback(async () => {
-    if (!window.electronAPI?.recordings || !selectedRecording || trimmingClip) return;
-    setConfirmTrim(false);
-    setTrimmingClip(true);
-    setClipExportNotice(null);
-    setClipExportError(null);
-    reviewRequestId.current += 1;
-    setReviewFrame(null);
-    await closeFrameReader();
-    const video = videoRef.current;
-    video?.pause();
-    video?.removeAttribute("src");
-    video?.load();
-    setIsPlaying(false);
-    try {
-      const result = await window.electronAPI.recordings.trimClip({
-        recordingId: selectedRecording.id,
-        startTime: clipRange[0],
-        endTime: clipRange[1],
-      });
-      savePlaybackPosition(selectedRecording.id, 0);
-      restoredRecordingId.current = null;
-      setCurrentTime(0);
-      setDuration(0);
-      setClipRange([0, 0]);
-      setClipMode(false);
-      setChapterRefreshToken((token) => token + 1);
-      await loadRecordings();
-      setClipExportNotice(`Trimmed ${result.recording.name}.`);
-    } catch (trimError) {
-      setClipExportError(trimError instanceof Error ? trimError.message : String(trimError));
-    } finally {
-      setMediaRevision((revision) => revision + 1);
-      setTrimmingClip(false);
-    }
-  }, [
-    clipRange,
-    closeFrameReader,
-    loadRecordings,
-    savePlaybackPosition,
-    selectedRecording,
-    trimmingClip,
-  ]);
+  const trimClip = useCallback(
+    async (mode: "fast" | "precise") => {
+      if (!window.electronAPI?.recordings || !selectedRecording || trimmingClip) return;
+      setConfirmTrim(null);
+      setTrimmingClip(true);
+      setClipExportNotice(null);
+      setClipExportError(null);
+      reviewRequestId.current += 1;
+      setReviewFrame(null);
+      await closeFrameReader();
+      const video = videoRef.current;
+      video?.pause();
+      video?.removeAttribute("src");
+      video?.load();
+      setIsPlaying(false);
+      try {
+        const result = await window.electronAPI.recordings.trimClip({
+          recordingId: selectedRecording.id,
+          startTime: clipRange[0],
+          endTime: clipRange[1],
+          mode,
+        });
+        savePlaybackPosition(selectedRecording.id, 0);
+        restoredRecordingId.current = null;
+        setCurrentTime(0);
+        setDuration(0);
+        setClipRange([0, 0]);
+        setClipMode(false);
+        setChapterRefreshToken((token) => token + 1);
+        await loadRecordings();
+        const shift = clipRange[0] - result.actualStartTime;
+        setClipExportNotice(
+          `Trimmed ${result.recording.name}.${
+            mode === "fast" && shift > 0.05
+              ? ` Start moved ${shift.toFixed(2)}s earlier to a keyframe.`
+              : ""
+          }`,
+        );
+      } catch (trimError) {
+        setClipExportError(trimError instanceof Error ? trimError.message : String(trimError));
+      } finally {
+        setMediaRevision((revision) => revision + 1);
+        setTrimmingClip(false);
+      }
+    },
+    [
+      clipRange,
+      closeFrameReader,
+      loadRecordings,
+      savePlaybackPosition,
+      selectedRecording,
+      trimmingClip,
+    ],
+  );
 
   const beginRename = useCallback((recording: RecordedVideo) => {
     const extensionStart = recording.name.lastIndexOf(".");
@@ -1004,7 +1251,8 @@ export function RecordingViewer({
   }, [renamingRecordingId]);
 
   const finishRecordingRename = useCallback(
-    async (renamed: RecordedVideo) => {
+    async (renamed: RecordedVideo, previousId: string) => {
+      relinkTechRecording(previousId, renamed.id);
       await loadRecordings();
       videoRef.current?.pause();
       setIsPlaying(false);
@@ -1032,7 +1280,7 @@ export function RecordingViewer({
         recordingId: editingRecordingId,
         name: requestedName,
       });
-      await finishRecordingRename(renamed);
+      await finishRecordingRename(renamed, editingRecordingId);
       setEditingRecordingId(null);
       setEditingRecordingName("");
     } catch (renameActionError) {
@@ -1054,7 +1302,7 @@ export function RecordingViewer({
         const renamed = await window.electronAPI.recordings.reprocessName({
           recordingId: recording.id,
         });
-        await finishRecordingRename(renamed);
+        await finishRecordingRename(renamed, recording.id);
       } catch (reprocessError) {
         setRenameError(
           reprocessError instanceof Error ? reprocessError.message : String(reprocessError),
@@ -1136,7 +1384,10 @@ export function RecordingViewer({
     setContextMenu(null);
     setYoutubeError(null);
     try {
-      await window.electronAPI.recordings.openYouTubeStudio({ recordingId: recording.id });
+      await window.electronAPI.recordings.openYouTubeStudio({
+        recordingId: recording.id,
+        title: formatYouTubeTitle(recording),
+      });
     } catch (openError) {
       setYoutubeError(openError instanceof Error ? openError.message : String(openError));
     }
@@ -1153,35 +1404,293 @@ export function RecordingViewer({
     }
   }, []);
 
-  const beginYouTubeLink = useCallback((recording: RecordedVideo) => {
+  const beginYouTubeLink = useCallback((recording: RecordedVideo, uploadedUrl?: string) => {
+    const requestId = ++youtubeInfoRequestId.current;
     setContextMenu(null);
     setYoutubeLinkTarget(recording);
-    setYoutubeUrlDraft(recording.youtubeUrl ?? "");
+    setYoutubeUrlDraft(uploadedUrl ?? recording.youtubeUrl ?? "");
     setYoutubeLinkError(null);
+    setYoutubePreviewDuration(null);
+    setYoutubePreviewError(null);
+    setYoutubeReplacementInfo(null);
+    void window.electronAPI?.recordings
+      .getYouTubeReplacementInfo({ recordingId: recording.id })
+      .then(
+        (info) => {
+          if (requestId === youtubeInfoRequestId.current) setYoutubeReplacementInfo(info);
+        },
+        (error: unknown) => {
+          if (requestId === youtubeInfoRequestId.current) {
+            setYoutubeLinkError(error instanceof Error ? error.message : String(error));
+          }
+        },
+      );
   }, []);
 
+  useEffect(() => {
+    if (mode !== "recordings" || !youtubeReviewRequest) return;
+    if (handledYouTubeReviewRequestId.current === youtubeReviewRequest.requestId) return;
+    const recording = recordings.find((item) => item.id === youtubeReviewRequest.recordingId);
+    if (!recording) return;
+    handledYouTubeReviewRequestId.current = youtubeReviewRequest.requestId;
+    selectRecording(recording.id);
+    beginYouTubeLink(recording, youtubeReviewRequest.url);
+  }, [beginYouTubeLink, mode, recordings, selectRecording, youtubeReviewRequest]);
+
+  const beginYouTubeUpload = useCallback(
+    (recording: RecordedVideo) => {
+      const sourceIds = new Set<string>();
+      let source: RecordedVideo | undefined = recording;
+      while (source && !sourceIds.has(source.id)) {
+        sourceIds.add(source.id);
+        source = source.clip ? recordingById.get(source.clip.sourceRecordingId) : undefined;
+      }
+      const linkedToCombo = Object.values(readTechCatalog()).some((character) =>
+        (character.combos ?? []).some((combo) =>
+          Boolean(combo.recordingId && sourceIds.has(combo.recordingId)),
+        ),
+      );
+      const destination =
+        recordingInheritedTags(recording, recordingById).combo || linkedToCombo ? "combos" : "sets";
+      const isMatch = recordingLibraryTab(recording, recordingById) === "matches";
+      const setHashtags =
+        destination === "sets" && isMatch ? setYouTubeHashtags(recording, recordingById) : [];
+      setContextMenu(null);
+      setYoutubeUploadTarget(recording);
+      setYoutubeDestination(destination);
+      setYoutubeUploadStatus(null);
+      setYoutubeClientSecretDraft("");
+      setYoutubeShowClientSecret(false);
+      setYoutubeEditCredentials(false);
+      setYoutubeUploadTitle(formatYouTubeTitle(recording).slice(0, 100));
+      setYoutubeUploadDescription(setHashtags.join(" "));
+      setYoutubeUploadTagsDraft(setHashtags.map((hashtag) => hashtag.slice(1)).join(", "));
+      setYoutubeUploadPrivacy(destination === "sets" && isMatch ? "public" : "unlisted");
+      setYoutubeUploadAudience("no");
+      setYoutubeScheduleEnabled(false);
+      setYoutubePublishLocal("");
+      setYoutubeUploadError(null);
+      setYoutubeUploadedUrl(pendingYouTubeUploadUrl(recording.id));
+      const requestId = ++youtubeStatusRequestId.current;
+      void window.electronAPI?.recordings.getYouTubeUploadStatus({ destination }).then(
+        (status) => {
+          if (requestId !== youtubeStatusRequestId.current) return;
+          setYoutubeUploadStatus(status);
+          setYoutubeClientIdDraft(status.clientId);
+        },
+        (error: unknown) => {
+          if (requestId === youtubeStatusRequestId.current) {
+            setYoutubeUploadError(error instanceof Error ? error.message : String(error));
+          }
+        },
+      );
+    },
+    [recordingById],
+  );
+
+  const selectYouTubeDestination = useCallback(
+    (destination: "sets" | "combos") => {
+      const isMatch = Boolean(
+        youtubeUploadTarget &&
+        recordingLibraryTab(youtubeUploadTarget, recordingById) === "matches",
+      );
+      setYoutubeDestination(destination);
+      setYoutubeUploadStatus(null);
+      setYoutubeUploadError(null);
+      setYoutubeUploadPrivacy(destination === "sets" && isMatch ? "public" : "unlisted");
+      setYoutubeScheduleEnabled(false);
+      setYoutubePublishLocal("");
+      if (
+        destination === "sets" &&
+        isMatch &&
+        youtubeUploadTarget &&
+        !youtubeUploadDescription.trim()
+      ) {
+        const setHashtags = setYouTubeHashtags(youtubeUploadTarget, recordingById);
+        setYoutubeUploadDescription(setHashtags.join(" "));
+        setYoutubeUploadTagsDraft(setHashtags.map((hashtag) => hashtag.slice(1)).join(", "));
+      }
+      const requestId = ++youtubeStatusRequestId.current;
+      void window.electronAPI?.recordings.getYouTubeUploadStatus({ destination }).then(
+        (status) => {
+          if (requestId !== youtubeStatusRequestId.current) return;
+          setYoutubeUploadStatus(status);
+          setYoutubeClientIdDraft(status.clientId);
+        },
+        (error: unknown) => {
+          if (requestId === youtubeStatusRequestId.current) {
+            setYoutubeUploadError(error instanceof Error ? error.message : String(error));
+          }
+        },
+      );
+    },
+    [recordingById, youtubeUploadDescription, youtubeUploadTarget],
+  );
+
+  const configureYouTube = useCallback(async () => {
+    try {
+      setYoutubeUploadBusy(true);
+      setYoutubeUploadError(null);
+      const status = await window.electronAPI!.recordings.configureYouTube({
+        clientId: youtubeClientIdDraft,
+        clientSecret: youtubeClientSecretDraft,
+        destination: youtubeDestination,
+      });
+      setYoutubeUploadStatus(status);
+      setYoutubeClientSecretDraft("");
+      setYoutubeShowClientSecret(false);
+      setYoutubeEditCredentials(false);
+    } catch (error) {
+      setYoutubeUploadError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setYoutubeUploadBusy(false);
+    }
+  }, [youtubeClientIdDraft, youtubeClientSecretDraft, youtubeDestination]);
+
+  const connectYouTube = useCallback(async () => {
+    try {
+      setYoutubeUploadBusy(true);
+      setYoutubeUploadError(null);
+      setYoutubeUploadStatus(
+        await window.electronAPI!.recordings.connectYouTube({ destination: youtubeDestination }),
+      );
+    } catch (error) {
+      setYoutubeUploadError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setYoutubeUploadBusy(false);
+    }
+  }, [youtubeDestination]);
+
+  const disconnectYouTube = useCallback(async () => {
+    try {
+      setYoutubeUploadBusy(true);
+      setYoutubeUploadError(null);
+      setYoutubeUploadStatus(
+        await window.electronAPI!.recordings.disconnectYouTube({ destination: youtubeDestination }),
+      );
+    } catch (error) {
+      setYoutubeUploadError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setYoutubeUploadBusy(false);
+    }
+  }, [youtubeDestination]);
+
+  const uploadToYouTube = useCallback(async () => {
+    if (!youtubeUploadTarget) return;
+    const publishAt =
+      youtubeSetUpload && youtubeScheduleEnabled
+        ? scheduledYouTubePublishAt(youtubePublishLocal)
+        : null;
+    if (youtubeSetUpload && youtubeScheduleEnabled && !publishAt) {
+      setYoutubeUploadError("Choose a future date and time for the scheduled release.");
+      return;
+    }
+    const recording = youtubeUploadTarget;
+    setYoutubeUploadTarget(null);
+    try {
+      setYoutubeUploadError(null);
+      const result = await window.electronAPI!.recordings.uploadToYouTube({
+        destination: youtubeDestination,
+        recordingId: recording.id,
+        title: youtubeUploadTitle,
+        description: youtubeUploadDescription,
+        tags: parseYouTubeTags(youtubeUploadTagsDraft),
+        privacyStatus:
+          youtubeSetUpload && youtubeScheduleEnabled ? "private" : youtubeUploadPrivacy,
+        publishAt: publishAt ?? undefined,
+        madeForKids: youtubeUploadAudience === "yes",
+      });
+      savePendingYouTubeUpload({
+        recordingId: recording.id,
+        fileName: recording.name,
+        url: result.url,
+      });
+    } catch (error) {
+      setYoutubeUploadError(error instanceof Error ? error.message : String(error));
+    }
+  }, [
+    youtubeDestination,
+    youtubePublishLocal,
+    youtubeScheduleEnabled,
+    youtubeSetUpload,
+    youtubeUploadAudience,
+    youtubeUploadDescription,
+    youtubeUploadPrivacy,
+    youtubeUploadTagsDraft,
+    youtubeUploadTarget,
+    youtubeUploadTitle,
+  ]);
+
   const saveYouTubeLink = useCallback(
-    async (url: string | null) => {
+    async (url: string | null, keepLocalVideo = false) => {
       if (!window.electronAPI?.recordings || !youtubeLinkTarget || savingYouTubeLink) return;
+      if (
+        url &&
+        !keepLocalVideo &&
+        (!youtubeReplacementInfo ||
+          youtubePreviewDuration == null ||
+          Math.abs(youtubeReplacementInfo.durationMs - youtubePreviewDuration * 1000) > 1000)
+      ) {
+        setYoutubeLinkError(
+          "Play a YouTube video with the same duration as this recording, or link it now while keeping the local file.",
+        );
+        return;
+      }
       setSavingYouTubeLink(true);
       setYoutubeLinkError(null);
       try {
+        if (
+          url &&
+          !keepLocalVideo &&
+          youtubeReplacementInfo?.hasLocalVideo &&
+          selectedRecording?.id === youtubeLinkTarget.id
+        ) {
+          savePlaybackPosition(selectedRecording.id, videoRef.current?.currentTime ?? 0);
+          videoRef.current?.pause();
+          videoRef.current?.removeAttribute("src");
+          videoRef.current?.load();
+          await closeFrameReader();
+          setIsPlaying(false);
+        }
         const updated = await window.electronAPI.recordings.setYouTubeLink({
           recordingId: youtubeLinkTarget.id,
           url,
+          youtubeDurationSeconds: youtubePreviewDuration ?? undefined,
+          keepLocalVideo,
         });
         setRecordings((current) =>
           current.map((recording) => (recording.id === updated.id ? updated : recording)),
         );
+        if (selectedRecording?.id === updated.id && updated.mediaKind === "youtube") {
+          setIsPlaying(false);
+          setCurrentTime(0);
+          setDuration(0);
+          setClipRange([0, 0]);
+          setClipMode(false);
+          restoredRecordingId.current = null;
+        }
+        if (youtubeReplacementInfo?.hasLocalVideo && updated.mediaKind === "youtube") {
+          setClipExportNotice(`Replaced ${updated.name} with YouTube playback.`);
+        }
+        forgetPendingYouTubeUpload(updated.id);
         setYoutubeLinkTarget(null);
         setYoutubeUrlDraft("");
       } catch (saveError) {
         setYoutubeLinkError(saveError instanceof Error ? saveError.message : String(saveError));
+        setMediaRevision((revision) => revision + 1);
       } finally {
         setSavingYouTubeLink(false);
       }
     },
-    [savingYouTubeLink, youtubeLinkTarget],
+    [
+      closeFrameReader,
+      savePlaybackPosition,
+      savingYouTubeLink,
+      selectedRecording,
+      youtubeLinkTarget,
+      youtubePreviewDuration,
+      youtubeReplacementInfo,
+    ],
   );
 
   const updateRecordingTags = useCallback(
@@ -1217,6 +1726,16 @@ export function RecordingViewer({
       let processingFrameReaderId: string | null = null;
       try {
         await closeFrameReader();
+        if (selectedRecording.moveTake) {
+          if (selectedRecording.framebarSequence?.status !== "approved") {
+            throw new Error("Review and approve a framebar sequence before determining move data.");
+          }
+          const updated = await processMoveTake(selectedRecording);
+          setRecordings((current) =>
+            current.map((recording) => (recording.id === updated.id ? updated : recording)),
+          );
+          return;
+        }
         const reader = await window.electronAPI.recordings.openFrameReader({
           recordingId: selectedRecording.id,
         });
@@ -1251,14 +1770,11 @@ export function RecordingViewer({
           useSavedCalibration
             ? selectedRecording.analysis?.processingSnapshot?.configuration
             : undefined,
-          selectedRecording.moveTake?.moveLabel,
         );
-        const analysisWithOverrides = selectedRecording.moveTake
-          ? analysis
-          : applyManualInputStateOverrides(
-              analysis,
-              selectedRecording.analysis?.stateOverrides ?? [],
-            );
+        const analysisWithOverrides = applyManualInputStateOverrides(
+          analysis,
+          selectedRecording.analysis?.stateOverrides ?? [],
+        );
         const updated = await window.electronAPI.recordings.saveAnalysis({
           recordingId: selectedRecording.id,
           analysis: analysisWithOverrides,
@@ -1402,32 +1918,32 @@ export function RecordingViewer({
     [selectedRecording, techCatalog],
   );
 
-  const canOfferTrim = Boolean(
-    selectedRecording?.clip ||
-    (selectedRecording?.name.toLowerCase().endsWith(".mp4") &&
-      chaptersLoadedRecordingId === selectedRecording.id &&
-      chapters.length === 0),
+  const canOfferTrim = Boolean(selectedRecording?.name.toLowerCase().endsWith(".mp4"));
+  const hasTimelineAnalysis = Boolean(
+    selectedRecording?.moveTake ||
+    selectedRecording?.analysis ||
+    selectedRecording?.analysisHistory?.length ||
+    selectedRecording?.framebarSequence ||
+    selectedRecording?.framebarSequenceHistory?.length,
+  );
+  const hasClipLinkedData = Boolean(
+    selectedRecording?.clip &&
+    (selectedRecording.metadata ||
+      selectedRecording.capture ||
+      selectedRecording.games.length > 0 ||
+      selectedRecording.replays.length > 0 ||
+      selectedRecording.replayPath ||
+      selectedRecording.replayFileName),
   );
   const trimUnavailableReason = !selectedRecording
     ? ""
-    : linkedClips.length > 0
-      ? "This recording has child clips that would point to the wrong footage after trimming."
-      : linkedTechCombos.length > 0
-        ? "This recording has linked tech with timestamps that trimming would invalidate."
-        : selectedRecording.youtubeUrl
-          ? "Remove the YouTube link before trimming this recording."
-          : selectedRecording.analysis ||
-              selectedRecording.analysisHistory?.length ||
-              selectedRecording.moveTake ||
-              selectedRecording.metadata ||
-              selectedRecording.games.length > 0 ||
-              selectedRecording.replays.length > 0 ||
-              selectedRecording.replayPath ||
-              selectedRecording.replayFileName
-            ? "This recording has linked match, move, or analysis data."
-            : clipRange[0] < 0.05 && clipRange[1] >= duration - 0.05
-              ? "Select a shorter range to trim."
-              : "";
+    : selectedRecording.youtubeUrl
+      ? "Remove the YouTube link before trimming this recording."
+      : hasTimelineAnalysis || hasClipLinkedData
+        ? "This recording has linked match, move, or analysis data."
+        : clipRange[0] < 0.05 && clipRange[1] >= duration - 0.05
+          ? "Select a shorter range to trim."
+          : "";
 
   const selectLinkedCombo = (combo: TechCombo) => {
     localStorage.setItem(techSelectedComboStorageKey, combo.id);
@@ -1458,6 +1974,11 @@ export function RecordingViewer({
   }, [clippedRegions, duration]);
 
   const togglePlayback = useCallback(() => {
+    if (selectedRecording?.mediaKind === "youtube") {
+      if (isPlaying) youtubePlayerRef.current?.pause();
+      else youtubePlayerRef.current?.play();
+      return;
+    }
     const video = videoRef.current;
     if (!video) return;
     if (reviewFrame) {
@@ -1480,10 +2001,16 @@ export function RecordingViewer({
       currentFrameIndex.current = frameIndexForTime(video.currentTime);
       video.pause();
     }
-  }, [clipMode, clipRange, reviewFrame]);
+  }, [clipMode, clipRange, isPlaying, reviewFrame, selectedRecording?.mediaKind]);
 
   const seekTo = useCallback(
     (nextTime: number) => {
+      if (selectedRecording?.mediaKind === "youtube") {
+        youtubePlayerRef.current?.seekTo(nextTime);
+        setCurrentTime(nextTime);
+        savePlaybackPosition(selectedRecording.id, nextTime);
+        return;
+      }
       const video = videoRef.current;
       if (!video) return;
       setReviewFrame(null);
@@ -1496,6 +2023,38 @@ export function RecordingViewer({
     },
     [savePlaybackPosition, selectedRecording],
   );
+
+  const showLastVideoFrame = useCallback((video: HTMLVideoElement) => {
+    if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+    const lastFrame = lastFrameIndexForDuration(video.duration);
+    const lastFrameTime = Math.min(video.duration - 0.001, (lastFrame + 0.25) / FRAME_RATE);
+    video.pause();
+    video.currentTime = Math.max(0, lastFrameTime);
+    currentFrameIndex.current = lastFrame;
+    setCurrentTime(video.currentTime);
+    setReviewFrame(null);
+  }, []);
+
+  useEffect(() => {
+    if (
+      !panelOnly ||
+      !seekToLastFrameRequest ||
+      selectedRecording?.id !== seekToLastFrameRequest.recordingId ||
+      selectedRecording.framebarSequence?.status !== "awaiting-review"
+    ) {
+      return;
+    }
+    const video = videoRef.current;
+    if (video && video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      showLastVideoFrame(video);
+    }
+  }, [
+    panelOnly,
+    seekToLastFrameRequest,
+    selectedRecording?.id,
+    selectedRecording?.framebarSequence?.status,
+    showLastVideoFrame,
+  ]);
 
   const debugFrames = selectedRecording?.analysis?.diagnostics ?? [];
   const inputEvents = selectedRecording?.analysis?.inputEvents ?? [];
@@ -1823,6 +2382,7 @@ export function RecordingViewer({
         return;
       }
       if (key !== "e" && key !== "q") return;
+      if (selectedRecording.mediaKind === "youtube") return;
       event.preventDefault();
       console.debug("[RecordingViewer] frame-step keydown", {
         key,
@@ -2431,6 +2991,25 @@ export function RecordingViewer({
           <MenuItem onClick={() => contextMenu && beginYouTubeLink(contextMenu.recording)}>
             {contextMenu?.recording.youtubeUrl ? "Edit YouTube link" : "Link YouTube video"}
           </MenuItem>
+          {contextMenu?.recording.mediaKind === "local" &&
+            contextMenu.recording.name.toLowerCase().endsWith(".mp4") && (
+              <MenuItem
+                disabled={Boolean(youtubeUploadJobById.get(contextMenu.recording.id))}
+                onClick={() => {
+                  const pendingUrl = pendingYouTubeUploadById.get(contextMenu.recording.id);
+                  if (pendingUrl) beginYouTubeLink(contextMenu.recording, pendingUrl);
+                  else beginYouTubeUpload(contextMenu.recording);
+                }}
+              >
+                {youtubeUploadJobById.get(contextMenu.recording.id) === "queued"
+                  ? "Queued for YouTube"
+                  : youtubeUploadJobById.get(contextMenu.recording.id) === "uploading"
+                    ? "Uploading to YouTube"
+                    : pendingYouTubeUploadById.has(contextMenu.recording.id)
+                      ? "Review and link"
+                      : "Upload to YouTube"}
+              </MenuItem>
+            )}
           {contextMenu?.recording.source === "automatic" &&
             contextMenu.recording.games.length > 0 && (
               <MenuItem
@@ -2441,6 +3020,7 @@ export function RecordingViewer({
               </MenuItem>
             )}
           {contextMenu?.recording.source === "automatic" &&
+            contextMenu.recording.mediaKind !== "youtube" &&
             contextMenu.recording.name.toLowerCase().endsWith(".mp4") &&
             contextMenu.recording.games.length > 0 && (
               <MenuItem
@@ -2453,6 +3033,7 @@ export function RecordingViewer({
               </MenuItem>
             )}
           {contextMenu?.recording.name.toLowerCase().endsWith(".mp4") &&
+            contextMenu.recording.mediaKind !== "youtube" &&
             !contextMenu.recording.clip && (
               <MenuItem
                 disabled={Boolean(f10ClipsId) || Boolean(gameChaptersId)}
@@ -2472,6 +3053,294 @@ export function RecordingViewer({
         </Menu>
 
         <Dialog
+          open={Boolean(youtubeUploadTarget)}
+          onClose={() => {
+            if (!youtubeUploadBusy) setYoutubeUploadTarget(null);
+          }}
+          maxWidth="sm"
+          fullWidth
+        >
+          <DialogTitle>Upload to YouTube</DialogTitle>
+          <DialogContent>
+            <Stack spacing={1.5} sx={{ pt: 1 }}>
+              <Typography variant="body2" color="text.secondary">
+                Upload {youtubeUploadTarget?.name} to your{" "}
+                {youtubeDestination === "sets" ? "sets" : "Labatar"} YouTube account. The local
+                recording stays in Labatar until you review and link the uploaded video.
+              </Typography>
+              <TextField
+                select
+                label="YouTube destination"
+                value={youtubeDestination}
+                onChange={(event) =>
+                  selectYouTubeDestination(event.target.value as "sets" | "combos")
+                }
+                disabled={youtubeUploadBusy}
+                fullWidth
+              >
+                <MenuItem value="sets">Sets account</MenuItem>
+                <MenuItem value="combos">Labatar account (combos)</MenuItem>
+              </TextField>
+              {youtubeUploadStatus &&
+                (!youtubeUploadStatus.clientId ||
+                  !youtubeUploadStatus.hasClientSecret ||
+                  youtubeEditCredentials) && (
+                  <>
+                    <TextField
+                      label="Google Desktop OAuth client ID"
+                      value={youtubeClientIdDraft}
+                      onChange={(event) => setYoutubeClientIdDraft(event.target.value)}
+                      disabled={youtubeUploadBusy}
+                      size="small"
+                      fullWidth
+                    />
+                    <TextField
+                      label="Google Desktop OAuth client secret"
+                      type={youtubeShowClientSecret ? "text" : "password"}
+                      value={youtubeClientSecretDraft}
+                      onChange={(event) => setYoutubeClientSecretDraft(event.target.value)}
+                      disabled={youtubeUploadBusy}
+                      helperText="Find client_secret in the downloaded JSON for this Desktop OAuth client."
+                      slotProps={{
+                        input: {
+                          endAdornment: (
+                            <InputAdornment position="end">
+                              <IconButton
+                                aria-label={
+                                  youtubeShowClientSecret
+                                    ? "Hide client secret"
+                                    : "Show client secret"
+                                }
+                                onClick={() => setYoutubeShowClientSecret((shown) => !shown)}
+                                disabled={youtubeUploadBusy}
+                                edge="end"
+                              >
+                                {youtubeShowClientSecret ? (
+                                  <VisibilityOffIcon />
+                                ) : (
+                                  <VisibilityIcon />
+                                )}
+                              </IconButton>
+                            </InputAdornment>
+                          ),
+                        },
+                      }}
+                      size="small"
+                      fullWidth
+                    />
+                    <Button
+                      onClick={() => void configureYouTube()}
+                      disabled={
+                        youtubeUploadBusy ||
+                        !youtubeClientIdDraft.trim() ||
+                        !youtubeClientSecretDraft.trim()
+                      }
+                    >
+                      Save OAuth credentials
+                    </Button>
+                  </>
+                )}
+              {youtubeUploadStatus?.clientId &&
+                youtubeUploadStatus.hasClientSecret &&
+                !youtubeUploadStatus.connected &&
+                !youtubeEditCredentials && (
+                  <Button onClick={() => void connectYouTube()} disabled={youtubeUploadBusy}>
+                    Connect {youtubeDestination === "sets" ? "sets" : "Labatar"} YouTube account
+                  </Button>
+                )}
+              {youtubeUploadStatus?.hasClientSecret && !youtubeEditCredentials && (
+                <Button
+                  size="small"
+                  onClick={() => setYoutubeEditCredentials(true)}
+                  disabled={youtubeUploadBusy}
+                >
+                  Change OAuth credentials
+                </Button>
+              )}
+              {youtubeUploadStatus?.connected && !youtubeUploadBusy && (
+                <Stack direction="row" spacing={1}>
+                  <Button size="small" onClick={() => void connectYouTube()}>
+                    Change {youtubeDestination === "sets" ? "sets" : "Labatar"} account
+                  </Button>
+                  <Button size="small" onClick={() => void disconnectYouTube()}>
+                    Forget account on this device
+                  </Button>
+                </Stack>
+              )}
+              {youtubeUploadStatus?.connected && !youtubeUploadedUrl && (
+                <>
+                  <TextField
+                    label="Video title"
+                    value={youtubeUploadTitle}
+                    onChange={(event) => setYoutubeUploadTitle(event.target.value)}
+                    disabled={youtubeUploadBusy}
+                    slotProps={{ htmlInput: { maxLength: 100 } }}
+                    required
+                    fullWidth
+                  />
+                  <TextField
+                    label="Description"
+                    value={youtubeUploadDescription}
+                    onChange={(event) => setYoutubeUploadDescription(event.target.value)}
+                    disabled={youtubeUploadBusy}
+                    multiline
+                    minRows={2}
+                    fullWidth
+                  />
+                  <TextField
+                    label="YouTube tags"
+                    value={youtubeUploadTagsDraft}
+                    onChange={(event) => setYoutubeUploadTagsDraft(event.target.value)}
+                    disabled={youtubeUploadBusy}
+                    error={youtubeUploadTagCharacters > 500}
+                    helperText={`Separate tags with commas. ${youtubeUploadTagCharacters} of 500 characters used.`}
+                    fullWidth
+                  />
+                  <TextField
+                    select
+                    label="Visibility"
+                    value={youtubeUploadPrivacy}
+                    onChange={(event) =>
+                      setYoutubeUploadPrivacy(
+                        event.target.value as "private" | "unlisted" | "public",
+                      )
+                    }
+                    disabled={youtubeUploadBusy || (youtubeSetUpload && youtubeScheduleEnabled)}
+                    fullWidth
+                  >
+                    <MenuItem value="private">Private</MenuItem>
+                    <MenuItem value="unlisted">Unlisted</MenuItem>
+                    <MenuItem value="public">Public</MenuItem>
+                  </TextField>
+                  {youtubeSetUpload && (
+                    <>
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            checked={youtubeScheduleEnabled}
+                            onChange={(event) => {
+                              setYoutubeScheduleEnabled(event.target.checked);
+                              if (event.target.checked) setYoutubeUploadPrivacy("public");
+                            }}
+                            disabled={youtubeUploadBusy}
+                          />
+                        }
+                        label="Schedule public release"
+                      />
+                      {youtubeScheduleEnabled && (
+                        <>
+                          <TextField
+                            label="Publish date and time"
+                            type="datetime-local"
+                            value={youtubePublishLocal}
+                            onChange={(event) => setYoutubePublishLocal(event.target.value)}
+                            disabled={youtubeUploadBusy}
+                            error={Boolean(youtubePublishLocal && !youtubePublishAt)}
+                            helperText="Your local time. Choose a time after the upload will finish."
+                            slotProps={{ inputLabel: { shrink: true } }}
+                            required
+                            fullWidth
+                          />
+                          <Typography variant="caption" color="text.secondary">
+                            YouTube keeps scheduled videos private until they become public at the
+                            chosen time.
+                          </Typography>
+                        </>
+                      )}
+                    </>
+                  )}
+                  <TextField
+                    select
+                    label="Made for Kids?"
+                    value={youtubeUploadAudience}
+                    onChange={(event) =>
+                      setYoutubeUploadAudience(event.target.value as "yes" | "no")
+                    }
+                    disabled={youtubeUploadBusy}
+                    required
+                    fullWidth
+                  >
+                    <MenuItem value="no">No, it is not Made for Kids</MenuItem>
+                    <MenuItem value="yes">Yes, it is Made for Kids</MenuItem>
+                  </TextField>
+                  <Typography variant="caption" color="text.secondary">
+                    By clicking 'upload,' you certify that the content you are uploading complies
+                    with the YouTube Terms of Service (including the YouTube Community Guidelines)
+                    at{" "}
+                    <Button
+                      variant="text"
+                      size="small"
+                      onClick={() => void window.electronAPI?.recordings.openYouTubeTerms()}
+                    >
+                      https://www.youtube.com/t/terms
+                    </Button>
+                    . Please be sure not to violate others' copyright or privacy rights.
+                  </Typography>
+                </>
+              )}
+              {youtubeUploadedUrl && (
+                <Alert severity="success">
+                  Upload complete. YouTube may still be processing the video. Private videos may not
+                  load in Labatar's preview; the local recording stays available until the video can
+                  be reviewed and linked.{" "}
+                  <Button
+                    size="small"
+                    onClick={() =>
+                      void window.electronAPI?.recordings.openYouTubeUrl({
+                        url: youtubeUploadedUrl,
+                      })
+                    }
+                  >
+                    Open uploaded video
+                  </Button>
+                </Alert>
+              )}
+              {youtubeUploadedUrl && youtubeUploadTarget && (
+                <Button
+                  onClick={() => {
+                    forgetPendingYouTubeUpload(youtubeUploadTarget.id);
+                    setYoutubeUploadedUrl(null);
+                  }}
+                >
+                  Forget pending link (video stays on YouTube)
+                </Button>
+              )}
+              {youtubeUploadError && <Alert severity="error">{youtubeUploadError}</Alert>}
+            </Stack>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setYoutubeUploadTarget(null)} disabled={youtubeUploadBusy}>
+              Close
+            </Button>
+            {youtubeUploadedUrl && youtubeUploadTarget ? (
+              <Button
+                variant="contained"
+                onClick={() => {
+                  beginYouTubeLink(youtubeUploadTarget, youtubeUploadedUrl);
+                  setYoutubeUploadTarget(null);
+                }}
+              >
+                Review and link
+              </Button>
+            ) : (
+              <Button
+                variant="contained"
+                disabled={
+                  !youtubeUploadStatus?.connected ||
+                  youtubeUploadBusy ||
+                  (youtubeSetUpload && youtubeScheduleEnabled && !youtubePublishAt) ||
+                  youtubeUploadTagCharacters > 500 ||
+                  !youtubeUploadTitle.trim()
+                }
+                onClick={() => void uploadToYouTube()}
+              >
+                Upload
+              </Button>
+            )}
+          </DialogActions>
+        </Dialog>
+
+        <Dialog
           open={Boolean(youtubeLinkTarget)}
           onClose={() => {
             if (!savingYouTubeLink) setYoutubeLinkTarget(null);
@@ -2485,8 +3354,23 @@ export function RecordingViewer({
           <DialogContent>
             <Stack spacing={1.5} sx={{ pt: 1 }}>
               <Typography variant="body2" color="text.secondary">
-                Paste a YouTube video link. It is saved with this recording's local metadata.
+                {youtubeReplacementInfo?.hasLocalVideo
+                  ? "Paste the uploaded video link. After the replacement is verified, the local video file will be permanently deleted. Recording details, chapters, and linked clips will stay in the library."
+                  : "Paste the replacement YouTube video link for this recording."}
               </Typography>
+              {youtubeReplacementInfo?.hasLocalVideo && (
+                <Typography variant="caption" color="text.secondary">
+                  Check that the upload starts at the same point as this recording. Matching
+                  duration alone cannot confirm that chapter and clip times still align.
+                </Typography>
+              )}
+              {youtubeReplacementInfo?.hasLocalVideo && (
+                <Alert severity="info">
+                  Scheduled or private videos may not play here yet. You can link the URL now and
+                  keep the local file. When the video is playable, return here to verify its
+                  timeline and replace the local file.
+                </Alert>
+              )}
               <TextField
                 autoFocus
                 fullWidth
@@ -2494,7 +3378,14 @@ export function RecordingViewer({
                 label="YouTube video URL"
                 value={youtubeUrlDraft}
                 disabled={savingYouTubeLink}
-                onChange={(event) => setYoutubeUrlDraft(event.target.value)}
+                onChange={(event) => {
+                  const nextUrl = event.target.value;
+                  if (youtubeVideoId(nextUrl) !== youtubeVideoId(youtubeUrlDraft)) {
+                    setYoutubePreviewDuration(null);
+                    setYoutubePreviewError(null);
+                  }
+                  setYoutubeUrlDraft(nextUrl);
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && youtubeUrlDraft.trim()) {
                     event.preventDefault();
@@ -2502,11 +3393,41 @@ export function RecordingViewer({
                   }
                 }}
               />
+              {youtubeVideoId(youtubeUrlDraft) && (
+                <>
+                  <Box sx={{ width: "100%", aspectRatio: "16 / 9", minHeight: 200 }}>
+                    <YouTubeRecordingPlayer
+                      key={youtubeVideoId(youtubeUrlDraft)}
+                      videoId={youtubeVideoId(youtubeUrlDraft)!}
+                      title="Preview the replacement YouTube video"
+                      onDuration={setYoutubePreviewDuration}
+                      onError={setYoutubePreviewError}
+                    />
+                  </Box>
+                  <Typography variant="caption" color="text.secondary">
+                    Play the preview if its duration has not loaded yet.
+                    {youtubeReplacementInfo &&
+                      ` Local timeline: ${formatVideoTime(youtubeReplacementInfo.durationMs / 1000)}.`}
+                    {youtubePreviewDuration != null &&
+                      ` YouTube timeline: ${formatVideoTime(youtubePreviewDuration)}.`}
+                  </Typography>
+                  {youtubeReplacementInfo &&
+                    youtubePreviewDuration != null &&
+                    Math.abs(youtubeReplacementInfo.durationMs - youtubePreviewDuration * 1000) >
+                      1000 && (
+                      <Alert severity="warning">
+                        The durations differ. The local video will stay until the uploaded video
+                        matches its timeline.
+                      </Alert>
+                    )}
+                </>
+              )}
+              {youtubePreviewError && <Alert severity="error">{youtubePreviewError}</Alert>}
               {youtubeLinkError && <Alert severity="error">{youtubeLinkError}</Alert>}
             </Stack>
           </DialogContent>
-          <DialogActions>
-            {youtubeLinkTarget?.youtubeUrl && (
+          <DialogActions sx={{ flexWrap: "wrap" }}>
+            {youtubeLinkTarget?.youtubeUrl && youtubeLinkTarget.mediaKind !== "youtube" && (
               <Button
                 color="error"
                 disabled={savingYouTubeLink}
@@ -2519,12 +3440,31 @@ export function RecordingViewer({
             <Button onClick={() => setYoutubeLinkTarget(null)} disabled={savingYouTubeLink}>
               Cancel
             </Button>
+            {youtubeReplacementInfo?.hasLocalVideo && (
+              <Button
+                disabled={savingYouTubeLink || !youtubeVideoId(youtubeUrlDraft)}
+                onClick={() => void saveYouTubeLink(youtubeUrlDraft, true)}
+              >
+                Link and keep local video
+              </Button>
+            )}
             <Button
               variant="contained"
-              disabled={savingYouTubeLink || !youtubeUrlDraft.trim()}
+              disabled={
+                savingYouTubeLink ||
+                !youtubeVideoId(youtubeUrlDraft) ||
+                !youtubeReplacementInfo ||
+                youtubePreviewDuration == null ||
+                Boolean(youtubePreviewError) ||
+                Math.abs(youtubeReplacementInfo.durationMs - youtubePreviewDuration * 1000) > 1000
+              }
               onClick={() => void saveYouTubeLink(youtubeUrlDraft)}
             >
-              {savingYouTubeLink ? "Saving..." : "Save link"}
+              {savingYouTubeLink
+                ? "Replacing..."
+                : youtubeReplacementInfo?.hasLocalVideo
+                  ? "Replace local video"
+                  : "Save link"}
             </Button>
           </DialogActions>
         </Dialog>
@@ -2564,25 +3504,32 @@ export function RecordingViewer({
           </DialogActions>
         </Dialog>
 
-        <Dialog open={confirmTrim} onClose={() => !trimmingClip && setConfirmTrim(false)}>
-          <DialogTitle>Trim and replace this recording?</DialogTitle>
+        <Dialog open={Boolean(confirmTrim)} onClose={() => !trimmingClip && setConfirmTrim(null)}>
+          <DialogTitle>
+            {confirmTrim === "fast" ? "Fast trim and replace?" : "Precise trim and replace?"}
+          </DialogTitle>
           <DialogContent>
             <Typography>
-              This re-encodes the selected range and permanently replaces the video and its metadata
-              at their current location.
+              {confirmTrim === "fast"
+                ? "This copies the video without re-encoding it. The start may move earlier to the previous keyframe. Partly overlapping linked clips may still be re-encoded."
+                : "This re-encodes the selected range for an accurate cut."}{" "}
+              The recording is replaced at its current location. Chapters and linked clips move with
+              the retained range; clips outside it are detached.
             </Typography>
           </DialogContent>
           <DialogActions>
-            <Button onClick={() => setConfirmTrim(false)} disabled={trimmingClip}>
+            <Button onClick={() => setConfirmTrim(null)} disabled={trimmingClip}>
               Cancel
             </Button>
             <Button
               color="warning"
               variant="contained"
-              onClick={() => void trimClip()}
+              onClick={() => {
+                if (confirmTrim) void trimClip(confirmTrim);
+              }}
               disabled={trimmingClip}
             >
-              Trim and replace
+              {confirmTrim === "fast" ? "Fast trim & replace" : "Precise trim & replace"}
             </Button>
           </DialogActions>
         </Dialog>
@@ -2603,7 +3550,9 @@ export function RecordingViewer({
                     {selectedRecording.name}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
-                    {formatFileSize(selectedRecording.size)}
+                    {selectedRecording.mediaKind === "youtube"
+                      ? "YouTube video"
+                      : formatFileSize(selectedRecording.size)}
                   </Typography>
                 </Stack>
                 {selectedRecording.youtubeUrl ? (
@@ -2629,33 +3578,60 @@ export function RecordingViewer({
                 <Button size="small" onClick={() => beginYouTubeLink(selectedRecording)}>
                   {selectedRecording.youtubeUrl ? "Edit YouTube link" : "Link YouTube video"}
                 </Button>
-                {mode === "nerd-processing" && (
+                {selectedRecording.mediaKind === "local" &&
+                  selectedRecording.name.toLowerCase().endsWith(".mp4") && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      disabled={Boolean(youtubeUploadJobById.get(selectedRecording.id))}
+                      onClick={() => {
+                        const pendingUrl = pendingYouTubeUploadById.get(selectedRecording.id);
+                        if (pendingUrl) beginYouTubeLink(selectedRecording, pendingUrl);
+                        else beginYouTubeUpload(selectedRecording);
+                      }}
+                    >
+                      {youtubeUploadJobById.get(selectedRecording.id) === "queued"
+                        ? "Queued for YouTube"
+                        : youtubeUploadJobById.get(selectedRecording.id) === "uploading"
+                          ? "Uploading to YouTube"
+                          : pendingYouTubeUploadById.has(selectedRecording.id)
+                            ? "Review and link"
+                            : "Upload to YouTube"}
+                    </Button>
+                  )}
+                {mode === "nerd-processing" && selectedRecording.mediaKind !== "youtube" && (
                   <Button
                     variant="outlined"
                     size="small"
                     onClick={() => void processSelectedRecording()}
                     disabled={
                       Boolean(processingRecordingId) ||
-                      calibrationSaves > 0 ||
-                      !persistentConfig ||
-                      Boolean(processingConfigError)
+                      (selectedRecording.moveTake
+                        ? selectedRecording.framebarSequence?.status !== "approved"
+                        : calibrationSaves > 0 ||
+                          !persistentConfig ||
+                          Boolean(processingConfigError))
                     }
                   >
                     {processingRecordingId === selectedRecording.id
                       ? "Processing recording..."
-                      : "Process current calibration"}
+                      : selectedRecording.moveTake
+                        ? "Determine move data"
+                        : "Process current calibration"}
                   </Button>
                 )}
-                {mode === "nerd-processing" && selectedRecording.analysis?.processingSnapshot && (
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    disabled={Boolean(processingRecordingId) || calibrationSaves > 0}
-                    onClick={() => void processSelectedRecording(true)}
-                  >
-                    Reprocess saved calibration
-                  </Button>
-                )}
+                {mode === "nerd-processing" &&
+                  !selectedRecording.moveTake &&
+                  selectedRecording.analysis?.processingSnapshot && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      disabled={Boolean(processingRecordingId) || calibrationSaves > 0}
+                      onClick={() => void processSelectedRecording(true)}
+                    >
+                      Reprocess saved calibration
+                    </Button>
+                  )}
               </Stack>
               {selectedRecording.moveTake && (
                 <Alert
@@ -3033,124 +4009,165 @@ export function RecordingViewer({
                   backgroundColor: "#000",
                 }}
               >
-                <Box
-                  component="video"
-                  key={`${selectedRecording.url}-${mediaRevision}`}
-                  ref={videoRef}
-                  src={`${selectedRecording.url}?v=${mediaRevision}`}
-                  tabIndex={0}
-                  aria-label={`Player for ${selectedRecording.name}`}
-                  controls={false}
-                  preload="metadata"
-                  onLoadedMetadata={(event) => {
-                    if (!active) return;
-                    const video = event.currentTarget;
-                    updateVideoContentBox();
-                    const nextDuration = video.duration;
-                    console.debug("[RecordingViewer] video-loaded-metadata", {
-                      duration: nextDuration,
-                      currentTime: video.currentTime,
-                      readyState: video.readyState,
-                      videoWidth: video.videoWidth,
-                      videoHeight: video.videoHeight,
-                    });
-                    setDuration(nextDuration);
-                    setClipRange([0, Number.isFinite(nextDuration) ? nextDuration : 0]);
-                    if (restoredRecordingId.current !== selectedRecording.id) {
-                      restoredRecordingId.current = selectedRecording.id;
-                      if (panelOnly && Number.isFinite(nextDuration)) {
-                        const needsVideoApproval =
-                          selectedRecording.moveTake?.captureMethod === "automated" &&
-                          selectedRecording.moveTake.captureReviewStatus !==
-                            "approved-for-processing";
-                        const needsEvidenceAcceptance =
-                          selectedRecording.moveTake?.evidenceStatus === "pending";
-                        video.currentTime =
-                          selectedRecording.analysis && !needsEvidenceAcceptance ? nextDuration : 0;
-                        if (needsVideoApproval) void video.play().catch(() => undefined);
-                      } else {
+                {selectedRecording.mediaKind === "youtube" &&
+                youtubeVideoId(selectedRecording.youtubeUrl) ? (
+                  <YouTubeRecordingPlayer
+                    key={selectedRecording.id}
+                    ref={youtubePlayerRef}
+                    videoId={youtubeVideoId(selectedRecording.youtubeUrl)!}
+                    title={`YouTube player for ${selectedRecording.name}`}
+                    onDuration={(nextDuration) => {
+                      if (!active) return;
+                      setDuration(nextDuration);
+                      setClipRange([0, nextDuration]);
+                      if (restoredRecordingId.current !== selectedRecording.id) {
+                        restoredRecordingId.current = selectedRecording.id;
                         const savedTime =
                           playbackPositions.current[positionKey(selectedRecording.id)];
                         if (
                           typeof savedTime === "number" &&
-                          savedTime > MINIMUM_SAVED_POSITION_SECONDS &&
-                          Number.isFinite(nextDuration)
+                          savedTime > MINIMUM_SAVED_POSITION_SECONDS
                         ) {
-                          video.currentTime = Math.min(savedTime, nextDuration);
+                          youtubePlayerRef.current?.seekTo(Math.min(savedTime, nextDuration));
                         }
                       }
-                    }
-                    currentFrameIndex.current = frameIndexForTime(video.currentTime);
-                    setCurrentTime(video.currentTime);
-                  }}
-                  onSeeking={(event) => {
-                    const video = event.currentTarget;
-                    console.debug("[RecordingViewer] video-seeking", {
-                      currentTime: video.currentTime,
-                      readyState: video.readyState,
-                      seeking: video.seeking,
-                      paused: video.paused,
-                    });
-                  }}
-                  onSeeked={(event) => {
-                    const video = event.currentTarget;
-                    if (!steppingFrame.current) {
-                      currentFrameIndex.current = frameIndexForTime(video.currentTime);
-                    }
-                    console.debug("[RecordingViewer] video-seeked", {
-                      currentTime: video.currentTime,
-                      readyState: video.readyState,
-                      seeking: video.seeking,
-                      paused: video.paused,
-                    });
-                  }}
-                  onTimeUpdate={(event) => {
-                    if (!active) return;
-                    const video = event.currentTarget;
-                    const nextTime = video.currentTime;
-                    if (clipMode && !video.paused && nextTime >= clipRange[1]) {
-                      video.currentTime = clipRange[0];
-                      currentFrameIndex.current = frameIndexForTime(clipRange[0]);
-                      setCurrentTime(clipRange[0]);
-                      return;
-                    }
-                    if (!scrubbing.current && !reviewFrame) {
-                      if (!steppingFrame.current) {
-                        currentFrameIndex.current = frameIndexForTime(nextTime);
-                      }
+                    }}
+                    onTime={(nextTime) => {
+                      if (!active || scrubbing.current) return;
                       setCurrentTime(nextTime);
                       savePlaybackPosition(selectedRecording.id, nextTime);
-                    }
-                  }}
-                  onPlay={() => setIsPlaying(true)}
-                  onPause={() => setIsPlaying(false)}
-                  onEnded={(event) => {
-                    if (clipMode && duration > 0) {
-                      event.currentTarget.currentTime = clipRange[0];
-                      currentFrameIndex.current = frameIndexForTime(clipRange[0]);
-                      setCurrentTime(clipRange[0]);
-                      void event.currentTarget.play();
-                    } else {
-                      setIsPlaying(false);
-                    }
-                  }}
-                  onClick={togglePlayback}
-                  onError={() => {
-                    if (!active) return;
-                    setPlaybackError(
-                      "This video could not be played by the built-in player. The recording container or codec may not be supported yet.",
-                    );
-                  }}
-                  sx={{
-                    display: "block",
-                    width: "100%",
-                    height: "100%",
-                    objectFit: "contain",
-                    backgroundColor: "#000",
-                    visibility: reviewFrame ? "hidden" : "visible",
-                  }}
-                />
-                {reviewFrame && (
+                    }}
+                    onPlayingChange={setIsPlaying}
+                    onError={setPlaybackError}
+                  />
+                ) : (
+                  <Box
+                    component="video"
+                    key={`${selectedRecording.url}-${mediaRevision}`}
+                    ref={videoRef}
+                    src={`${selectedRecording.url}?v=${mediaRevision}`}
+                    tabIndex={0}
+                    aria-label={`Player for ${selectedRecording.name}`}
+                    controls={false}
+                    preload="metadata"
+                    onLoadedMetadata={(event) => {
+                      if (!active) return;
+                      const video = event.currentTarget;
+                      updateVideoContentBox();
+                      const nextDuration = video.duration;
+                      console.debug("[RecordingViewer] video-loaded-metadata", {
+                        duration: nextDuration,
+                        currentTime: video.currentTime,
+                        readyState: video.readyState,
+                        videoWidth: video.videoWidth,
+                        videoHeight: video.videoHeight,
+                      });
+                      setDuration(nextDuration);
+                      setClipRange([0, Number.isFinite(nextDuration) ? nextDuration : 0]);
+                      if (restoredRecordingId.current !== selectedRecording.id) {
+                        restoredRecordingId.current = selectedRecording.id;
+                        if (
+                          panelOnly &&
+                          seekToLastFrameRequest?.recordingId === selectedRecording.id &&
+                          selectedRecording.framebarSequence?.status === "awaiting-review"
+                        ) {
+                          showLastVideoFrame(video);
+                        } else if (panelOnly && Number.isFinite(nextDuration)) {
+                          const needsVideoApproval =
+                            selectedRecording.moveTake?.captureMethod === "automated" &&
+                            selectedRecording.moveTake.captureReviewStatus !==
+                              "approved-for-processing";
+                          const needsEvidenceAcceptance =
+                            selectedRecording.moveTake?.evidenceStatus === "pending";
+                          video.currentTime =
+                            selectedRecording.analysis && !needsEvidenceAcceptance
+                              ? nextDuration
+                              : 0;
+                          if (needsVideoApproval) void video.play().catch(() => undefined);
+                        } else {
+                          const savedTime =
+                            playbackPositions.current[positionKey(selectedRecording.id)];
+                          if (
+                            typeof savedTime === "number" &&
+                            savedTime > MINIMUM_SAVED_POSITION_SECONDS &&
+                            Number.isFinite(nextDuration)
+                          ) {
+                            video.currentTime = Math.min(savedTime, nextDuration);
+                          }
+                        }
+                      }
+                      currentFrameIndex.current = frameIndexForTime(video.currentTime);
+                      setCurrentTime(video.currentTime);
+                    }}
+                    onSeeking={(event) => {
+                      const video = event.currentTarget;
+                      console.debug("[RecordingViewer] video-seeking", {
+                        currentTime: video.currentTime,
+                        readyState: video.readyState,
+                        seeking: video.seeking,
+                        paused: video.paused,
+                      });
+                    }}
+                    onSeeked={(event) => {
+                      const video = event.currentTarget;
+                      if (!steppingFrame.current) {
+                        currentFrameIndex.current = frameIndexForTime(video.currentTime);
+                      }
+                      console.debug("[RecordingViewer] video-seeked", {
+                        currentTime: video.currentTime,
+                        readyState: video.readyState,
+                        seeking: video.seeking,
+                        paused: video.paused,
+                      });
+                    }}
+                    onTimeUpdate={(event) => {
+                      if (!active) return;
+                      const video = event.currentTarget;
+                      const nextTime = video.currentTime;
+                      if (clipMode && !video.paused && nextTime >= clipRange[1]) {
+                        video.currentTime = clipRange[0];
+                        currentFrameIndex.current = frameIndexForTime(clipRange[0]);
+                        setCurrentTime(clipRange[0]);
+                        return;
+                      }
+                      if (!scrubbing.current && !reviewFrame) {
+                        if (!steppingFrame.current) {
+                          currentFrameIndex.current = frameIndexForTime(nextTime);
+                        }
+                        setCurrentTime(nextTime);
+                        savePlaybackPosition(selectedRecording.id, nextTime);
+                      }
+                    }}
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
+                    onEnded={(event) => {
+                      if (clipMode && duration > 0) {
+                        event.currentTarget.currentTime = clipRange[0];
+                        currentFrameIndex.current = frameIndexForTime(clipRange[0]);
+                        setCurrentTime(clipRange[0]);
+                        void event.currentTarget.play();
+                      } else {
+                        setIsPlaying(false);
+                      }
+                    }}
+                    onClick={togglePlayback}
+                    onError={() => {
+                      if (!active) return;
+                      setPlaybackError(
+                        "This video could not be played by the built-in player. The recording container or codec may not be supported yet.",
+                      );
+                    }}
+                    sx={{
+                      display: "block",
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "contain",
+                      backgroundColor: "#000",
+                      visibility: reviewFrame ? "hidden" : "visible",
+                    }}
+                  />
+                )}
+                {selectedRecording.mediaKind !== "youtube" && reviewFrame && (
                   <Box
                     component="img"
                     src={`data:image/jpeg;base64,${reviewFrame.data}`}
@@ -3167,7 +4184,8 @@ export function RecordingViewer({
                     }}
                   />
                 )}
-                {showHitboxOverlay &&
+                {selectedRecording.mediaKind !== "youtube" &&
+                  showHitboxOverlay &&
                   hitboxOverlayBoxes.length > 0 &&
                   videoContentBox.width > 0 && (
                     <Box
@@ -3216,7 +4234,8 @@ export function RecordingViewer({
                       })}
                     </Box>
                   )}
-                {showAnalysisDebug &&
+                {selectedRecording.mediaKind !== "youtube" &&
+                  showAnalysisDebug &&
                   analysisDebugReady &&
                   debugFrame &&
                   debugRegions &&
@@ -3568,18 +4587,20 @@ export function RecordingViewer({
                       ))}
                     </Box>
                   )}
-                <Button
-                  variant="contained"
-                  size="small"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    togglePlayback();
-                  }}
-                  disabled={!duration}
-                  sx={{ position: "absolute", bottom: 12, left: 12, minWidth: 92 }}
-                >
-                  {isPlaying ? "Pause" : "Play"}
-                </Button>
+                {selectedRecording.mediaKind !== "youtube" && (
+                  <Button
+                    variant="contained"
+                    size="small"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      togglePlayback();
+                    }}
+                    disabled={!duration}
+                    sx={{ position: "absolute", bottom: 12, left: 12, minWidth: 92 }}
+                  >
+                    {isPlaying ? "Pause" : "Play"}
+                  </Button>
+                )}
               </Box>
               <Stack spacing={0.5}>
                 {timelineChapters.length > 0 && (
@@ -3795,7 +4816,7 @@ export function RecordingViewer({
                               variant="outlined"
                               color="warning"
                               size="small"
-                              onClick={() => setConfirmTrim(true)}
+                              onClick={() => setConfirmTrim("fast")}
                               disabled={
                                 exportingClip ||
                                 trimmingClip ||
@@ -3804,7 +4825,22 @@ export function RecordingViewer({
                                 Boolean(trimUnavailableReason)
                               }
                             >
-                              {trimmingClip ? "Trimming..." : "Trim & replace"}
+                              {trimmingClip ? "Trimming..." : "Fast trim & replace"}
+                            </Button>
+                            <Button
+                              variant="text"
+                              color="warning"
+                              size="small"
+                              onClick={() => setConfirmTrim("precise")}
+                              disabled={
+                                exportingClip ||
+                                trimmingClip ||
+                                !duration ||
+                                clipRange[1] <= clipRange[0] ||
+                                Boolean(trimUnavailableReason)
+                              }
+                            >
+                              Precise trim
                             </Button>
                           </span>
                         </Tooltip>
@@ -3870,26 +4906,33 @@ export function RecordingViewer({
                           Decoding exact frame…
                         </Typography>
                       )}
-                      <Typography
-                        variant="caption"
-                        color="text.secondary"
-                        sx={{ ml: { sm: "auto" } }}
-                      >
-                        E: forward frame | Q: backward frame
-                      </Typography>
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        startIcon={<SceneMarkerIcon />}
-                        onClick={() => {
-                          setClipRange([0, duration]);
-                          setClipMode(true);
-                        }}
-                        disabled={!duration}
-                      >
-                        {selectedRecording.clip ? "Create or trim clip" : "Create a clip"}
-                      </Button>
+                      {selectedRecording.mediaKind !== "youtube" && (
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ ml: { sm: "auto" } }}
+                        >
+                          E: forward frame | Q: backward frame
+                        </Typography>
+                      )}
+                      {selectedRecording.mediaKind !== "youtube" && (
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          startIcon={<SceneMarkerIcon />}
+                          onClick={() => {
+                            setClipRange([0, duration]);
+                            setClipMode(true);
+                          }}
+                          disabled={!duration}
+                        >
+                          {selectedRecording.clip
+                            ? "Create or trim clip"
+                            : "Create clip or trim recording"}
+                        </Button>
+                      )}
                       {selectedRecording?.name.toLowerCase().endsWith(".mp4") &&
+                        selectedRecording.mediaKind !== "youtube" &&
                         !selectedRecording.clip && (
                           <Button
                             variant="outlined"
@@ -3909,7 +4952,7 @@ export function RecordingViewer({
               {clipExportNotice && <Alert severity="success">{clipExportNotice}</Alert>}
               {clipExportError && <Alert severity="error">{clipExportError}</Alert>}
               {chapterLoadError && (
-                <Alert severity="warning">Could not read MP4 chapters: {chapterLoadError}</Alert>
+                <Alert severity="warning">Could not read chapters: {chapterLoadError}</Alert>
               )}
               {playbackError && <Alert severity="warning">{playbackError}</Alert>}
               {(selectedRecording.clip || linkedClips.length > 0) && (

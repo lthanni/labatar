@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Labatar combo publisher</title>
+    <link rel="stylesheet" href="/v1/editor/app.css" />
+    <script type="module" src="/v1/editor/app.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">Labatar catalog</p>
+          <h1>Combo publisher</h1>
+          <p>Prepare a combo locally, review the exact record, then publish it.</p>
+        </div>
+        <a href="/v1/combos" target="_blank" rel="noopener noreferrer">Public combos ↗</a>
+      </header>
+
+      <section class="panel" aria-labelledby="existing-heading">
+        <h2 id="existing-heading">Existing combos</h2>
+        <div class="row">
+          <select id="existing" aria-label="Existing combo">
+            <option value="">Choose a combo</option>
+          </select>
+          <button id="load-existing" type="button">Load selected</button>
+          <button id="new-combo" type="button">New combo</button>
+          <button id="reload-list" type="button">Reload list</button>
+        </div>
+        <p id="revision" class="muted">New record</p>
+      </section>
+
+      <section class="panel" aria-labelledby="details-heading">
+        <h2 id="details-heading">Combo details</h2>
+        <p class="muted">
+          Your draft is saved in this browser. A selected MP4 stays on this device and is never sent
+          to Labatar.
+        </p>
+        <div class="grid three">
+          <label
+            >Combo ID <input id="combo-id" required maxlength="100" placeholder="aang-gyatso-basic"
+          /></label>
+          <label
+            >Character ID <input id="character-id" required maxlength="100" placeholder="aang"
+          /></label>
+          <label
+            >Support ID <input id="support-id" required maxlength="100" placeholder="gyatso"
+          /></label>
+        </div>
+        <div class="grid two">
+          <label
+            >Combo name <input id="combo-name" maxlength="160" placeholder="Reliable 5B conversion"
+          /></label>
+          <label
+            >Editor difficulty (1–5)
+            <select id="difficulty">
+              <option value="">Unrated</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+            </select>
+          </label>
+        </div>
+        <div class="grid two">
+          <label
+            >Editor pick context
+            <input
+              id="editor-pick-context"
+              maxlength="160"
+              placeholder="Starter route for midscreen"
+          /></label>
+          <label
+            >Why pick it
+            <input
+              id="editor-pick-reason"
+              maxlength="1000"
+              placeholder="Reliable confirm with no pips"
+          /></label>
+        </div>
+        <label
+          >Notation / route
+          <textarea
+            id="route"
+            required
+            maxlength="2000"
+            rows="2"
+            placeholder="2A > 5B > 236A"
+          ></textarea>
+        </label>
+        <label
+          >Routing mode
+          <select id="routing-mode">
+            <option value="autopilot">Autopilot</option>
+            <option value="unique">Unique routing</option>
+          </select>
+        </label>
+        <div class="grid three">
+          <label
+            >Screen position <input id="screen-position" maxlength="100" placeholder="midscreen"
+          /></label>
+          <label>Damage <input id="damage" required maxlength="100" placeholder="3200" /></label>
+          <label
+            >Start video at (seconds)
+            <input id="start-seconds" type="number" min="0" max="86400" step="1" value="0"
+          /></label>
+        </div>
+        <div class="grid three">
+          <label
+            >Pips <input id="pips" type="number" min="0" max="1000000" step="any" value="0"
+          /></label>
+          <label
+            >Flow <input id="flow" type="number" min="0" max="1000000" step="any" value="0"
+          /></label>
+          <label>Other costs (JSON) <input id="other-costs" placeholder='{"meter": 1}' /></label>
+        </div>
+        <div class="grid two">
+          <label
+            >Mechanics, one per line
+            <textarea id="mechanics" rows="3" placeholder="corner carry"></textarea>
+          </label>
+          <label
+            >Published move IDs, one per line
+            <textarea id="move-ids" rows="3" placeholder="aang-2a"></textarea>
+          </label>
+        </div>
+        <label
+          >Notes (JSON array)
+          <textarea
+            id="notes"
+            rows="4"
+            placeholder='[{"id":"note-1","text":"Delay the last hit","category":"execution"}]'
+          ></textarea>
+        </label>
+      </section>
+
+      <section class="panel" aria-labelledby="video-heading">
+        <h2 id="video-heading">Video reference</h2>
+        <div class="grid two">
+          <label
+            >Local MP4 preview <input id="local-video" type="file" accept="video/mp4,video/*"
+          /></label>
+          <label
+            >YouTube URL
+            <input
+              id="youtube-url"
+              required
+              type="url"
+              placeholder="https://www.youtube.com/watch?v=…"
+          /></label>
+        </div>
+        <div class="grid two previews">
+          <video id="local-preview" controls playsinline hidden></video>
+          <iframe
+            id="youtube-preview"
+            title="YouTube preview"
+            allow="encrypted-media; picture-in-picture; fullscreen"
+            allowfullscreen
+            hidden
+          ></iframe>
+        </div>
+        <a href="https://studio.youtube.com/" target="_blank" rel="noopener noreferrer"
+          >Open YouTube Studio ↗</a
+        >
+      </section>
+
+      <section class="panel" aria-labelledby="review-heading">
+        <h2 id="review-heading">Review and publish</h2>
+        <div class="row">
+          <label class="file-label"
+            >Import desktop draft
+            <input id="import-draft" type="file" accept="application/json,.json"
+          /></label>
+        </div>
+        <p id="import-warning" class="warning" hidden></p>
+        <p id="validation" class="error" role="alert" hidden></p>
+        <pre id="payload-preview" aria-label="Published JSON preview"></pre>
+        <div class="row">
+          <button id="publish" class="primary" type="button" disabled>Publish combo</button>
+          <button id="unpublish" class="danger" type="button" hidden>Unpublish combo</button>
+        </div>
+        <p id="status" role="status" aria-live="polite"></p>
+      </section>
+    </main>
+  </body>
+</html>

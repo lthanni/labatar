@@ -13,6 +13,7 @@ import {
   Card,
   CardContent,
   Checkbox,
+  Collapse,
   Dialog,
   DialogActions,
   DialogContent,
@@ -23,6 +24,7 @@ import {
   Paper,
   Slider,
   Stack,
+  Switch,
   Tab,
   Tabs,
   TextField,
@@ -44,6 +46,8 @@ import { ObsRecordingControls, ObsRecordingProvider, useObsRecording } from "./O
 import { MoveCapturePanel } from "./MoveCapturePanel";
 import { RecordingViewer } from "./RecordingViewer";
 import { TechSection } from "./TechSection";
+import { PublishedTechSection } from "./PublishedTechSection";
+import { CombosPage } from "./CombosPage";
 import { ArtworkPanel } from "./ArtworkPanel";
 import {
   GuidesDialog,
@@ -67,6 +71,11 @@ import type {
   ProcessingConfigurationResult,
 } from "./processing-config-types";
 import { techSelectComboEvent, techSelectRecordingEvent } from "./tech-types";
+import {
+  forgetPendingYouTubeUpload,
+  pendingYouTubeUploadsChangedEvent,
+  readPendingYouTubeUploads,
+} from "./youtube-pending-uploads";
 
 type AutomaticMoveRunState = {
   status: "idle" | "countdown" | "running" | "paused" | "completed" | "cancelled" | "error";
@@ -138,6 +147,7 @@ declare global {
         }) => Promise<{ sessionId: string; startedAt: string; metadata: RecordingMetadata }>;
         startManualRecording: (request: {
           setup: { profileName: string; recordDirectory: string };
+          fileNameBase?: string;
         }) => Promise<{ sessionId: string; startedAt: string; metadata: null }>;
         stopRecording: () => Promise<{
           outputPath: string | null;
@@ -152,6 +162,8 @@ declare global {
       };
       replays: {
         getFolder: () => Promise<string | null>;
+        importDropped: (files: File[]) => Promise<{ importedCount: number }>;
+        chooseImport: () => Promise<{ importedCount: number } | null>;
         getGameFolderStatus: () => Promise<{ folder: string | null; issue: string | null }>;
         selectFolder: () => Promise<string | null>;
         getCachedScan: (folder: string) => Promise<{
@@ -190,10 +202,18 @@ declare global {
         getWorkState: () => Promise<RecordingWorkItem[]>;
         onWorkState: (listener: (work: RecordingWorkItem[]) => void) => () => void;
         onChanged: (listener: () => void) => () => void;
+        onFinalized: (
+          listener: (result: {
+            sessionId: string;
+            recordingId: string | null;
+            manifestError: string | null;
+          }) => void,
+        ) => () => void;
         list: (request?: { analysisScope?: "none" | "move-takes" | "all" }) => Promise<{
           folder: string;
           recordings: RecordedVideo[];
         }>;
+        importComboMp4: () => Promise<string | null>;
         getChapters: (request: {
           recordingId: string;
         }) => Promise<Array<{ startMs: number; title: string }>>;
@@ -215,7 +235,8 @@ declare global {
           recordingId: string;
           startTime: number;
           endTime: number;
-        }) => Promise<{ recording: RecordedVideo }>;
+          mode: "fast" | "precise";
+        }) => Promise<{ recording: RecordedVideo; actualStartTime: number }>;
         createF10Clips: (request: { recordingId: string }) => Promise<{
           total: number;
           created: number;
@@ -227,16 +248,72 @@ declare global {
         addGameChapters: (request: {
           recordingId: string;
         }) => Promise<{ added: number; skipped: string[]; backupPath: string | null }>;
-        openYouTubeStudio: (request: { recordingId: string }) => Promise<void>;
+        openYouTubeStudio: (request: { recordingId: string; title?: string }) => Promise<void>;
+        getYouTubeUploadStatus: (request: { destination: "sets" | "combos" }) => Promise<{
+          clientId: string;
+          hasClientSecret: boolean;
+          connected: boolean;
+          uploading: boolean;
+        }>;
+        configureYouTube: (request: {
+          clientId: string;
+          clientSecret: string;
+          destination: "sets" | "combos";
+        }) => Promise<{
+          clientId: string;
+          hasClientSecret: boolean;
+          connected: boolean;
+          uploading: boolean;
+        }>;
+        connectYouTube: (request: { destination: "sets" | "combos" }) => Promise<{
+          clientId: string;
+          hasClientSecret: boolean;
+          connected: boolean;
+          uploading: boolean;
+        }>;
+        disconnectYouTube: (request: { destination: "sets" | "combos" }) => Promise<{
+          clientId: string;
+          hasClientSecret: boolean;
+          connected: boolean;
+          uploading: boolean;
+        }>;
+        uploadToYouTube: (request: {
+          destination: "sets" | "combos";
+          recordingId: string;
+          title: string;
+          description: string;
+          tags: string[];
+          privacyStatus: "private" | "unlisted" | "public";
+          publishAt?: string;
+          madeForKids: boolean;
+        }) => Promise<{ videoId: string; url: string }>;
+        cancelYouTubeUpload: (request: { recordingId: string }) => Promise<void>;
+        dismissYouTubeUploadError: (request: { recordingId: string }) => Promise<void>;
+        openYouTubeTerms: () => Promise<void>;
+        openYouTubeUrl: (request: { url: string }) => Promise<void>;
+        getYouTubeReplacementInfo: (request: {
+          recordingId: string;
+        }) => Promise<{ durationMs: number; hasLocalVideo: boolean }>;
         setYouTubeLink: (request: {
           recordingId: string;
           url: string | null;
+          youtubeDurationSeconds?: number;
+          keepLocalVideo?: boolean;
         }) => Promise<RecordedVideo>;
         openYouTubeVideo: (request: { recordingId: string }) => Promise<void>;
         setTags: (request: { recordingId: string; tags: RecordingTags }) => Promise<RecordedVideo>;
         saveAnalysis: (request: {
           recordingId: string;
           analysis: RecordingAnalysis;
+        }) => Promise<RecordedVideo>;
+        saveFramebarSequence: (request: {
+          recordingId: string;
+          sequence: import("./recording-analysis-types").RecordingFramebarSequence;
+        }) => Promise<RecordedVideo>;
+        reviewFramebarSequence: (request: {
+          recordingId: string;
+          sequenceId: string;
+          action: "approve" | "reject";
         }) => Promise<RecordedVideo>;
         setMoveEvidence: (request: {
           recordingId: string;
@@ -252,10 +329,48 @@ declare global {
         deleteMoveTake: (request: { recordingId: string }) => Promise<{ id: string }>;
         startDrag: (request: { recordingId: string }) => void;
       };
+      catalogPublisher: {
+        publishCombo: (
+          request: import("./publish-combo-draft").PublishComboDraft,
+        ) => Promise<{ cancelled: true } | { cancelled: false; id: string; revision: number }>;
+      };
+      comboCandidates: {
+        status: () => Promise<{ available: boolean }>;
+        submit: (request: {
+          recordingId: string;
+          combo: import("./combo-candidates").CandidateCombo;
+          originCandidateId?: string;
+        }) => Promise<{ id: string }>;
+        onUploadProgress: (
+          listener: (progress: { uploadedBytes: number; totalBytes: number }) => void,
+        ) => () => void;
+        list: (request?: {
+          interactive?: boolean;
+        }) => Promise<import("./combo-candidates").ComboCandidate[]>;
+        approve: (request: { id: string }) => Promise<import("./combo-candidates").ComboCandidate>;
+        reject: (request: {
+          id: string;
+          reason: string;
+        }) => Promise<import("./combo-candidates").ComboCandidate>;
+        markUploaded: (request: {
+          id: string;
+          youtubeUrl: string;
+        }) => Promise<import("./combo-candidates").ComboCandidate>;
+        removeUploaded: (request: { id: string }) => Promise<{ id: string; deleted: true }>;
+        download: (request: { id: string; fileSize: number }) => Promise<string>;
+      };
       artwork: {
         getStatus: () => Promise<{ ready: boolean; missing: string[] }>;
         extract: () => Promise<{
           savedPortraits: number;
+          flowIconImported: boolean;
+          pipsIconImported: boolean;
+        }>;
+        browseMatches: (request: { filenameContains: string }) => Promise<{
+          cancelled: boolean;
+          folderPath: string | null;
+          decoded: number;
+          skipped: number;
         }>;
         cancel: (request: { runId: string }) => Promise<{ cancelled: boolean }>;
         onProgress: (
@@ -335,6 +450,9 @@ type RecordingWorkItem = {
   detail: string;
   completed?: number;
   total?: number;
+  kind?: "youtube-upload";
+  phase?: "queued" | "uploading" | "failed";
+  recordingId?: string;
 };
 
 type UpdateStatus = {
@@ -356,6 +474,8 @@ function MatchHistoryFilters({
   onRankedOnlyChange,
   rankAffectingOnly,
   onRankAffectingOnlyChange,
+  showMmrInUnrankedGames,
+  onShowMmrInUnrankedGamesChange,
 }: {
   dateFrom: string;
   dateTo: string;
@@ -369,6 +489,8 @@ function MatchHistoryFilters({
   onRankedOnlyChange: (value: boolean) => void;
   rankAffectingOnly: boolean;
   onRankAffectingOnlyChange: (value: boolean) => void;
+  showMmrInUnrankedGames: boolean;
+  onShowMmrInUnrankedGamesChange: (value: boolean) => void;
 }) {
   const firstAvailableDay = dateKeyToDayIndex(availableDateFrom);
   const lastAvailableDay = dateKeyToDayIndex(availableDateTo);
@@ -482,6 +604,17 @@ function MatchHistoryFilters({
             }
             label="Games which affect rank only"
           />
+          <FormControlLabel
+            sx={{ m: 0 }}
+            control={
+              <Checkbox
+                size="small"
+                checked={showMmrInUnrankedGames}
+                onChange={(event) => onShowMmrInUnrankedGamesChange(event.target.checked)}
+              />
+            }
+            label="Show MMR in unranked games"
+          />
         </Box>
       </Box>
     </Paper>
@@ -509,6 +642,7 @@ function getLocalDateKey(timestamp: string | null) {
 }
 
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+const showMmrInUnrankedGamesStorageKey = "labatar-show-mmr-in-unranked-games-v1";
 
 function dateKeyToDayIndex(dateKey: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return null;
@@ -628,6 +762,9 @@ function ReplayAnalysis({
   const [overridePlayer, setOverridePlayer] = useState<string | null>(null);
   const [rankedOnly, setRankedOnly] = useState(false);
   const [rankAffectingOnly, setRankAffectingOnly] = useState(false);
+  const [showMmrInUnrankedGames, setShowMmrInUnrankedGames] = useState(
+    () => localStorage.getItem(showMmrInUnrankedGamesStorageKey) === "true",
+  );
   const [scanLoading, setScanLoading] = useState(false);
   const [focusRefreshToken, setFocusRefreshToken] = useState(0);
   const [scanProgress, setScanProgress] = useState<{
@@ -813,6 +950,11 @@ function ReplayAnalysis({
             }}
             rankAffectingOnly={rankAffectingOnly}
             onRankAffectingOnlyChange={setRankAffectingOnly}
+            showMmrInUnrankedGames={showMmrInUnrankedGames}
+            onShowMmrInUnrankedGamesChange={(value) => {
+              localStorage.setItem(showMmrInUnrankedGamesStorageKey, String(value));
+              setShowMmrInUnrankedGames(value);
+            }}
           />
         </Box>
         <Box
@@ -872,6 +1014,7 @@ function ReplayAnalysis({
         replayFolder={replayFolder}
         active={active}
         recordingsRefreshToken={recordingsRefreshToken}
+        showMmrInUnrankedGames={showMmrInUnrankedGames}
         playerOfInterest={playerOfInterest}
         playerCounts={visiblePlayerCounts}
         playerOverride={overridePlayer}
@@ -892,6 +1035,14 @@ function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [recordingsRefreshToken, setRecordingsRefreshToken] = useState(0);
   const [recordingWork, setRecordingWork] = useState<RecordingWorkItem[]>([]);
+  const [pendingYouTubeUploads, setPendingYouTubeUploads] = useState(readPendingYouTubeUploads);
+  const [collapsedYouTubeCards, setCollapsedYouTubeCards] = useState<Set<string>>(() => new Set());
+  const [youtubeReviewRequest, setYoutubeReviewRequest] = useState<{
+    recordingId: string;
+    url: string;
+    requestId: number;
+  } | null>(null);
+  const youtubeReviewRequestId = useRef(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [guidesOpen, setGuidesOpen] = useState(false);
   const [guideSection, setGuideSection] = useState<GuideSection>("matches");
@@ -916,6 +1067,12 @@ function App() {
   const [gameFolderStatusToken, setGameFolderStatusToken] = useState(0);
   const [gameFolderRefreshToken, setGameFolderRefreshToken] = useState(0);
   const [replayScanError, setReplayScanError] = useState<string | null>(null);
+  const [replayDropActive, setReplayDropActive] = useState(false);
+  const [replayImportBusy, setReplayImportBusy] = useState(false);
+  const [replayImportMessage, setReplayImportMessage] = useState<{
+    severity: "success" | "error";
+    text: string;
+  } | null>(null);
   const [folderPopupDismissed, setFolderPopupDismissed] = useState(false);
   const [artworkStatus, setArtworkStatus] = useState<{
     ready: boolean;
@@ -928,19 +1085,31 @@ function App() {
   const captureTabIndex = 2;
   const nerdProcessingTabIndex = 3;
   const techTabIndex = 4;
+  const publishedTechTabIndex = 5;
+  const combosTabIndex = 6;
   const recordingTabAvailable = Boolean(window.electronAPI?.recordings);
   const artworkTabAvailable = Boolean(window.electronAPI?.artwork);
   const tabStorageKey = "avatar-app-last-tab-v2";
+  const comboEditorModeStorageKey = "labatar-combos-editor-mode";
   const { state: obsState } = useObsRecording();
   const availableTabIndices = [
     0,
     ...(recordingTabAvailable ? [recordingsTabIndex] : []),
+    publishedTechTabIndex,
+    combosTabIndex,
     ...(developerTabsAvailable ? [captureTabIndex, nerdProcessingTabIndex, techTabIndex] : []),
   ];
   const [tab, setTab] = useState(() => {
     const storedTab = localStorage.getItem(tabStorageKey);
     const legacyTab = Number(localStorage.getItem("avatar-app-last-tab"));
     const savedTab = Number(storedTab ?? (legacyTab === 2 ? techTabIndex : legacyTab));
+    if (
+      developerTabsAvailable &&
+      savedTab === techTabIndex &&
+      localStorage.getItem("labatar-tech-editor-section") === "combos"
+    ) {
+      return combosTabIndex;
+    }
     return availableTabIndices.includes(savedTab) ? savedTab : 0;
   });
   const [mountedTabs, setMountedTabs] = useState(() => ({
@@ -949,7 +1118,21 @@ function App() {
     capture: developerTabsAvailable && tab === captureTabIndex,
     nerdProcessing: developerTabsAvailable && tab === nerdProcessingTabIndex,
     tech: tab === techTabIndex,
+    publishedTech: tab === publishedTechTabIndex,
+    combos: tab === combosTabIndex,
   }));
+  const [comboEditorMode, setComboEditorMode] = useState(() => {
+    if (!developerTabsAvailable) return false;
+    const savedMode = localStorage.getItem(comboEditorModeStorageKey);
+    return savedMode === null
+      ? localStorage.getItem("labatar-tech-editor-section") === "combos"
+      : savedMode === "true";
+  });
+  useEffect(() => {
+    if (developerTabsAvailable) {
+      localStorage.setItem(comboEditorModeStorageKey, String(comboEditorMode));
+    }
+  }, [comboEditorMode, comboEditorModeStorageKey]);
   const [blackoutStatus, setBlackoutStatus] = useState<DevBlackoutStatus>({
     available: false,
     gameRunning: false,
@@ -993,9 +1176,99 @@ function App() {
       nerdProcessing:
         developerTabsAvailable && (current.nerdProcessing || nextTab === nerdProcessingTabIndex),
       tech: current.tech || nextTab === techTabIndex,
+      publishedTech: current.publishedTech || nextTab === publishedTechTabIndex,
+      combos: current.combos || nextTab === combosTabIndex,
     }));
     localStorage.setItem(tabStorageKey, String(nextTab));
   };
+  const finishReplayImport = ({ importedCount }: { importedCount: number }) => {
+    setReplayImportMessage({
+      severity: "success",
+      text: `Imported ${importedCount} replay${importedCount === 1 ? "" : "s"} into Match history.`,
+    });
+    changeTab(0);
+    setGameFolderRefreshToken((current) => current + 1);
+  };
+  const chooseReplayImport = async () => {
+    if (replayImportBusy) return;
+    setReplayImportBusy(true);
+    setReplayImportMessage(null);
+    try {
+      const result = await window.electronAPI?.replays.chooseImport();
+      if (result) finishReplayImport(result);
+    } catch (error) {
+      setReplayImportMessage({
+        severity: "error",
+        text: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setReplayImportBusy(false);
+    }
+  };
+  useEffect(() => {
+    const importDropped = window.electronAPI?.replays.importDropped;
+    if (!importDropped) return;
+    const hasFiles = (event: DragEvent) => {
+      const transfer = event.dataTransfer;
+      return Boolean(
+        transfer &&
+        (Array.from(transfer.types).includes("Files") ||
+          Array.from(transfer.items).some((item) => item.kind === "file") ||
+          transfer.files.length > 0),
+      );
+    };
+    let hideDropOverlay: number | null = null;
+    const showDropOverlay = () => {
+      setReplayDropActive(true);
+      if (hideDropOverlay !== null) window.clearTimeout(hideDropOverlay);
+      hideDropOverlay = window.setTimeout(() => setReplayDropActive(false), 800);
+    };
+    const onDragEnter = (event: DragEvent) => {
+      if (hasFiles(event)) showDropOverlay();
+    };
+    const onDragOver = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      showDropOverlay();
+    };
+    const onDrop = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (hideDropOverlay !== null) window.clearTimeout(hideDropOverlay);
+      setReplayDropActive(false);
+      if (replayImportBusy) return;
+      const files = [...(event.dataTransfer?.files ?? [])];
+      if (!files.length) {
+        setReplayImportMessage({ severity: "error", text: "No files were available in the drop." });
+        return;
+      }
+      setReplayImportBusy(true);
+      setReplayImportMessage(null);
+      void Promise.resolve()
+        .then(() => importDropped(files))
+        .then(({ importedCount }) => {
+          finishReplayImport({ importedCount });
+        })
+        .catch((error) => {
+          setReplayImportMessage({
+            severity: "error",
+            text: error instanceof Error ? error.message : String(error),
+          });
+        })
+        .finally(() => setReplayImportBusy(false));
+    };
+    document.addEventListener("dragenter", onDragEnter, true);
+    document.addEventListener("dragover", onDragOver, true);
+    document.addEventListener("drop", onDrop, true);
+    return () => {
+      if (hideDropOverlay !== null) window.clearTimeout(hideDropOverlay);
+      document.removeEventListener("dragenter", onDragEnter, true);
+      document.removeEventListener("dragover", onDragOver, true);
+      document.removeEventListener("drop", onDrop, true);
+    };
+  }, [replayImportBusy]);
   const refreshRecordings = useCallback(() => {
     setRecordingsRefreshToken((current) => current + 1);
   }, []);
@@ -1128,17 +1401,38 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const refresh = () => setPendingYouTubeUploads(readPendingYouTubeUploads());
+    window.addEventListener(pendingYouTubeUploadsChangedEvent, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(pendingYouTubeUploadsChangedEvent, refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
+
+  const youtubeUploadJobs = recordingWork.flatMap((work) =>
+    work.kind === "youtube-upload" &&
+    work.recordingId &&
+    (work.phase === "queued" || work.phase === "uploading")
+      ? [{ recordingId: work.recordingId, phase: work.phase }]
+      : [],
+  );
+
+  useEffect(() => {
     const showRecordings = () => {
       if (recordingTabAvailable) changeTab(recordingsTabIndex);
     };
-    const showTech = () => changeTab(techTabIndex);
+    const showTech = () => {
+      if (developerTabsAvailable) setComboEditorMode(true);
+      changeTab(combosTabIndex);
+    };
     window.addEventListener(techSelectRecordingEvent, showRecordings);
     window.addEventListener(techSelectComboEvent, showTech);
     return () => {
       window.removeEventListener(techSelectRecordingEvent, showRecordings);
       window.removeEventListener(techSelectComboEvent, showTech);
     };
-  }, [recordingTabAvailable, recordingsTabIndex, techTabIndex]);
+  }, [recordingTabAvailable, recordingsTabIndex, combosTabIndex]);
 
   useEffect(() => window.electronAPI?.updates.onStatus(setUpdateStatus), []);
   useEffect(() => {
@@ -1155,7 +1449,26 @@ function App() {
       }}
     >
       <UpdateStatusBanner status={updateStatus} onClose={() => setUpdateStatus(null)} />
-      {!settingsOpen && (
+      {replayDropActive && (
+        <Box
+          role="status"
+          sx={{
+            position: "fixed",
+            inset: 8,
+            zIndex: (theme) => theme.zIndex.modal + 1,
+            pointerEvents: "auto",
+            display: "grid",
+            placeItems: "center",
+            border: "3px dashed",
+            borderColor: "primary.main",
+            borderRadius: 2,
+            bgcolor: "rgba(12, 20, 31, 0.9)",
+          }}
+        >
+          <Typography variant="h5">Drop replay .dlr files, a replay folder, or a ZIP</Typography>
+        </Box>
+      )}
+      {(!settingsOpen || replayImportBusy || replayImportMessage) && (
         <Stack
           spacing={1}
           role="status"
@@ -1167,22 +1480,34 @@ function App() {
             zIndex: (theme) => theme.zIndex.snackbar,
           }}
         >
-          {(gameFolderStatus?.issue || replayScanError) && !folderPopupDismissed && (
-            <Alert severity="warning" onClose={() => setFolderPopupDismissed(true)}>
-              {gameFolderStatus?.issue ?? `Could not scan replays: ${replayScanError}`}
-              <Button size="small" color="inherit" onClick={() => openSettings("game")}>
-                Open game folder settings
-              </Button>
+          {replayImportBusy && <Alert severity="info">Importing replays…</Alert>}
+          {replayImportMessage && (
+            <Alert
+              severity={replayImportMessage.severity}
+              onClose={() => setReplayImportMessage(null)}
+            >
+              {replayImportMessage.text}
             </Alert>
           )}
-          {artworkTabAvailable &&
+          {!settingsOpen &&
+            (gameFolderStatus?.issue || replayScanError) &&
+            !folderPopupDismissed && (
+              <Alert severity="warning" onClose={() => setFolderPopupDismissed(true)}>
+                {gameFolderStatus?.issue ?? `Could not scan replays: ${replayScanError}`}
+                <Button size="small" color="inherit" onClick={() => openSettings("game")}>
+                  Open game folder settings
+                </Button>
+              </Alert>
+            )}
+          {!settingsOpen &&
+            artworkTabAvailable &&
             artworkStatus !== null &&
             artworkStatus.missing.length > 0 &&
             !artworkPopupDismissed && (
               <Alert severity="info" onClose={() => setArtworkPopupDismissed(true)}>
-                {artworkStatus.missing.length} character/support PNG
+                {artworkStatus.missing.length} artwork image
                 {artworkStatus.missing.length === 1 ? " is" : "s are"} missing. Import artwork to
-                show all portraits.
+                display the missing images.
                 <Button size="small" color="inherit" onClick={() => openSettings("artwork")}>
                   Open artwork settings
                 </Button>
@@ -1208,11 +1533,23 @@ function App() {
         >
           <Tab label="Match history" />
           {recordingTabAvailable && <Tab label="Recordings" value={recordingsTabIndex} />}
+          <Tab label="Tech" value={publishedTechTabIndex} />
+          <Tab label="Combos" value={combosTabIndex} />
           {developerTabsAvailable && <Tab label="Dev-only capture" value={captureTabIndex} />}
           {developerTabsAvailable && <Tab label="Nerd processing" value={nerdProcessingTabIndex} />}
-          {developerTabsAvailable && <Tab label="Tech" value={techTabIndex} />}
+          {developerTabsAvailable && <Tab label="Tech editor" value={techTabIndex} />}
         </Tabs>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", justifySelf: "center" }}>
+          {tab === 0 && window.electronAPI?.replays && (
+            <Button
+              size="small"
+              variant="outlined"
+              disabled={replayImportBusy}
+              onClick={() => void chooseReplayImport()}
+            >
+              Import replays
+            </Button>
+          )}
           <Tooltip title={unreadGuideCount ? `${unreadGuideCount} unread guide entries` : "Guides"}>
             <Button
               size="small"
@@ -1260,7 +1597,7 @@ function App() {
         onConfirmRead={confirmGuideRead}
         onClose={() => setGuidesOpen(false)}
       />
-      {recordingWork.length > 0 && (
+      {(recordingWork.length > 0 || pendingYouTubeUploads.length > 0) && (
         <Stack
           spacing={1}
           aria-live="polite"
@@ -1271,22 +1608,110 @@ function App() {
             width: "min(480px, calc(100vw - 32px))",
             maxHeight: "45vh",
             overflowY: "auto",
-            zIndex: (theme) => theme.zIndex.snackbar,
+            zIndex: (theme) => theme.zIndex.modal - 1,
           }}
         >
           {recordingWork.map((work) => (
-            <Alert key={work.id} severity="info" icon={false} sx={{ py: 0.5 }}>
+            <Alert
+              key={work.id}
+              severity={work.phase === "failed" ? "error" : "info"}
+              icon={false}
+              sx={{ py: 0.5 }}
+            >
               <Typography variant="body2" sx={{ fontWeight: 600 }}>
                 {work.title}: {work.fileName}
               </Typography>
               <Typography variant="caption" component="div">
                 {work.detail}
               </Typography>
-              <LinearProgress
-                variant={work.total ? "determinate" : "indeterminate"}
-                value={work.total ? (100 * (work.completed ?? 0)) / work.total : undefined}
-                sx={{ mt: 0.75 }}
-              />
+              {work.phase !== "failed" && (
+                <LinearProgress
+                  variant={work.total ? "determinate" : "indeterminate"}
+                  value={work.total ? (100 * (work.completed ?? 0)) / work.total : undefined}
+                  sx={{ mt: 0.75 }}
+                />
+              )}
+              {work.kind === "youtube-upload" &&
+                (work.phase === "queued" || work.phase === "uploading") &&
+                work.recordingId && (
+                  <Button
+                    size="small"
+                    onClick={() =>
+                      void window.electronAPI?.recordings.cancelYouTubeUpload({
+                        recordingId: work.recordingId!,
+                      })
+                    }
+                  >
+                    Cancel upload
+                  </Button>
+                )}
+              {work.kind === "youtube-upload" && work.phase === "failed" && work.recordingId && (
+                <Button
+                  size="small"
+                  onClick={() =>
+                    void window.electronAPI?.recordings.dismissYouTubeUploadError({
+                      recordingId: work.recordingId!,
+                    })
+                  }
+                >
+                  Dismiss
+                </Button>
+              )}
+            </Alert>
+          ))}
+          {pendingYouTubeUploads.map((upload) => (
+            <Alert
+              key={`youtube-pending:${upload.recordingId}`}
+              severity="success"
+              icon={false}
+              sx={{ py: 0.5 }}
+            >
+              <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                <Typography variant="body2" sx={{ fontWeight: 600, flex: 1, minWidth: 0 }}>
+                  YouTube upload ready: {upload.fileName}
+                </Typography>
+                <Button
+                  size="small"
+                  aria-expanded={!collapsedYouTubeCards.has(upload.recordingId)}
+                  onClick={() =>
+                    setCollapsedYouTubeCards((current) => {
+                      const next = new Set(current);
+                      if (next.has(upload.recordingId)) next.delete(upload.recordingId);
+                      else next.add(upload.recordingId);
+                      return next;
+                    })
+                  }
+                >
+                  {collapsedYouTubeCards.has(upload.recordingId) ? "Expand" : "Shrink"}
+                </Button>
+              </Stack>
+              <Collapse in={!collapsedYouTubeCards.has(upload.recordingId)}>
+                <Typography variant="caption" component="div">
+                  Review the uploaded video before replacing the local recording. Scheduled or
+                  private videos can be linked while the local file stays available.
+                </Typography>
+                <Stack direction="row" spacing={1} sx={{ mt: 0.5 }}>
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      setYoutubeReviewRequest({
+                        recordingId: upload.recordingId,
+                        url: upload.url,
+                        requestId: ++youtubeReviewRequestId.current,
+                      });
+                      setMountedTabs((current) => ({ ...current, recordings: true }));
+                    }}
+                  >
+                    Review and link
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() => forgetPendingYouTubeUpload(upload.recordingId)}
+                  >
+                    Forget
+                  </Button>
+                </Stack>
+              </Collapse>
             </Alert>
           ))}
         </Stack>
@@ -1366,8 +1791,8 @@ function App() {
                       : artworkStatus === null
                         ? "Checking artwork…"
                         : artworkStatus.missing.length === 0
-                          ? "All known portraits available"
-                          : `${artworkStatus.missing.length} PNG${artworkStatus.missing.length === 1 ? "" : "s"} missing`}
+                          ? "All known artwork available"
+                          : `${artworkStatus.missing.length} artwork image${artworkStatus.missing.length === 1 ? "" : "s"} missing`}
                   </Typography>
                 </Box>
               </AccordionSummary>
@@ -1428,6 +1853,8 @@ function App() {
             active={tab === recordingsTabIndex}
             refreshToken={recordingsRefreshToken}
             mode="recordings"
+            youtubeReviewRequest={youtubeReviewRequest}
+            youtubeUploadJobs={youtubeUploadJobs}
           />
         </Box>
       )}
@@ -1453,12 +1880,47 @@ function App() {
             active={tab === nerdProcessingTabIndex}
             refreshToken={recordingsRefreshToken}
             mode="nerd-processing"
+            youtubeUploadJobs={youtubeUploadJobs}
           />
         </Box>
       )}
-      {developerTabsAvailable && mountedTabs.tech && (
-        <Box sx={{ display: tab === techTabIndex ? "block" : "none" }}>
-          <TechSection />
+      {mountedTabs.combos && (
+        <Box sx={{ display: tab === combosTabIndex ? "block" : "none" }}>
+          {developerTabsAvailable && (
+            <Box sx={{ display: "flex", justifyContent: "flex-end", mb: 1 }}>
+              <FormControlLabel
+                label="Dev combo editor"
+                control={
+                  <Switch
+                    checked={comboEditorMode}
+                    onChange={(event) => setComboEditorMode(event.target.checked)}
+                  />
+                }
+              />
+            </Box>
+          )}
+          {!comboEditorMode && <CombosPage active={tab === combosTabIndex} />}
+        </Box>
+      )}
+      {developerTabsAvailable && (mountedTabs.tech || mountedTabs.combos) && (
+        <Box
+          sx={{
+            display:
+              tab === techTabIndex || (tab === combosTabIndex && comboEditorMode)
+                ? "block"
+                : "none",
+          }}
+        >
+          <TechSection
+            active={tab === techTabIndex || (tab === combosTabIndex && comboEditorMode)}
+            recordingsRefreshToken={recordingsRefreshToken}
+            combosOnly={tab === combosTabIndex && comboEditorMode}
+          />
+        </Box>
+      )}
+      {mountedTabs.publishedTech && (
+        <Box sx={{ display: tab === publishedTechTabIndex ? "block" : "none" }}>
+          <PublishedTechSection active={tab === publishedTechTabIndex} view="moves" />
         </Box>
       )}
     </Box>

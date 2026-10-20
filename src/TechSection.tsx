@@ -1,13 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Alert,
   Autocomplete,
   Box,
   Button,
-  Card,
-  CardContent,
   Checkbox,
   Chip,
-  Divider,
   FormControl,
   FormControlLabel,
   InputLabel,
@@ -15,17 +13,44 @@ import {
   ListItemButton,
   ListItemText,
   MenuItem,
-  OutlinedInput,
   Paper,
   Select,
   Stack,
   Tab,
   Tabs,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Switch,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import type { RecordedVideo } from "./recording-types";
+import supportMap from "../electron/support-map.json";
+import { useObsRecording } from "./ObsRecordingContext";
+import { RecordingViewer } from "./RecordingViewer";
+import { ComboTable, ComboWorkspace, type ComboTableRow } from "./ComboTable";
+import { comboStarterLabel } from "./combo-starter";
+import { formatComboRecordingBaseName } from "./combo-recording-name";
+import {
+  ComboInlineFilters,
+  emptyComboInlineFilters,
+  matchesComboInlineFilters,
+  type ComboInlineFilterState,
+} from "./ComboInlineFilters";
+import {
+  comboNoteCategoryLabel,
+  comboNoteRangeFromSelection,
+  comboNoteRangeOffsets,
+  comboNotesOverlap,
+  normalizeComboNotes,
+} from "./combo-notes";
+import {
+  makePublishComboDraft,
+  matchesPublishedCombo,
+  publishedComboFromDraft,
+} from "./publish-combo-draft";
+import { catalogApiUrl, fetchPublishedCombos, type PublishedCombo } from "./published-catalog";
 import { moveTakeOutcomes, type MoveTakeOutcome } from "./move-capture-types";
 import { isNonMotionFMove, resolveFlowStance, withCommonTechMoves } from "./common-tech-moves";
 import { effectiveMeasurement } from "./move-measurements";
@@ -45,8 +70,9 @@ import {
 import type {
   TechCatalog,
   TechCombo,
+  ComboNote,
+  ComboNoteRange,
   TechMove,
-  TechResourceCosts,
   TechStanceFollowupPattern,
   TechMeasuredField,
 } from "./tech-types";
@@ -56,6 +82,7 @@ import {
   moveNotationsMatch,
   normalizeMoveNotation,
   parseMoveNotation,
+  stanceFollowupMatches,
 } from "./move-notation";
 
 type TechCharacter = {
@@ -78,22 +105,16 @@ const characters: TechCharacter[] = [
   { value: "Avatar Aang", label: "Avatar Aang" },
 ];
 
-const supportsByCharacter: Record<string, string[]> = {
-  Aang: ["Gyatso", "Appa", "Momo"],
-  Korra: ["Naga", "Tonraq", "Raava"],
-  "Nightmare Korra": ["Vaatu", "Dark Avatar Unalaq", "Dark Spirit"],
-  Zuko: ["Mai", "June", "Ran and Shaw"],
-  Katara: ["Kanna", "Master Pakku", "Hakoda"],
-  Toph: ["Badgermole", "The Boulder", "The Hippo"],
-  Sokka: ["Suki", "Master Piandao", "Princess Yue"],
-  Azula: ["Lo and Li", "Joo Dee", "Ursa"],
-  Kyoshi: ["Rangi", "Kelsang", "Yun"],
-  Ozai: ["Firelord Sozin", "Imperial Firebender", "Admiral Zhao"],
-  Zaheer: ["Ming-Hua", "P'Li", "Ghazan"],
-  "Avatar Aang": ["Katara", "Roku", "Guru Pathik"],
-};
+const supportsByCharacter: Record<string, string[]> = Object.fromEntries(
+  Object.entries(supportMap).map(([character, slots]) => [
+    character,
+    [slots["1"], slots["2"], slots["3"]],
+  ]),
+);
 
 const screenPositions = ["corner", "midscreen", "fullscreen"];
+const techEditorSections = ["moves", "pressure", "neutral", "misc"] as const;
+const techEditorSectionStorageKey = "labatar-tech-editor-section";
 const measuredFields: Array<{ key: TechMeasuredField; label: string }> = [
   { key: "startup", label: "Startup" },
   { key: "active", label: "Active" },
@@ -113,10 +134,10 @@ type MoveDraft = {
   notApplicable: Partial<Record<MoveTakeOutcome, string>>;
   flowCancellable: boolean | null;
   isStanceParent: boolean;
+  isNonAttack: boolean;
   isFlowStance: boolean;
   flowStanceOverride: boolean | null;
   hasChargedVersion: boolean;
-  allowsDirectionalFollowups: boolean;
   dependsOnMoveId: string;
   stanceMinimumDuration: string;
   flowStanceMinimumTimeToFlowCancel: string;
@@ -134,12 +155,51 @@ type MoveDraft = {
 
 type ComboDraft = {
   route: string;
+  routingMode: "autopilot" | "unique";
   screenPosition: string;
   damage: string;
+  notes: ComboNote[];
+  requiresCounterhit: boolean;
+  initialConversionHitconfirmable: boolean;
+  initialConversionSafeOnBlock: boolean;
   pips: string;
   flow: string;
   recordingId: string | null;
 };
+
+function newComboNoteId(): string {
+  return (
+    globalThis.crypto?.randomUUID?.() ?? `note-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  );
+}
+
+type PendingComboRecording = {
+  character: string;
+  comboId: string;
+  sessionId: string;
+};
+
+type FinalizedComboRecording = {
+  sessionId: string;
+  recordingId: string | null;
+  manifestError: string | null;
+};
+
+const pendingComboRecordingStorageKey = "labatar-pending-combo-recording-v1";
+
+function readPendingComboRecording(): PendingComboRecording | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(pendingComboRecordingStorageKey) ?? "null");
+    return value &&
+      typeof value.character === "string" &&
+      typeof value.comboId === "string" &&
+      typeof value.sessionId === "string"
+      ? value
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 const emptyMoveDraft: MoveDraft = {
   input: "",
@@ -148,10 +208,10 @@ const emptyMoveDraft: MoveDraft = {
   notApplicable: {},
   flowCancellable: null,
   isStanceParent: false,
+  isNonAttack: false,
   isFlowStance: false,
   flowStanceOverride: null,
   hasChargedVersion: false,
-  allowsDirectionalFollowups: false,
   dependsOnMoveId: "",
   stanceMinimumDuration: "",
   flowStanceMinimumTimeToFlowCancel: "",
@@ -169,8 +229,13 @@ const emptyMoveDraft: MoveDraft = {
 
 const emptyComboDraft: ComboDraft = {
   route: "",
+  routingMode: "autopilot",
   screenPosition: "",
   damage: "",
+  notes: [],
+  requiresCounterhit: false,
+  initialConversionHitconfirmable: false,
+  initialConversionSafeOnBlock: false,
   pips: "0",
   flow: "0",
   recordingId: null,
@@ -221,6 +286,7 @@ function loadTechCatalog(): TechCatalog {
             input: normalizedInput ?? move.input,
             isStanceParent:
               move.isStanceParent === true || isFlowStance || legacyMove.isRekka === true,
+            isNonAttack: move.isNonAttack === true,
             isFlowStance,
             flowStanceMinimumTimeToFlowCancel:
               typeof move.flowStanceMinimumTimeToFlowCancel === "number"
@@ -268,6 +334,11 @@ function loadTechCatalog(): TechCatalog {
               ? combo.moveIds.map((moveId) => (typeof moveId === "string" ? moveId : null))
               : [],
             route: typeof combo.route === "string" ? combo.route : "",
+            routingMode: combo.routingMode === "unique" ? "unique" : "autopilot",
+            notes: normalizeComboNotes(combo.notes),
+            requiresCounterhit: combo.requiresCounterhit === true,
+            initialConversionHitconfirmable: combo.initialConversionHitconfirmable === true,
+            initialConversionSafeOnBlock: combo.initialConversionSafeOnBlock === true,
             resourceCosts: {
               pips: combo.resourceCosts?.pips ?? 0,
               flow: combo.resourceCosts?.flow ?? 0,
@@ -316,12 +387,32 @@ function getComboStarterMove(combo: TechCombo, moves: TechMove[]) {
   return moves.find((move) => move.id === starterId) ?? null;
 }
 
+type ComboRouteToken = { input: string; followsStance: boolean };
+
+function parseComboRoute(route: string): ComboRouteToken[] {
+  const parts = route.split(/(->|>|,|~|\u2192)/g);
+  const tokens: ComboRouteToken[] = [];
+  let followsStance = false;
+  for (const part of parts) {
+    if (/^(?:->|>|,|~|\u2192)$/.test(part)) {
+      followsStance = part === "~";
+      continue;
+    }
+    for (const rawInput of part
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter(Boolean)) {
+      const input =
+        rawInput.length > 1 && rawInput.endsWith("!") ? rawInput.slice(0, -1) : rawInput;
+      tokens.push({ input, followsStance });
+      followsStance = false;
+    }
+  }
+  return tokens;
+}
+
 function splitComboRoute(route: string) {
-  return route
-    .replace(/->|>|,|~|\u2192/g, " ")
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter(Boolean);
+  return parseComboRoute(route).map(({ input }) => input);
 }
 
 function findKnownMove(input: string, moves: TechMove[]) {
@@ -330,22 +421,52 @@ function findKnownMove(input: string, moves: TechMove[]) {
 }
 
 function resolveComboRoute(route: string, moves: TechMove[]) {
-  return splitComboRoute(route).map((token) => findKnownMove(token, moves)?.id ?? null);
+  let activeStance: TechMove | null = null;
+  return parseComboRoute(route).map((token) => {
+    const move = token.followsStance
+      ? activeStance
+        ? (moves.find(
+            (candidate) =>
+              candidate.dependsOnMoveId === activeStance?.id &&
+              (moveNotationsMatch(candidate.input, token.input) ||
+                stanceFollowupMatches(candidate.input, token.input)),
+          ) ?? null)
+        : null
+      : findKnownMove(token.input, moves);
+    activeStance = token.followsStance ? activeStance : move?.isStanceParent ? move : null;
+    return move?.id ?? null;
+  });
 }
 
 function getComboRouteEntries(combo: TechCombo, moves: TechMove[]) {
-  const tokens = splitComboRoute(combo.route);
+  const tokens = parseComboRoute(combo.route);
   if (tokens.length > 0) {
-    return tokens.map((token, index) => ({
-      token,
-      move:
-        moves.find((candidate) => candidate.id === combo.moveIds[index]) ??
-        findKnownMove(token, moves),
-    }));
+    let activeStance: TechMove | null = null;
+    return tokens.map((token, index) => {
+      const savedMove = moves.find((candidate) => candidate.id === combo.moveIds[index]) ?? null;
+      const move = token.followsStance
+        ? activeStance
+          ? ((savedMove?.dependsOnMoveId === activeStance.id &&
+            (moveNotationsMatch(savedMove.input, token.input) ||
+              stanceFollowupMatches(savedMove.input, token.input))
+              ? savedMove
+              : null) ??
+            moves.find(
+              (candidate) =>
+                candidate.dependsOnMoveId === activeStance?.id &&
+                (moveNotationsMatch(candidate.input, token.input) ||
+                  stanceFollowupMatches(candidate.input, token.input)),
+            ) ??
+            null)
+          : null
+        : (savedMove ?? findKnownMove(token.input, moves));
+      activeStance = token.followsStance ? activeStance : move?.isStanceParent ? move : null;
+      return { token: token.input, move, followsStance: token.followsStance };
+    });
   }
   return combo.moveIds.map((moveId) => {
     const move = moves.find((candidate) => candidate.id === moveId) ?? null;
-    return { token: formatMoveLabel(move), move };
+    return { token: formatMoveLabel(move), move, followsStance: false };
   });
 }
 
@@ -357,30 +478,35 @@ function getComboRouteText(combo: TechCombo, moves: TechMove[]) {
 }
 
 function getComboStarterLabel(combo: TechCombo, moves: TechMove[]) {
-  const starterMove = getComboStarterMove(combo, moves);
-  if (starterMove) return formatMoveLabel(starterMove);
   const firstRouteToken = splitComboRoute(combo.route)[0];
-  if (firstRouteToken) return firstRouteToken;
-  return getComboRouteText(combo, moves).split(/\s*(?:→|->|,)\s*/)[0] || "Unknown starter";
-}
-
-function getComboStarterKey(combo: TechCombo, moves: TechMove[]) {
-  return getComboStarterMove(combo, moves)?.id ?? getComboStarterLabel(combo, moves);
-}
-
-function getComboResourceCosts(combo: TechCombo, moves: TechMove[]): TechResourceCosts {
-  if (combo.moveIds.length === 0) return combo.resourceCosts;
-  return combo.moveIds.reduce<TechResourceCosts>(
-    (total, moveId) => {
-      const move = moves.find((candidate) => candidate.id === moveId);
-      if (!move) return total;
-      for (const [resource, amount] of Object.entries(move.resourceCosts)) {
-        total[resource] = (total[resource] ?? 0) + amount;
-      }
-      return total;
-    },
-    { pips: 0, flow: 0 },
+  const starterMove =
+    getComboStarterMove(combo, moves) ??
+    (firstRouteToken ? findKnownMove(firstRouteToken, moves) : null);
+  const starter = starterMove
+    ? formatMoveLabel(starterMove)
+    : firstRouteToken ||
+      getComboRouteText(combo, moves).split(/\s*(?:→|->|,)\s*/)[0] ||
+      "Unknown starter";
+  const fallbackFollowup = !combo.route.trim()
+    ? moves.find((move) => move.id === combo.moveIds[1] && move.dependsOnMoveId === starterMove?.id)
+        ?.input
+    : undefined;
+  return comboStarterLabel(
+    starter,
+    combo.route,
+    starterMove?.isStanceParent === true && starterMove.isNonAttack === true,
+    fallbackFollowup,
   );
+}
+
+function comboRecordingBaseName(combo: TechCombo, moves: TechMove[]) {
+  return formatComboRecordingBaseName({
+    character: combo.character,
+    support: combo.support,
+    starter: getComboStarterLabel(combo, moves),
+    screenPosition: combo.screenPosition,
+    damage: combo.damage,
+  });
 }
 
 function formatMoveLabel(move: TechMove | null) {
@@ -418,6 +544,26 @@ function MoveList({
   onEdit: (move: TechMove) => void;
 }) {
   const moveTableColumns = "minmax(220px, 1fr) repeat(8, 64px)";
+  const movesByParent = new Map<string, TechMove[]>();
+  const moveIds = new Set(moves.map((move) => move.id));
+  for (const move of moves) {
+    if (!move.dependsOnMoveId || !moveIds.has(move.dependsOnMoveId)) continue;
+    const siblings = movesByParent.get(move.dependsOnMoveId) ?? [];
+    siblings.push(move);
+    movesByParent.set(move.dependsOnMoveId, siblings);
+  }
+  const orderedMoves: Array<{ move: TechMove; depth: number }> = [];
+  const visited = new Set<string>();
+  const appendMove = (move: TechMove, depth: number) => {
+    if (visited.has(move.id)) return;
+    visited.add(move.id);
+    orderedMoves.push({ move, depth });
+    for (const followup of movesByParent.get(move.id) ?? []) appendMove(followup, depth + 1);
+  };
+  for (const move of moves) {
+    if (!move.dependsOnMoveId || !moveIds.has(move.dependsOnMoveId)) appendMove(move, 0);
+  }
+  for (const move of moves) appendMove(move, 0);
   return (
     <Paper variant="outlined" sx={{ overflowX: "auto" }}>
       <Box
@@ -449,10 +595,7 @@ function MoveList({
         </Typography>
       ) : (
         <List dense disablePadding>
-          {moves.map((move) => {
-            const parentMove = move.dependsOnMoveId
-              ? moves.find((candidate) => candidate.id === move.dependsOnMoveId)
-              : null;
+          {orderedMoves.map(({ move, depth }) => {
             const linkedChargeMove = move.chargedMoveId
               ? moves.find((candidate) => candidate.id === move.chargedMoveId)
               : null;
@@ -475,8 +618,9 @@ function MoveList({
                   columnGap: 1,
                   minWidth: 850,
                   px: 2,
-                  borderLeft: move.dependsOnMoveId ? 2 : 0,
+                  borderLeft: depth ? 2 : 0,
                   borderColor: "primary.main",
+                  pl: depth ? 4 : 2,
                 }}
               >
                 <ListItemText
@@ -488,12 +632,10 @@ function MoveList({
                       ) : move.isStanceParent ? (
                         <Chip label="Stance" size="small" color="primary" />
                       ) : null}
+                      {move.isNonAttack && <Chip label="Non-attack" size="small" />}
                       {move.isCharged && <Chip label="Charged" size="small" color="warning" />}
                       {move.nonstandard && (
                         <Chip label="Nonstandard" size="small" color="default" />
-                      )}
-                      {move.dependsOnMoveId && (
-                        <Chip label="Followup" size="small" color="secondary" />
                       )}
                       {inputClass === "normal" && <Chip label="Normal" size="small" />}
                       {inputClass === "command-normal" && (
@@ -506,12 +648,8 @@ function MoveList({
                   }
                   secondary={
                     [
-                      parentMove ? `Follow-up after ${parentMove.input}` : null,
                       linkedChargeMove ? `Charged: ${linkedChargeMove.input}` : null,
                       linkedBaseMove ? `Standard: ${linkedBaseMove.input}` : null,
-                      move.stanceFollowupPattern === "directional-button"
-                        ? "Accepts 1-9 + button followups"
-                        : null,
                       move.isStanceParent &&
                       !move.isFlowStance &&
                       move.stanceMinimumDuration != null
@@ -533,7 +671,7 @@ function MoveList({
                       .filter(Boolean)
                       .join(" · ") || undefined
                   }
-                  sx={{ minWidth: 0, pl: move.dependsOnMoveId ? 3 : 0 }}
+                  sx={{ minWidth: 0, pl: depth ? 2 : 0 }}
                 />
                 <Typography variant="body2">
                   {frameValue(getEffectiveStartup(move, moves))}
@@ -554,344 +692,183 @@ function MoveList({
   );
 }
 
+function getComboRouteParts(combo: TechCombo, moves: TechMove[]) {
+  const entries = getComboRouteEntries(combo, moves);
+  if (!combo.route.trim()) {
+    return entries.flatMap(({ token, move }, index) => [
+      ...(index > 0 ? [{ text: " \u2192 " }] : []),
+      { text: token === "Unknown move" ? "?" : token, invalid: !move },
+    ]);
+  }
+
+  let entryIndex = 0;
+  return getComboRouteText(combo, moves)
+    .split(/(\s+|->|>|,|~|\u2192)/g)
+    .filter(Boolean)
+    .map((part) => {
+      if (/^(?:\s+|->|>|,|~|\u2192)$/.test(part)) return { text: part };
+      const entry = entries[entryIndex++];
+      return { text: part, invalid: !entry?.move };
+    });
+}
+
 function ComboSelector({
   combos,
   moves,
+  recordings,
+  publishedCombos,
+  inlineFilters,
   selectedId,
-  onSelect,
   onEdit,
 }: {
   combos: TechCombo[];
   moves: TechMove[];
+  recordings: RecordedVideo[];
+  publishedCombos: PublishedCombo[] | null;
+  inlineFilters: ComboInlineFilterState;
   selectedId: string | null;
-  onSelect: (id: string) => void;
   onEdit: (combo: TechCombo) => void;
 }) {
-  const [selectedStarterMoves, setSelectedStarterMoves] = useState<string[]>([]);
-  const [selectedPositions, setSelectedPositions] = useState<string[]>([]);
-  const starterMoveOptions = useMemo(
-    () => [
-      ...new Map(
-        combos.map((combo) => [
-          getComboStarterKey(combo, moves),
-          getComboStarterLabel(combo, moves),
-        ]),
-      ),
-    ],
-    [combos, moves],
-  );
-  const positionOptions = useMemo(
-    () => [...new Set(combos.map((combo) => combo.screenPosition))],
-    [combos],
-  );
-
-  useEffect(() => {
-    setSelectedStarterMoves([]);
-    setSelectedPositions([]);
-  }, [combos]);
-
-  const filteredCombos = combos.filter((combo) => {
-    const starterMatches =
-      selectedStarterMoves.length === 0 ||
-      selectedStarterMoves.includes(getComboStarterKey(combo, moves));
-    const positionMatches =
-      selectedPositions.length === 0 || selectedPositions.includes(combo.screenPosition);
-    return starterMatches && positionMatches;
-  });
-
-  const updateMultiSelect = (value: unknown, setValue: (value: string[]) => void) => {
-    setValue((typeof value === "string" ? value.split(",") : value) as string[]);
-  };
+  const rows = useMemo<ComboTableRow[]>(() => {
+    const recordingsById = new Map(recordings.map((recording) => [recording.id, recording]));
+    return combos
+      .map((combo) => {
+        const recording = combo.recordingId ? recordingsById.get(combo.recordingId) : null;
+        const hasYouTube = Boolean(recording?.youtubeUrl?.trim());
+        const hasMp4 = recording?.mediaKind !== "youtube" && /\.mp4$/i.test(recording?.name ?? "");
+        const publishCombo = makePublishComboDraft(combo, recording ?? null, moves).combo;
+        const isPublished = publishedCombos?.some(
+          (item) =>
+            item.id === publishCombo.id &&
+            item.characterId === publishCombo.characterId &&
+            item.supportId === publishCombo.supportId,
+        );
+        const starter = getComboStarterLabel(combo, moves);
+        return {
+          id: combo.id,
+          starter: starter === "Unknown move" ? "" : starter,
+          position: combo.screenPosition,
+          damage: combo.damage,
+          pips: combo.resourceCosts.pips,
+          flow: combo.resourceCosts.flow,
+          requiresCounterhit: combo.requiresCounterhit === true,
+          route: getComboRouteText(combo, moves),
+          routeParts: getComboRouteParts(combo, moves),
+          notes: combo.notes,
+          mediaStatus: hasYouTube
+            ? publishedCombos && !isPublished
+              ? "ready-unpublished"
+              : "ready"
+            : hasMp4
+              ? "local-only"
+              : "missing",
+          draggableRecordingId: hasMp4 ? recording?.id : undefined,
+        } satisfies ComboTableRow;
+      })
+      .filter((row) => matchesComboInlineFilters(row, inlineFilters));
+  }, [combos, inlineFilters, moves, publishedCombos, recordings]);
+  const combosById = useMemo(() => new Map(combos.map((combo) => [combo.id, combo])), [combos]);
 
   return (
-    <Paper variant="outlined" sx={{ overflow: "hidden" }}>
-      <Stack
-        direction="row"
-        spacing={2}
-        sx={{ px: 2, py: 1, bgcolor: "action.hover", alignItems: "center" }}
-      >
-        <FormControl size="small" sx={{ width: 190, flexShrink: 0 }}>
-          <InputLabel id="tech-starter-filter-label">Starter move</InputLabel>
-          <Select
-            labelId="tech-starter-filter-label"
-            multiple
-            value={selectedStarterMoves}
-            onChange={(event) => updateMultiSelect(event.target.value, setSelectedStarterMoves)}
-            input={<OutlinedInput label="Starter move" />}
-            renderValue={(selected) => {
-              const values = selected as string[];
-              if (values.length === 0) return "All starter moves";
-              return values
-                .map((value) => starterMoveOptions.find(([id]) => id === value)?.[1] ?? value)
-                .join(", ");
-            }}
-          >
-            {starterMoveOptions.map(([id, label]) => (
-              <MenuItem key={id} value={id}>
-                <Checkbox checked={selectedStarterMoves.includes(id)} size="small" />
-                <ListItemText primary={label} />
-              </MenuItem>
-            ))}
-          </Select>
-        </FormControl>
-        <Typography variant="caption" sx={{ flex: 1, minWidth: 180, fontWeight: 700 }}>
-          Route
-        </Typography>
-        <FormControl size="small" sx={{ width: 150, flexShrink: 0 }}>
-          <InputLabel id="tech-position-filter-label">Position</InputLabel>
-          <Select
-            labelId="tech-position-filter-label"
-            multiple
-            value={selectedPositions}
-            onChange={(event) => updateMultiSelect(event.target.value, setSelectedPositions)}
-            input={<OutlinedInput label="Position" />}
-            renderValue={(selected) => {
-              const values = selected as string[];
-              return values.length === 0 ? "All positions" : values.join(", ");
-            }}
-          >
-            {positionOptions.map((position) => (
-              <MenuItem key={position} value={position}>
-                <Checkbox checked={selectedPositions.includes(position)} size="small" />
-                <ListItemText primary={position} />
-              </MenuItem>
-            ))}
-          </Select>
-        </FormControl>
-        <Typography variant="caption" sx={{ width: 80, fontWeight: 700 }}>
-          Damage
-        </Typography>
-        <Typography variant="caption" sx={{ width: 130, fontWeight: 700 }}>
-          Cost
-        </Typography>
-      </Stack>
-      {combos.length === 0 ? (
-        <Typography color="text.secondary" sx={{ p: 2 }}>
-          No combos have been added for this character and support yet.
-        </Typography>
-      ) : filteredCombos.length === 0 ? (
-        <Typography color="text.secondary" sx={{ p: 2 }}>
-          No combos match the selected filters.
-        </Typography>
-      ) : (
-        <List dense disablePadding>
-          {filteredCombos.map((combo) =>
-            (() => {
-              const costs = getComboResourceCosts(combo, moves);
-              return (
-                <ListItemButton
-                  key={combo.id}
-                  component="div"
-                  role="button"
-                  tabIndex={0}
-                  selected={combo.id === selectedId}
-                  onClick={() => onSelect(combo.id)}
-                  onKeyDown={(event) => {
-                    if (
-                      event.target !== event.currentTarget ||
-                      (event.key !== "Enter" && event.key !== " ")
-                    ) {
-                      return;
-                    }
-                    event.preventDefault();
-                    onSelect(combo.id);
-                  }}
-                >
-                  <ListItemText
-                    primary={
-                      <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                        <span>{getComboStarterLabel(combo, moves)}</span>
-                        {getComboRouteEntries(combo, moves).some(({ move }) => !move) && (
-                          <Chip label="Unknown move" size="small" color="warning" />
-                        )}
-                        <Button
-                          size="small"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onEdit(combo);
-                          }}
-                        >
-                          Edit
-                        </Button>
-                      </Stack>
-                    }
-                    sx={{ width: 190, flexShrink: 0, minWidth: 0 }}
-                  />
-                  <Typography
-                    variant="body2"
-                    sx={{ flex: 1, minWidth: 180, overflowWrap: "anywhere" }}
-                  >
-                    {getComboRouteText(combo, moves)}
-                  </Typography>
-                  <Typography variant="body2" sx={{ width: 110 }}>
-                    {combo.screenPosition}
-                  </Typography>
-                  <Typography variant="body2" sx={{ width: 80 }}>
-                    {combo.damage}
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ width: 130 }}>
-                    {costs.pips} pips · {costs.flow} flow
-                  </Typography>
-                </ListItemButton>
-              );
-            })(),
-          )}
-        </List>
-      )}
-    </Paper>
+    <ComboTable
+      rows={rows}
+      selectedId={selectedId}
+      onSelect={(id) => {
+        const combo = combosById.get(id);
+        if (combo) onEdit(combo);
+      }}
+      emptyMessage="No combos have been added for this character and support yet."
+    />
   );
 }
 
-function ComboDetails({
+function ComboRecordingViewer({
   combo,
-  moves,
   recordings,
   onSelectRecording,
 }: {
   combo: TechCombo | null;
-  moves: TechMove[];
   recordings: RecordedVideo[];
   onSelectRecording: (recordingId: string) => void;
 }) {
-  if (!combo) {
-    return (
-      <Card variant="outlined">
-        <CardContent>
-          <Typography color="text.secondary">
-            Select a combo to view its route and linked recordings.
-          </Typography>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  const costs = getComboResourceCosts(combo, moves);
-  const route = combo.moveIds.map((moveId) => {
-    const move = moves.find((candidate) => candidate.id === moveId) ?? null;
-    return move ? { ...move, startup: getEffectiveStartup(move, moves) } : null;
-  });
-  const routeEntries = getComboRouteEntries(combo, moves);
-  const unknownRouteEntries = routeEntries.filter(({ move }) => !move);
-  const linkedRecording = combo.recordingId
-    ? (recordings.find((recording) => recording.id === combo.recordingId) ?? null)
+  const recording = combo?.recordingId
+    ? (recordings.find((item) => item.id === combo.recordingId) ?? null)
     : null;
-  const additionalCosts = Object.entries(costs).filter(
-    ([resource, amount]) => resource !== "pips" && resource !== "flow" && amount !== 0,
-  );
 
   return (
-    <Card variant="outlined">
-      <CardContent>
-        <Stack spacing={1.5}>
-          <Typography variant="h6">{getComboStarterLabel(combo, moves)}</Typography>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={3}>
-            <Typography variant="body2">Position: {combo.screenPosition}</Typography>
-            <Typography variant="body2">Damage: {combo.damage}</Typography>
-            <Typography variant="body2">
-              Cost: {costs.pips} pips · {costs.flow} flow
-            </Typography>
-          </Stack>
-          <Divider />
-          <Typography variant="subtitle2">Route</Typography>
-          {routeEntries.length > 0 ? (
-            <Stack direction="row" spacing={0.75} sx={{ flexWrap: "wrap", gap: 0.75 }}>
-              {routeEntries.map(({ token, move }, index) => (
-                <Chip
-                  key={`${combo.id}-route-${index}`}
-                  label={token}
-                  color={move ? "default" : "error"}
-                  variant={move ? "outlined" : "filled"}
-                  title={move ? `Known move: ${move.input}` : "This move was not matched"}
-                />
-              ))}
-            </Stack>
-          ) : (
-            <Typography variant="body2" color="text.secondary">
-              No moves in this combo yet.
-            </Typography>
-          )}
-          {unknownRouteEntries.length > 0 && (
-            <Typography variant="body2" color="warning.main">
-              Could not match: {unknownRouteEntries.map(({ token }) => token).join(", ")}
-            </Typography>
-          )}
-          {additionalCosts.length > 0 && (
-            <Typography variant="body2" color="text.secondary">
-              Other costs:{" "}
-              {additionalCosts.map(([resource, amount]) => `${amount} ${resource}`).join(", ")}
-            </Typography>
-          )}
-          {route.some(Boolean) && (
-            <Stack spacing={0.5}>
-              <Typography variant="subtitle2">Move data</Typography>
-              {route.map((move, index) => (
-                <Typography key={`${combo.id}-${index}`} variant="body2" color="text.secondary">
-                  {index + 1}. {formatMoveLabel(move)} — startup {move?.startup ?? "?"}, active{" "}
-                  {move?.active ?? "?"}, recovery {move?.recovery ?? "?"}, on block{" "}
-                  {move?.onBlock ?? "?"}, blockstun {move?.blockstun ?? "?"}, hitstun{" "}
-                  {move?.hitstun ?? "?"}
-                </Typography>
-              ))}
-            </Stack>
-          )}
-          {combo.recordingId ? (
-            <Stack spacing={0.5}>
-              <Typography variant="subtitle2">Linked recording</Typography>
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
-                {linkedRecording && (
-                  <Box
-                    component="video"
-                    src={linkedRecording.url}
-                    muted
-                    playsInline
-                    preload="auto"
-                    aria-label={`Thumbnail for ${linkedRecording.name}`}
-                    onClick={() => onSelectRecording(combo.recordingId as string)}
-                    sx={{
-                      width: 160,
-                      height: 90,
-                      flexShrink: 0,
-                      objectFit: "cover",
-                      borderRadius: 1,
-                      backgroundColor: "#000",
-                      cursor: "pointer",
-                    }}
-                  />
-                )}
-                <Button
-                  variant="text"
-                  size="small"
-                  onClick={() => onSelectRecording(combo.recordingId as string)}
-                  sx={{ justifyContent: "flex-start", overflowWrap: "anywhere" }}
-                >
-                  {linkedRecording?.name ?? `${combo.recordingId} (not found)`}
-                </Button>
-              </Stack>
-            </Stack>
-          ) : (
-            <Typography variant="body2" color="text.secondary">
-              No recording linked yet.
-            </Typography>
-          )}
-        </Stack>
-      </CardContent>
-    </Card>
+    <Stack spacing={1.5} sx={{ minWidth: 0, minHeight: 360 }}>
+      {recording ? (
+        <>
+          <Button
+            size="small"
+            onClick={() => onSelectRecording(recording.id)}
+            sx={{ alignSelf: "flex-start" }}
+          >
+            Open in recording library
+          </Button>
+          <Box sx={{ flex: 1, minHeight: 320, minWidth: 0 }}>
+            <RecordingViewer active panelOnly selectedRecordingId={recording.id} />
+          </Box>
+        </>
+      ) : (
+        <Typography color="text.secondary">
+          {combo?.recordingId
+            ? "The linked recording is unavailable."
+            : "Link a recording to this combo to play it here."}
+        </Typography>
+      )}
+    </Stack>
   );
 }
 
-export function TechSection() {
+export function TechSection({
+  active,
+  recordingsRefreshToken,
+  combosOnly = false,
+}: {
+  active: boolean;
+  recordingsRefreshToken: number;
+  combosOnly?: boolean;
+}) {
+  const { state: obsState, settings: obsSettings, busy: obsBusy, moveCapture } = useObsRecording();
   const [character, setCharacter] = useState(characters[0].value);
   const [support, setSupport] = useState(supportsByCharacter[characters[0].value][0]);
-  const [section, setSection] = useState(0);
+  const [section, setSection] = useState(() => {
+    const savedSection = localStorage.getItem(techEditorSectionStorageKey);
+    const savedIndex = techEditorSections.findIndex((value) => value === savedSection);
+    return savedIndex >= 0 ? savedIndex : 0;
+  });
   const [selectedComboId, setSelectedComboId] = useState<string | null>(null);
+  const [comboInlineFilters, setComboInlineFilters] = useState(emptyComboInlineFilters);
   const [catalog, setCatalog] = useState<TechCatalog>(loadTechCatalog);
   const [moveDraft, setMoveDraft] = useState<MoveDraft>(emptyMoveDraft);
   const [editingMoveId, setEditingMoveId] = useState<string | null>(null);
   const [moveInputError, setMoveInputError] = useState<string | null>(null);
   const moveInputRef = useRef<HTMLInputElement>(null);
   const [comboDraft, setComboDraft] = useState<ComboDraft>(emptyComboDraft);
+  const comboRouteInputRef = useRef<HTMLTextAreaElement>(null);
+  const [routeSelection, setRouteSelection] = useState<ComboNoteRange | null>(null);
   const [editingComboId, setEditingComboId] = useState<string | null>(null);
+  const [publishingCombo, setPublishingCombo] = useState(false);
+  const [publishStatus, setPublishStatus] = useState<{
+    severity: "success" | "error";
+    message: string;
+  } | null>(null);
   const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
+  const [pendingComboRecording, setPendingComboRecording] = useState(readPendingComboRecording);
+  const pendingComboRecordingRef = useRef(pendingComboRecording);
+  const [comboRecordingBusy, setComboRecordingBusy] = useState(false);
+  const [comboRecordingStatus, setComboRecordingStatus] = useState<{
+    severity: "success" | "error";
+    message: string;
+  } | null>(null);
+  const catalogRef = useRef(catalog);
+  catalogRef.current = catalog;
+  const editingComboIdRef = useRef(editingComboId);
+  editingComboIdRef.current = editingComboId;
+  const [publishedCombos, setPublishedCombos] = useState<PublishedCombo[] | null>(null);
+  const [checkingPublishedCombos, setCheckingPublishedCombos] = useState(false);
+  const publishedRequestId = useRef(0);
   const supports = useMemo(() => supportsByCharacter[character] ?? [], [character]);
   const techData = catalog[character] ?? { moves: [], combos: [] };
   const moves = techData.moves;
@@ -899,7 +876,41 @@ export function TechSection() {
     () => techData.combos.filter((combo) => combo.support === support),
     [support, techData.combos],
   );
+  const comboStarterOptions = useMemo(
+    () =>
+      combos.map((combo) => {
+        const starter = getComboStarterLabel(combo, moves);
+        return starter === "Unknown move" ? "" : starter;
+      }),
+    [combos, moves],
+  );
   const selectedCombo = combos.find((combo) => combo.id === selectedComboId) ?? null;
+  const selectionOverlapsNote = Boolean(
+    routeSelection &&
+    comboDraft.notes.some(
+      (note) =>
+        note.range &&
+        comboNoteRangeOffsets(comboDraft.route, note.range) &&
+        comboNotesOverlap(routeSelection, note.range),
+    ),
+  );
+  const ownComboRecordingActive = Boolean(
+    pendingComboRecording &&
+    obsState.recording.active &&
+    obsState.recording.sessionId === pendingComboRecording.sessionId,
+  );
+  const selectedRecording =
+    recordings.find((item) => item.id === selectedCombo?.recordingId) ?? null;
+  const selectedPublishDraft = selectedCombo
+    ? makePublishComboDraft(selectedCombo, selectedRecording, moves)
+    : null;
+  const selectedAlreadyPublished = Boolean(
+    selectedPublishDraft &&
+    matchesPublishedCombo(
+      selectedPublishDraft,
+      publishedCombos?.find((item) => item.id === selectedPublishDraft.combo.id),
+    ),
+  );
   const stanceParentOptions = moves.filter(
     (move) => move.isStanceParent && move.id !== editingMoveId,
   );
@@ -908,6 +919,10 @@ export function TechSection() {
   )
     ? moveDraft.dependsOnMoveId
     : "";
+
+  useEffect(() => {
+    localStorage.setItem(techEditorSectionStorageKey, techEditorSections[section]);
+  }, [section]);
 
   useEffect(() => {
     localStorage.setItem(techCatalogStorageKey, JSON.stringify(catalog));
@@ -927,20 +942,123 @@ export function TechSection() {
     };
   }, [catalog]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void window.electronAPI?.recordings
-      .list()
-      .then((result) => {
-        if (!cancelled) setRecordings(result.recordings);
-      })
-      .catch(() => {
-        if (!cancelled) setRecordings([]);
-      });
-    return () => {
-      cancelled = true;
-    };
+  const updatePendingComboRecording = useCallback((next: PendingComboRecording | null) => {
+    pendingComboRecordingRef.current = next;
+    setPendingComboRecording(next);
+    try {
+      if (next) localStorage.setItem(pendingComboRecordingStorageKey, JSON.stringify(next));
+      else localStorage.removeItem(pendingComboRecordingStorageKey);
+    } catch {
+      // Keep the association for this session if local storage is unavailable.
+    }
   }, []);
+
+  const refreshRecordings = useCallback(
+    async (finalized?: FinalizedComboRecording) => {
+      const recordingsApi = window.electronAPI?.recordings;
+      if (!recordingsApi) return;
+      try {
+        const result = await recordingsApi.list();
+        setRecordings(result.recordings);
+        const pending = pendingComboRecordingRef.current;
+        if (!pending) return;
+        const recording = result.recordings.find(
+          (item) =>
+            (item.source === "manual" && item.sessionId === pending.sessionId) ||
+            (finalized?.sessionId === pending.sessionId && item.id === finalized.recordingId),
+        );
+        if (!recording) {
+          if (finalized?.sessionId === pending.sessionId) {
+            setComboRecordingStatus({
+              severity: "error",
+              message:
+                "The finished recording was not found in the recording library. Try finding it again or link it manually.",
+            });
+          }
+          return;
+        }
+        if (
+          !catalogRef.current[pending.character]?.combos.some(
+            (combo) => combo.id === pending.comboId,
+          )
+        ) {
+          setComboRecordingStatus({
+            severity: "error",
+            message:
+              "The combo for this recording is no longer in the local catalog. Link the recording manually if needed.",
+          });
+          updatePendingComboRecording(null);
+          return;
+        }
+        setCatalog((current) => ({
+          ...current,
+          [pending.character]: {
+            ...current[pending.character],
+            combos: current[pending.character].combos.map((combo) =>
+              combo.id === pending.comboId ? { ...combo, recordingId: recording.id } : combo,
+            ),
+          },
+        }));
+        if (editingComboIdRef.current === pending.comboId) {
+          setComboDraft((current) => ({ ...current, recordingId: recording.id }));
+        }
+        updatePendingComboRecording(null);
+        setPublishStatus(null);
+        setComboRecordingStatus({
+          severity: "success",
+          message: `Linked ${recording.name} to the combo.`,
+        });
+      } catch (error) {
+        if (pendingComboRecordingRef.current) {
+          setComboRecordingStatus({
+            severity: "error",
+            message: `Could not check the finished recording: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+        // Keep the last loaded options available if a refresh fails.
+      }
+    },
+    [updatePendingComboRecording],
+  );
+
+  useEffect(() => {
+    if (!active) return;
+    void refreshRecordings();
+  }, [active, recordingsRefreshToken, refreshRecordings]);
+
+  useEffect(() => {
+    const recordingsApi = window.electronAPI?.recordings;
+    if (!recordingsApi) return;
+    return recordingsApi.onFinalized((finalized) => {
+      if (pendingComboRecordingRef.current?.sessionId === finalized.sessionId) {
+        void refreshRecordings(finalized);
+      }
+    });
+  }, [refreshRecordings]);
+
+  useEffect(() => {
+    if (!active) return;
+    const requestId = ++publishedRequestId.current;
+    setPublishedCombos(null);
+    setCheckingPublishedCombos(true);
+    void fetchPublishedCombos().then(
+      (items) => {
+        if (publishedRequestId.current === requestId) {
+          setPublishedCombos(items);
+          setCheckingPublishedCombos(false);
+        }
+      },
+      () => {
+        if (publishedRequestId.current === requestId) {
+          setPublishedCombos(null);
+          setCheckingPublishedCombos(false);
+        }
+      },
+    );
+    return () => {
+      publishedRequestId.current += 1;
+    };
+  }, [active]);
 
   useEffect(() => {
     const selectCombo = (comboId: string) => {
@@ -949,8 +1067,9 @@ export function TechSection() {
         if (!combo) continue;
         setCharacter(characterValue);
         setSupport(combo.support);
-        setSection(1);
+        setComboInlineFilters(emptyComboInlineFilters());
         setSelectedComboId(combo.id);
+        setPublishStatus(null);
         return;
       }
     };
@@ -972,15 +1091,93 @@ export function TechSection() {
     window.dispatchEvent(new CustomEvent(techSelectRecordingEvent, { detail: recordingId }));
   };
 
+  const startComboRecording = async () => {
+    if (!selectedCombo || !window.electronAPI?.obs || pendingComboRecordingRef.current) return;
+    if (
+      obsState.status !== "connected" ||
+      obsState.recording.active ||
+      obsState.automation.enabled ||
+      !obsSettings.recordDirectory.trim()
+    ) {
+      setComboRecordingStatus({
+        severity: "error",
+        message:
+          "Connect OBS, configure its recording folder, and stop any active or automatic recording first.",
+      });
+      return;
+    }
+    if (moveCapture.armed) {
+      setComboRecordingStatus({
+        severity: "error",
+        message: "Disarm the move take before recording a combo.",
+      });
+      return;
+    }
+    setComboRecordingBusy(true);
+    setComboRecordingStatus(null);
+    try {
+      const started = await window.electronAPI.obs.startManualRecording({
+        setup: {
+          profileName: obsSettings.profileName,
+          recordDirectory: obsSettings.recordDirectory,
+        },
+        fileNameBase: comboRecordingBaseName(
+          selectedCombo,
+          catalog[selectedCombo.character]?.moves ?? [],
+        ),
+      });
+      updatePendingComboRecording({
+        character: selectedCombo.character,
+        comboId: selectedCombo.id,
+        sessionId: started.sessionId,
+      });
+      void refreshRecordings();
+    } catch (error) {
+      setComboRecordingStatus({
+        severity: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setComboRecordingBusy(false);
+    }
+  };
+
+  const stopComboRecording = async () => {
+    if (!window.electronAPI?.obs || !ownComboRecordingActive) return;
+    setComboRecordingBusy(true);
+    setComboRecordingStatus(null);
+    try {
+      const result = await window.electronAPI.obs.stopRecording();
+      if (!result.outputPath) {
+        setComboRecordingStatus({
+          severity: "error",
+          message:
+            "OBS stopped without a saved video. You can find a finished recording again or forget this link.",
+        });
+      }
+      await refreshRecordings();
+    } catch (error) {
+      setComboRecordingStatus({
+        severity: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setComboRecordingBusy(false);
+    }
+  };
+
   const changeCharacter = (nextCharacter: string) => {
     setCharacter(nextCharacter);
     setSupport(supportsByCharacter[nextCharacter]?.[0] ?? "");
+    setComboInlineFilters(emptyComboInlineFilters());
     setSelectedComboId(null);
     setMoveDraft(emptyMoveDraft);
     setEditingMoveId(null);
     setMoveInputError(null);
     setComboDraft(emptyComboDraft);
+    setRouteSelection(null);
     setEditingComboId(null);
+    setPublishStatus(null);
   };
 
   const editMove = (move: TechMove) => {
@@ -993,6 +1190,7 @@ export function TechSection() {
       nonstandard: move.nonstandard === true,
       nonstandardNote: move.nonstandardNote ?? "",
       isStanceParent: move.isStanceParent,
+      isNonAttack: move.isNonAttack === true,
       isFlowStance: move.isFlowStance === true,
       flowStanceOverride:
         typeof move.flowStanceOverride === "boolean"
@@ -1005,7 +1203,6 @@ export function TechSection() {
       notApplicable: move.notApplicable ?? {},
       flowCancellable: move.flowCancellable,
       hasChargedVersion: Boolean(move.chargedMoveId),
-      allowsDirectionalFollowups: move.stanceFollowupPattern === "directional-button",
       dependsOnMoveId: move.dependsOnMoveId ?? "",
       stanceMinimumDuration: String(move.stanceMinimumDuration ?? ""),
       flowStanceMinimumTimeToFlowCancel: String(move.flowStanceMinimumTimeToFlowCancel ?? ""),
@@ -1022,6 +1219,15 @@ export function TechSection() {
     });
   };
 
+  const addFollowup = () => {
+    const stance = moves.find((move) => move.id === editingMoveId && move.isStanceParent);
+    if (!stance) return;
+    setMoveInputError(null);
+    setMoveDraft({ ...emptyMoveDraft, dependsOnMoveId: stance.id });
+    setEditingMoveId(null);
+    window.requestAnimationFrame(() => moveInputRef.current?.focus());
+  };
+
   const saveMove = () => {
     const stanceParentId = stanceParentOptions.some((move) => move.id === moveDraft.dependsOnMoveId)
       ? moveDraft.dependsOnMoveId
@@ -1033,7 +1239,7 @@ export function TechSection() {
       setMoveInputError(parsedInput.error);
       return;
     }
-    if (parsedInput.isDirectionless && !stanceParentId) {
+    if (parsedInput.isDirectionless && parsedInput.button !== "TH" && !stanceParentId) {
       setMoveInputError("A bare button must depend on a stance move.");
       return;
     }
@@ -1048,16 +1254,13 @@ export function TechSection() {
     }
     const input = parsedInput.notation;
     setMoveInputError(null);
-    const stanceFollowupPattern: TechStanceFollowupPattern | null =
-      moveDraft.isStanceParent && moveDraft.allowsDirectionalFollowups
-        ? "directional-button"
-        : null;
     const moveValues = {
       character,
       input,
       nonstandard: moveDraft.nonstandard,
       nonstandardNote: moveDraft.nonstandardNote.trim(),
       isStanceParent: moveDraft.isStanceParent,
+      isNonAttack: moveDraft.isNonAttack,
       isFlowStance: moveDraft.isFlowStance,
       flowStanceOverride: moveDraft.flowStanceOverride,
       flowStanceMinimumTimeToFlowCancel: moveDraft.isFlowStance
@@ -1080,7 +1283,7 @@ export function TechSection() {
       isCharged: Boolean(editingMove?.baseMoveId),
       chargedMoveId: editingMove?.chargedMoveId ?? null,
       baseMoveId: editingMove?.baseMoveId ?? null,
-      stanceFollowupPattern,
+      stanceFollowupPattern: null,
       dependsOnMoveId: stanceParentId,
       stanceMinimumDuration:
         moveDraft.isStanceParent && !moveDraft.isFlowStance
@@ -1186,16 +1389,23 @@ export function TechSection() {
   };
 
   const editCombo = (combo: TechCombo) => {
+    setPublishStatus(null);
     setSelectedComboId(combo.id);
     setEditingComboId(combo.id);
     setComboDraft({
       route: combo.route,
+      routingMode: combo.routingMode === "unique" ? "unique" : "autopilot",
       screenPosition: combo.screenPosition,
       damage: combo.damage,
+      notes: [...(combo.notes ?? [])],
+      requiresCounterhit: combo.requiresCounterhit === true,
+      initialConversionHitconfirmable: combo.initialConversionHitconfirmable === true,
+      initialConversionSafeOnBlock: combo.initialConversionSafeOnBlock === true,
       pips: String(combo.resourceCosts.pips ?? 0),
       flow: String(combo.resourceCosts.flow ?? 0),
       recordingId: combo.recordingId,
     });
+    setRouteSelection(null);
   };
 
   const saveCombo = () => {
@@ -1205,8 +1415,15 @@ export function TechSection() {
       support,
       moveIds: resolveComboRoute(comboDraft.route, moves),
       route: comboDraft.route.trim(),
+      routingMode: comboDraft.routingMode,
       screenPosition: comboDraft.screenPosition.trim(),
       damage: comboDraft.damage.trim(),
+      notes: comboDraft.notes
+        .map((note) => ({ ...note, text: note.text.trim() }))
+        .filter((note) => note.text),
+      requiresCounterhit: comboDraft.requiresCounterhit,
+      initialConversionHitconfirmable: comboDraft.initialConversionHitconfirmable,
+      initialConversionSafeOnBlock: comboDraft.initialConversionSafeOnBlock,
       resourceCosts: {
         pips: parseMoveNumber(comboDraft.pips) ?? 0,
         flow: parseMoveNumber(comboDraft.flow) ?? 0,
@@ -1227,17 +1444,112 @@ export function TechSection() {
     }));
     setSelectedComboId(comboId);
     setComboDraft(emptyComboDraft);
+    setRouteSelection(null);
     setEditingComboId(null);
+  };
+
+  const publishSelectedCombo = async () => {
+    if (!selectedCombo) return;
+    if (
+      selectedCombo.notes?.some(
+        (note) => note.range && !comboNoteRangeOffsets(selectedCombo.route, note.range),
+      )
+    ) {
+      setPublishStatus({
+        severity: "error",
+        message:
+          "Review segment notes whose move ranges no longer match the route before publishing.",
+      });
+      return;
+    }
+    if (catalogApiUrl !== "https://labatar-catalog.landenhanni.workers.dev") {
+      setPublishStatus({
+        severity: "error",
+        message: "Direct publishing is available only for the hosted catalog.",
+      });
+      return;
+    }
+    const latestRecordings =
+      (await window.electronAPI?.recordings.list().then(
+        (result) => result.recordings,
+        () => recordings,
+      )) ?? recordings;
+    setRecordings(latestRecordings);
+    const recording =
+      latestRecordings.find((item) => item.id === selectedCombo.recordingId) ?? null;
+    const draft = makePublishComboDraft(selectedCombo, recording, moves);
+    if (!draft.combo.youtubeUrl.trim()) {
+      setPublishStatus({ severity: "error", message: "Link a YouTube video before publishing." });
+      return;
+    }
+    const publisher = window.electronAPI?.catalogPublisher;
+    if (!publisher) {
+      setPublishStatus({ severity: "error", message: "Publishing requires the desktop app." });
+      return;
+    }
+    setPublishingCombo(true);
+    setPublishStatus(null);
+    try {
+      ++publishedRequestId.current;
+      setCheckingPublishedCombos(false);
+      try {
+        const latestPublished = await fetchPublishedCombos();
+        setPublishedCombos(latestPublished);
+        if (
+          matchesPublishedCombo(
+            draft,
+            latestPublished.find((item) => item.id === draft.combo.id),
+          )
+        ) {
+          setPublishStatus({
+            severity: "success",
+            message: "This combo already matches the published version.",
+          });
+          return;
+        }
+      } catch {
+        // Publishing still uses the editor's current revision when the public read is unavailable.
+      }
+      const result = await publisher.publishCombo(draft);
+      if (!result.cancelled) {
+        const published = publishedComboFromDraft(draft);
+        if (published) {
+          setPublishedCombos((current) => [
+            ...(current ?? []).filter((item) => item.id !== published.id),
+            published,
+          ]);
+        }
+        setPublishStatus({
+          severity: "success",
+          message: `Published revision ${result.revision}. The public catalog may take up to 60 seconds to refresh.`,
+        });
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, "")
+          : "Could not publish the combo.";
+      setPublishStatus({
+        severity: "error",
+        message,
+      });
+    } finally {
+      setPublishingCombo(false);
+    }
   };
 
   return (
     <Stack spacing={2} sx={{ textAlign: "left" }}>
       <Paper variant="outlined" sx={{ p: 2 }}>
-        <Typography variant="h6">Tech</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Explore character and support-specific combos, pressure, and other notes.
-        </Typography>
-        <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+        {!combosOnly && (
+          <>
+            <Typography variant="h6">Tech editor</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Explore character and support-specific moves, pressure, and other notes.
+            </Typography>
+          </>
+        )}
+        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2, alignItems: "center" }}>
           <FormControl size="small" sx={{ minWidth: 220 }}>
             <InputLabel id="tech-character-label">Character</InputLabel>
             <Select
@@ -1262,6 +1574,7 @@ export function TechSection() {
               onChange={(event) => {
                 setSupport(event.target.value);
                 setSelectedComboId(null);
+                setComboInlineFilters(emptyComboInlineFilters());
               }}
             >
               {supports.map((option) => (
@@ -1271,19 +1584,27 @@ export function TechSection() {
               ))}
             </Select>
           </FormControl>
-        </Stack>
+          {combosOnly && (
+            <ComboInlineFilters
+              starters={comboStarterOptions}
+              filters={comboInlineFilters}
+              onChange={setComboInlineFilters}
+            />
+          )}
+        </Box>
       </Paper>
 
       <Paper variant="outlined">
-        <Tabs value={section} onChange={(_, nextSection: number) => setSection(nextSection)}>
-          <Tab label="Moves" />
-          <Tab label="Combos" />
-          <Tab label="Pressure" />
-          <Tab label="Neutral" />
-          <Tab label="Misc" />
-        </Tabs>
+        {!combosOnly && (
+          <Tabs value={section} onChange={(_, nextSection: number) => setSection(nextSection)}>
+            <Tab label="Moves" />
+            <Tab label="Pressure" />
+            <Tab label="Neutral" />
+            <Tab label="Misc" />
+          </Tabs>
+        )}
         <Box sx={{ p: 2 }}>
-          {section === 0 && (
+          {!combosOnly && section === 0 && (
             <Stack spacing={2}>
               <Typography variant="subtitle1">
                 Moves for {characters.find((option) => option.value === character)?.label}
@@ -1420,8 +1741,8 @@ export function TechSection() {
                         helperText={
                           moveInputError ??
                           (moveDraft.dependsOnMoveId
-                            ? "Followups may use A, AA, B, C, F, EX, SUP, or X without a direction."
-                            : "Example: 2B, 2AA, 5AA, j.2C, 236F, 22EX, or 5X.")
+                            ? "Followups can use a bare button or full move notation, such as 1-9X."
+                            : "Example: TH, j.TH, 2B, 2AA, j.2C, 236F, 22EX, 5X, or 1-9X (any numbered direction with A/B/C).")
                         }
                         required
                         sx={{ flex: 1 }}
@@ -1476,6 +1797,20 @@ export function TechSection() {
                       <FormControlLabel
                         control={
                           <Switch
+                            checked={moveDraft.isNonAttack}
+                            onChange={(event) =>
+                              setMoveDraft((current) => ({
+                                ...current,
+                                isNonAttack: event.target.checked,
+                              }))
+                            }
+                          />
+                        }
+                        label="Non-attack"
+                      />
+                      <FormControlLabel
+                        control={
+                          <Switch
                             checked={moveDraft.hasChargedVersion}
                             disabled={Boolean(
                               editingMoveId &&
@@ -1491,23 +1826,6 @@ export function TechSection() {
                         }
                         label="Has charged version"
                       />
-                      {moveDraft.isStanceParent && (
-                        <FormControlLabel
-                          control={
-                            <Checkbox
-                              checked={moveDraft.allowsDirectionalFollowups}
-                              onChange={(event) =>
-                                setMoveDraft((current) => ({
-                                  ...current,
-                                  allowsDirectionalFollowups: event.target.checked,
-                                }))
-                              }
-                              size="small"
-                            />
-                          }
-                          label="1-9 + button followups"
-                        />
-                      )}
                       {moveDraft.isStanceParent && !moveDraft.isFlowStance && (
                         <TextField
                           label="Minimum duration"
@@ -1681,6 +1999,17 @@ export function TechSection() {
                     >
                       {editingMoveId ? "Save changes" : "Add move"}
                     </Button>
+                    {editingMoveId &&
+                      moves.find((move) => move.id === editingMoveId)?.isStanceParent && (
+                        <Button
+                          type="button"
+                          variant="outlined"
+                          onClick={addFollowup}
+                          sx={{ alignSelf: "flex-start" }}
+                        >
+                          Add followup
+                        </Button>
+                      )}
                     {editingMoveId && (
                       <Button
                         type="button"
@@ -1712,147 +2041,535 @@ export function TechSection() {
               </Box>
             </Stack>
           )}
-          {section === 1 && (
+          {combosOnly && (
             <Stack spacing={2}>
-              <Typography variant="subtitle1">
-                Combos for {characters.find((option) => option.value === character)?.label} +{" "}
-                {support}
-              </Typography>
-              <Typography variant="subtitle2">Combo selector</Typography>
-              <ComboSelector
-                combos={combos}
-                moves={moves}
-                selectedId={selectedComboId}
-                onSelect={setSelectedComboId}
-                onEdit={editCombo}
-              />
-              <ComboDetails
-                combo={selectedCombo}
-                moves={moves}
-                recordings={recordings}
-                onSelectRecording={selectLinkedRecording}
-              />
-              <Paper variant="outlined" sx={{ p: 2 }}>
-                <Stack spacing={1.5}>
-                  <Typography variant="subtitle2">
-                    {editingComboId ? "Edit combo" : "Add combo"}
-                  </Typography>
-                  <TextField
-                    label="Move string"
-                    placeholder="2B > 5C > 214C"
-                    multiline
-                    minRows={2}
-                    size="small"
-                    value={comboDraft.route}
-                    onChange={(event) =>
-                      setComboDraft((current) => ({ ...current, route: event.target.value }))
-                    }
-                    required
+              <ComboWorkspace>
+                <Stack spacing={2} sx={{ minWidth: 0 }}>
+                  <ComboSelector
+                    combos={combos}
+                    moves={moves}
+                    recordings={recordings}
+                    publishedCombos={publishedCombos}
+                    inlineFilters={comboInlineFilters}
+                    selectedId={selectedComboId}
+                    onEdit={editCombo}
                   />
-                  <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                    <FormControl size="small" sx={{ flex: 1 }}>
-                      <InputLabel id="tech-combo-position-label">Screen position</InputLabel>
-                      <Select
-                        labelId="tech-combo-position-label"
-                        value={comboDraft.screenPosition}
-                        label="Screen position"
-                        onChange={(event) =>
+                  <Paper variant="outlined" sx={{ p: 2 }}>
+                    <Stack spacing={1.5}>
+                      <Typography variant="subtitle2">
+                        {editingComboId ? "Edit combo" : "Add combo"}
+                      </Typography>
+                      <TextField
+                        label="Move string"
+                        placeholder="2B > 5C > 236F~1-9X"
+                        helperText="Select moves in this field, then choose Note for selection. Use ~ before a stance followup and ! after a move to mark a crit."
+                        multiline
+                        minRows={2}
+                        size="small"
+                        inputRef={comboRouteInputRef}
+                        value={comboDraft.route}
+                        onChange={(event) => {
+                          setComboDraft((current) => ({ ...current, route: event.target.value }));
+                          setRouteSelection(null);
+                        }}
+                        onSelect={(event) => {
+                          const input =
+                            event.target instanceof HTMLTextAreaElement
+                              ? event.target
+                              : comboRouteInputRef.current;
+                          if (input) {
+                            setRouteSelection(
+                              comboNoteRangeFromSelection(
+                                comboDraft.route,
+                                input.selectionStart,
+                                input.selectionEnd,
+                              ),
+                            );
+                          }
+                        }}
+                        required
+                      />
+                      <Stack
+                        direction="row"
+                        spacing={1.5}
+                        sx={{ alignItems: "center", flexWrap: "wrap" }}
+                      >
+                        <Typography variant="body2">Routing</Typography>
+                        <ToggleButtonGroup
+                          size="small"
+                          exclusive
+                          aria-label="Routing mode"
+                          value={comboDraft.routingMode}
+                          onChange={(_, value: "autopilot" | "unique" | null) => {
+                            if (value)
+                              setComboDraft((current) => ({ ...current, routingMode: value }));
+                          }}
+                        >
+                          <ToggleButton value="autopilot">Autopilot</ToggleButton>
+                          <ToggleButton value="unique">Unique routing</ToggleButton>
+                        </ToggleButtonGroup>
+                      </Stack>
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
+                        <FormControl size="small" sx={{ flex: 1 }}>
+                          <InputLabel id="tech-combo-position-label">Screen position</InputLabel>
+                          <Select
+                            labelId="tech-combo-position-label"
+                            value={comboDraft.screenPosition}
+                            label="Screen position"
+                            onChange={(event) =>
+                              setComboDraft((current) => ({
+                                ...current,
+                                screenPosition: event.target.value,
+                              }))
+                            }
+                          >
+                            {screenPositions.map((position) => (
+                              <MenuItem key={position} value={position}>
+                                {position}
+                              </MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                        <TextField
+                          label="Damage"
+                          size="small"
+                          value={comboDraft.damage}
+                          onChange={(event) =>
+                            setComboDraft((current) => ({ ...current, damage: event.target.value }))
+                          }
+                          sx={{ flex: 1 }}
+                        />
+                        <TextField
+                          label="Pips"
+                          type="number"
+                          size="small"
+                          value={comboDraft.pips}
+                          onChange={(event) =>
+                            setComboDraft((current) => ({ ...current, pips: event.target.value }))
+                          }
+                          sx={{ width: 100 }}
+                        />
+                        <TextField
+                          label="Flow"
+                          type="number"
+                          size="small"
+                          value={comboDraft.flow}
+                          onChange={(event) =>
+                            setComboDraft((current) => ({ ...current, flow: event.target.value }))
+                          }
+                          sx={{ width: 100 }}
+                        />
+                      </Stack>
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            checked={comboDraft.requiresCounterhit}
+                            onChange={(event) =>
+                              setComboDraft((current) => ({
+                                ...current,
+                                requiresCounterhit: event.target.checked,
+                              }))
+                            }
+                          />
+                        }
+                        label="Requires counterhit"
+                      />
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            checked={comboDraft.initialConversionHitconfirmable}
+                            onChange={(event) =>
+                              setComboDraft((current) => ({
+                                ...current,
+                                initialConversionHitconfirmable: event.target.checked,
+                              }))
+                            }
+                          />
+                        }
+                        label="Initial conversion hitconfirmable"
+                      />
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            checked={comboDraft.initialConversionSafeOnBlock}
+                            onChange={(event) =>
+                              setComboDraft((current) => ({
+                                ...current,
+                                initialConversionSafeOnBlock: event.target.checked,
+                              }))
+                            }
+                          />
+                        }
+                        label="Initial conversion safe on block"
+                      />
+                      <Box>
+                        <Stack
+                          direction="row"
+                          sx={{
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            flexWrap: "wrap",
+                            gap: 1,
+                            mb: 1,
+                          }}
+                        >
+                          <Typography variant="subtitle2">Notes</Typography>
+                          <Stack direction="row" spacing={1}>
+                            <Button
+                              size="small"
+                              disabled={
+                                !routeSelection ||
+                                selectionOverlapsNote ||
+                                comboDraft.notes.length >= 20
+                              }
+                              onClick={() => {
+                                if (!routeSelection) return;
+                                setComboDraft((current) => ({
+                                  ...current,
+                                  notes: [
+                                    ...current.notes,
+                                    {
+                                      id: newComboNoteId(),
+                                      text: "",
+                                      category: "execution",
+                                      range: routeSelection,
+                                    },
+                                  ],
+                                }));
+                                setRouteSelection(null);
+                              }}
+                            >
+                              + Note for selection
+                            </Button>
+                            <Button
+                              size="small"
+                              onClick={() =>
+                                setComboDraft((current) => ({
+                                  ...current,
+                                  notes: [
+                                    ...current.notes,
+                                    { id: newComboNoteId(), text: "", category: "general" },
+                                  ],
+                                }))
+                              }
+                              disabled={comboDraft.notes.length >= 20}
+                            >
+                              + General note
+                            </Button>
+                          </Stack>
+                        </Stack>
+                        {routeSelection && (
+                          <Typography
+                            variant="caption"
+                            color={selectionOverlapsNote ? "error" : "text.secondary"}
+                            sx={{ display: "block", mb: 1 }}
+                          >
+                            {selectionOverlapsNote
+                              ? "This selection overlaps another segment note."
+                              : `Selected: ${routeSelection.excerpt}`}
+                          </Typography>
+                        )}
+                        <Stack spacing={1}>
+                          {comboDraft.notes.map((note, index) => (
+                            <Box
+                              key={note.id}
+                              sx={{ p: 1.5, border: 1, borderColor: "divider", borderRadius: 1 }}
+                            >
+                              <Stack
+                                direction="row"
+                                sx={{
+                                  alignItems: "center",
+                                  justifyContent: "space-between",
+                                  gap: 1,
+                                  mb: 1,
+                                }}
+                              >
+                                <Typography
+                                  variant="caption"
+                                  color={
+                                    note.range &&
+                                    !comboNoteRangeOffsets(comboDraft.route, note.range)
+                                      ? "error"
+                                      : "text.secondary"
+                                  }
+                                  sx={{ overflowWrap: "anywhere" }}
+                                >
+                                  {note.range
+                                    ? `${note.range.excerpt}${comboNoteRangeOffsets(comboDraft.route, note.range) ? "" : " · Range needs review"}`
+                                    : `General note ${index + 1}`}
+                                </Typography>
+                                <Button
+                                  size="small"
+                                  color="error"
+                                  onClick={() =>
+                                    setComboDraft((current) => ({
+                                      ...current,
+                                      notes: current.notes.filter((item) => item.id !== note.id),
+                                    }))
+                                  }
+                                >
+                                  Remove
+                                </Button>
+                              </Stack>
+                              <Stack
+                                direction={{ xs: "column", sm: "row" }}
+                                spacing={1}
+                                sx={{ alignItems: "flex-start" }}
+                              >
+                                <TextField
+                                  select
+                                  size="small"
+                                  label="Type"
+                                  value={note.category}
+                                  sx={{ minWidth: 145 }}
+                                  onChange={(event) =>
+                                    setComboDraft((current) => ({
+                                      ...current,
+                                      notes: current.notes.map((item) =>
+                                        item.id === note.id
+                                          ? {
+                                              ...item,
+                                              category: event.target.value as ComboNote["category"],
+                                            }
+                                          : item,
+                                      ),
+                                    }))
+                                  }
+                                >
+                                  {(["general", "execution", "situational"] as const).map(
+                                    (category) => (
+                                      <MenuItem key={category} value={category}>
+                                        {comboNoteCategoryLabel(category)}
+                                      </MenuItem>
+                                    ),
+                                  )}
+                                </TextField>
+                                <TextField
+                                  label={`Note ${index + 1}`}
+                                  multiline
+                                  minRows={2}
+                                  size="small"
+                                  fullWidth
+                                  value={note.text}
+                                  slotProps={{ htmlInput: { maxLength: 1000 } }}
+                                  onChange={(event) =>
+                                    setComboDraft((current) => ({
+                                      ...current,
+                                      notes: current.notes.map((item) =>
+                                        item.id === note.id
+                                          ? { ...item, text: event.target.value }
+                                          : item,
+                                      ),
+                                    }))
+                                  }
+                                />
+                              </Stack>
+                              {note.range && routeSelection && (
+                                <Button
+                                  size="small"
+                                  disabled={comboDraft.notes.some(
+                                    (item) =>
+                                      item.id !== note.id &&
+                                      item.range &&
+                                      comboNoteRangeOffsets(comboDraft.route, item.range) &&
+                                      comboNotesOverlap(routeSelection, item.range),
+                                  )}
+                                  onClick={() => {
+                                    setComboDraft((current) => ({
+                                      ...current,
+                                      notes: current.notes.map((item) =>
+                                        item.id === note.id
+                                          ? { ...item, range: routeSelection }
+                                          : item,
+                                      ),
+                                    }));
+                                    setRouteSelection(null);
+                                  }}
+                                >
+                                  Use current selection
+                                </Button>
+                              )}
+                            </Box>
+                          ))}
+                        </Stack>
+                      </Box>
+                      <Autocomplete
+                        options={recordings}
+                        onOpen={() => void refreshRecordings()}
+                        value={
+                          recordings.find((recording) => recording.id === comboDraft.recordingId) ??
+                          null
+                        }
+                        onChange={(_, recording) =>
                           setComboDraft((current) => ({
                             ...current,
-                            screenPosition: event.target.value,
+                            recordingId: recording?.id ?? null,
                           }))
                         }
-                      >
-                        {screenPositions.map((position) => (
-                          <MenuItem key={position} value={position}>
-                            {position}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                    <TextField
-                      label="Damage"
-                      size="small"
-                      value={comboDraft.damage}
-                      onChange={(event) =>
-                        setComboDraft((current) => ({ ...current, damage: event.target.value }))
-                      }
-                      sx={{ flex: 1 }}
-                    />
-                    <TextField
-                      label="Pips"
-                      type="number"
-                      size="small"
-                      value={comboDraft.pips}
-                      onChange={(event) =>
-                        setComboDraft((current) => ({ ...current, pips: event.target.value }))
-                      }
-                      sx={{ width: 100 }}
-                    />
-                    <TextField
-                      label="Flow"
-                      type="number"
-                      size="small"
-                      value={comboDraft.flow}
-                      onChange={(event) =>
-                        setComboDraft((current) => ({ ...current, flow: event.target.value }))
-                      }
-                      sx={{ width: 100 }}
-                    />
-                  </Stack>
-                  <Autocomplete
-                    options={recordings}
-                    value={
-                      recordings.find((recording) => recording.id === comboDraft.recordingId) ??
-                      null
-                    }
-                    onChange={(_, recording) =>
-                      setComboDraft((current) => ({
-                        ...current,
-                        recordingId: recording?.id ?? null,
-                      }))
-                    }
-                    getOptionLabel={(recording) => recording.name}
-                    isOptionEqualToValue={(option, value) => option.id === value.id}
-                    renderInput={(params) => (
-                      <TextField {...params} label="Linked recording" size="small" />
-                    )}
-                    clearOnEscape
-                  />
-                  <Stack direction="row" spacing={1}>
-                    <Button
-                      variant="contained"
-                      onClick={saveCombo}
-                      disabled={!comboDraft.route.trim()}
-                    >
-                      {editingComboId ? "Save changes" : "Add combo"}
-                    </Button>
-                    {editingComboId && (
-                      <Button
-                        onClick={() => {
-                          setComboDraft(emptyComboDraft);
-                          setEditingComboId(null);
-                        }}
-                      >
-                        Cancel
-                      </Button>
-                    )}
-                  </Stack>
+                        getOptionLabel={(recording) => recording.name}
+                        isOptionEqualToValue={(option, value) => option.id === value.id}
+                        renderInput={(params) => (
+                          <TextField {...params} label="Linked recording" size="small" />
+                        )}
+                        clearOnEscape
+                      />
+                      <Stack direction="row" spacing={1}>
+                        <Button
+                          variant="contained"
+                          onClick={saveCombo}
+                          disabled={!comboDraft.route.trim()}
+                        >
+                          {editingComboId ? "Save changes" : "Add combo"}
+                        </Button>
+                        {editingComboId && (
+                          <Button
+                            onClick={() => {
+                              setComboDraft(emptyComboDraft);
+                              setRouteSelection(null);
+                              setEditingComboId(null);
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        )}
+                      </Stack>
+                    </Stack>
+                  </Paper>
                 </Stack>
-              </Paper>
+                <ComboRecordingViewer
+                  combo={selectedCombo}
+                  recordings={recordings}
+                  onSelectRecording={selectLinkedRecording}
+                />
+              </ComboWorkspace>
+              {(selectedCombo || pendingComboRecording || comboRecordingStatus) && (
+                <Stack spacing={1} sx={{ alignItems: "flex-start" }}>
+                  {pendingComboRecording ? (
+                    <>
+                      <Typography variant="body2">
+                        Recording for{" "}
+                        {catalog[pendingComboRecording.character]?.combos.find(
+                          (combo) => combo.id === pendingComboRecording.comboId,
+                        )?.route ?? pendingComboRecording.comboId}
+                      </Typography>
+                      {ownComboRecordingActive ? (
+                        <Button
+                          variant="outlined"
+                          color="error"
+                          onClick={() => void stopComboRecording()}
+                          disabled={comboRecordingBusy || obsBusy}
+                        >
+                          Stop combo recording
+                        </Button>
+                      ) : (
+                        <Stack direction="row" spacing={1}>
+                          <Button
+                            onClick={() => void refreshRecordings()}
+                            disabled={comboRecordingBusy}
+                          >
+                            Find finished recording
+                          </Button>
+                          <Button
+                            onClick={() => {
+                              updatePendingComboRecording(null);
+                              setComboRecordingStatus(null);
+                            }}
+                            disabled={comboRecordingBusy}
+                          >
+                            Forget pending link
+                          </Button>
+                        </Stack>
+                      )}
+                      {ownComboRecordingActive && (
+                        <Typography variant="caption" color="text.secondary">
+                          Stop here, with F9, or in OBS. The saved recording will link
+                          automatically.
+                        </Typography>
+                      )}
+                    </>
+                  ) : selectedCombo ? (
+                    <Tooltip
+                      title={
+                        obsState.status !== "connected"
+                          ? "Connect OBS first."
+                          : !obsSettings.recordDirectory.trim()
+                            ? "Configure the OBS recording folder first."
+                            : obsState.recording.active || obsState.automation.enabled
+                              ? "Stop active and automatic recording first."
+                              : moveCapture.armed
+                                ? "Disarm the move take first."
+                                : selectedCombo.recordingId
+                                  ? "The finished recording will replace this combo's current recording link."
+                                  : ""
+                      }
+                    >
+                      <span>
+                        <Button
+                          variant="outlined"
+                          onClick={() => void startComboRecording()}
+                          disabled={
+                            comboRecordingBusy ||
+                            obsBusy ||
+                            obsState.status !== "connected" ||
+                            !obsSettings.recordDirectory.trim() ||
+                            obsState.recording.active ||
+                            obsState.automation.enabled ||
+                            Boolean(moveCapture.armed)
+                          }
+                        >
+                          Record for this combo
+                        </Button>
+                      </span>
+                    </Tooltip>
+                  ) : null}
+                  {selectedCombo && (
+                    <>
+                      <Tooltip
+                        title={
+                          selectedAlreadyPublished
+                            ? "This combo already matches the published version."
+                            : checkingPublishedCombos
+                              ? "Checking the published catalog."
+                              : ""
+                        }
+                      >
+                        <span>
+                          <Button
+                            variant="outlined"
+                            onClick={() => void publishSelectedCombo()}
+                            disabled={
+                              publishingCombo || checkingPublishedCombos || selectedAlreadyPublished
+                            }
+                          >
+                            {publishingCombo ? "Publishing…" : "Publish combo"}
+                          </Button>
+                        </span>
+                      </Tooltip>
+                      {publishStatus && (
+                        <Alert severity={publishStatus.severity}>{publishStatus.message}</Alert>
+                      )}
+                    </>
+                  )}
+                  {comboRecordingStatus && (
+                    <Alert severity={comboRecordingStatus.severity}>
+                      {comboRecordingStatus.message}
+                    </Alert>
+                  )}
+                </Stack>
+              )}
             </Stack>
           )}
-          {section === 2 && (
+          {!combosOnly && section === 1 && (
             <Typography color="text.secondary">
               Pressure strings for this character and support will appear here.
             </Typography>
           )}
-          {section === 3 && (
+          {!combosOnly && section === 2 && (
             <Typography color="text.secondary">
               Neutral tools and game plans for this character and support will appear here.
             </Typography>
           )}
-          {section === 4 && (
+          {!combosOnly && section === 3 && (
             <Typography color="text.secondary">
               Miscellaneous tech for this character and support will appear here.
             </Typography>

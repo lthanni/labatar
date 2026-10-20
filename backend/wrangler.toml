@@ -1,0 +1,23 @@
+name = "labatar-catalog"
+main = "src/worker.mjs"
+compatibility_date = "2026-10-13"
+workers_dev = true # https://labatar-catalog.landenhanni.workers.dev
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "labatar-catalog"
+database_id = "c900bdb9-d20b-4b81-a05d-2b38d1bca830"
+
+[[r2_buckets]]
+binding = "CANDIDATE_VIDEOS"
+bucket_name = "labatar-combo-candidates"
+
+[vars]
+ACCESS_TEAM_DOMAIN = "REDACTED"
+ACCESS_AUD = "REDACTED"
+EDITOR_EMAILS = "REDACTED"
