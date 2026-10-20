@@ -479,12 +479,10 @@ export async function authorizeEditor(request, env, fetcher = fetch) {
 
 export async function authorizeComboPreview(request, env, fetcher = fetch) {
   const email = await verifyAccessJwt(request.headers.get("Cf-Access-Jwt-Assertion"), env, fetcher);
-  const approved = [env.COMBO_PREVIEW_EMAILS, env.EDITOR_EMAILS]
-    .filter(Boolean)
-    .flatMap((list) => list.split(","))
-    .map((item) => item.trim().toLowerCase());
-  if (!approved.includes(email))
-    throw new Error("This account does not have Combos preview access.");
+  if (env.COMBO_PREVIEW_ACCESS_MODE !== "access") {
+    const editors = (env.EDITOR_EMAILS ?? "").split(",").map((item) => item.trim().toLowerCase());
+    if (!editors.includes(email)) throw new Error("Combos preview access is unavailable.");
+  }
   return email;
 }
 

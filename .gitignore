@@ -39,3 +39,4 @@ dist-ssr
 .env
 .env.*
 !.env.example
+.dev.vars*

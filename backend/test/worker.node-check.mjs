@@ -256,23 +256,24 @@ test("Access identity requires a valid signature, audience, issuer and time", as
   assert.equal(
     await authorizeComboPreview(
       accessRequest,
-      { ...env, COMBO_PREVIEW_EMAILS: "editor@example.com" },
+      { ...env, EDITOR_EMAILS: "editor@example.com" },
       fetcher,
     ),
     "editor@example.com",
   );
+  await assert.rejects(() => authorizeComboPreview(accessRequest, env, fetcher));
   assert.equal(
     await authorizeComboPreview(
       accessRequest,
-      { ...env, EDITOR_EMAILS: "editor@example.com" },
+      { ...env, COMBO_PREVIEW_ACCESS_MODE: "access" },
       fetcher,
     ),
     "editor@example.com",
   );
   await assert.rejects(() =>
     authorizeComboPreview(
-      accessRequest,
-      { ...env, COMBO_PREVIEW_EMAILS: "other@example.com" },
+      new Request(accessRequest.url),
+      { ...env, COMBO_PREVIEW_ACCESS_MODE: "access" },
       fetcher,
     ),
   );

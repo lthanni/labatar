@@ -17,8 +17,5 @@ database_id = "c900bdb9-d20b-4b81-a05d-2b38d1bca830"
 binding = "CANDIDATE_VIDEOS"
 bucket_name = "labatar-combo-candidates"
 
-[vars]
-ACCESS_TEAM_DOMAIN = "REDACTED"
-ACCESS_AUD = "REDACTED"
-EDITOR_EMAILS = "REDACTED"
-COMBO_PREVIEW_EMAILS = ""
+[secrets]
+required = ["ACCESS_TEAM_DOMAIN", "ACCESS_AUD", "EDITOR_EMAILS"]
