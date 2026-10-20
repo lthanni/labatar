@@ -2,7 +2,7 @@
 
 The broader recording workflow and evidence requirements are planned in [Move capture plan](MOVE_CAPTURE_PLAN.md).
 
-Tech → Moves is the user's move list for each character. Every character starts with the same assumed inputs: 2A/2B/2C, 5A/5B/5C, 2F/4F/6F, 236A/236B/236C/236EX, 214A/214B/214C/214EX, and j.236A/j.236B/j.236C/j.236EX. These are starting entries, not measured frame data. Their frame values remain unknown until entered or verified.
+Tech → Moves is the user's move list for each character. Every character starts with the same assumed inputs: 2A/2B/2C, 5A/5B/5C, 2F/4F/6F, 236A/236B/236C/236EX, 214A/214B/214C/214EX, j.A/j.B/j.C, and j.236A/j.236B/j.236C/j.236EX. These are starting entries, not measured frame data. Their frame values remain unknown until entered or verified.
 
 Users can add character-specific moves and edit the entries in Tech. The Tech catalog is stored locally and existing move IDs must remain stable so combo references and recorded takes keep their links.
 

@@ -11,6 +11,10 @@ process, plus whether OBS recording and automation are active. The preload
 reports renderer V8 heap and Blink allocation, the active tab, and a bounded
 summary of video elements (visible, playing, loaded, and dimensions). It does
 not record video paths, recording names, replay names, or player identities.
+The `mediaStreams` entry records anonymous counts of active, completed,
+cancelled, and failed recording responses, plus cumulative requests and bytes
+read from disk. Compare consecutive `bytesRead` values with renderer memory:
+the media response now reads only when its consumer requests another chunk.
 Memory values ending in `KiB` are kibibytes, and `snapshotAgeMs` shows how
 old the renderer-side report is. If the renderer hangs or crashes, main-process
 sampling continues and a `renderer-process-gone` line includes the last sample.

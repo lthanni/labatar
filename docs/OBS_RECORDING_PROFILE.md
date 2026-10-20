@@ -83,6 +83,15 @@ uses accurate seek while re-encoding. This avoids decoding from time zero for
 every late chapter while retaining frame-accurate clip boundaries. Stream copy
 is avoided because cutting only at keyframes can shift the clip start.
 
+The Recordings viewer offers two in-place trim choices. Precise trim re-encodes
+the selected range to keep the requested frame boundary. Fast trim copies the
+video and audio streams, snapping the start back to the preceding keyframe.
+The confirmation explains this and the completion message reports any shift.
+Chapter times and linked clip positions use the actual retained start; partly
+overlapping linked clips still use precise encoding. Chaptered recordings may
+need a second stream-copy pass to preserve MP4 chapter positions. A temporary
+candidate is verified before replacing the original recording.
+
 Optional automatic game-start chapters are separate from F10. When enabled in
 Capture configuration, Labatar waits for replay linking after an automatic
 recording stops, then uses the UTC clock time of each `SetNewMatch` game-start

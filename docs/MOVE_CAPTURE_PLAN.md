@@ -37,13 +37,13 @@ process; final evidence acceptance still follows processing.
 
 1. Select a character/support variant and a gather situation. Show the current move and the next move in the queue.
 2. Start recording, perform the move, and stop recording. Once the video is finalized, save it as that slot's pending take, immediately select and arm the next move, and leave recording stopped. The user repeats the same start/stop action for the next move. Processing and review never interrupt this capture pass.
-3. Open **Unprocessed moves** for the selected character/support and choose **Process all**, or process one video. Processing runs sequentially, continues after individual failures, and shows the result for each take. It produces candidate input and frame data; requested block/whiff or opponent state remains unconfirmed until video review.
+3. Ask Codex to review the numbered framebar in each video using `scripts/framebar-review.mjs` (see `FRAMEBAR_AI_REVIEW.md`). It saves compact game-frame state/count runs, such as `[startup: 94, airborne: 8]`, to the take manifest. Refresh **Unprocessed moves**, inspect and approve each sequence, then select **Determine approved**. Determinations run from the approved saved sequence, so interpretation changes do not require rereading the video. Requested block/whiff or opponent state remains unconfirmed until video review.
 4. After the capture pass, review takes needing attention. Accept supported values and make their takes active, or reject a take with a reason. Do not silently write uncertain observations into Tech → Moves.
 5. When replacing an active take, keep the old take active until the new one is accepted. Then archive the old take. Failed retakes go to the debugging archive and leave the evidence slot incomplete.
 
 If recording fails to finalize or save, stay on the current move and show the error. A successfully finalized video advances the queue even if later processing finds the wrong input or outcome. Such failures appear in a follow-up retry list rather than stopping the capture pass.
 
-The archive keeps the original video, capture intent, analysis, calibration and processor snapshot, and replacement or failure reason. Archived takes remain inspectable but do not count toward the one-active-take rule.
+The archive keeps the original video, capture intent, framebar sequence revisions, analyses, calibration and processor snapshots, and replacement or failure reason. Archived takes remain inspectable but do not count toward the one-active-take rule.
 
 ## Gather modes
 
@@ -53,7 +53,7 @@ Grounded-hit and airborne-hit gather modes use the same queue pattern. A finishe
 
 ## Debugging contract
 
-From any failed or uncertain take, the user should be able to inspect the video and the detector's evidence side by side: input rows and their appearance times, framebar transition, candidate association, outcome evidence, configuration, processor version, and the reason validation failed. Reprocessing must retain the previous result for comparison rather than erase the explanation of an earlier failure.
+From any failed or uncertain take, the user should be able to inspect the video and reviewed framebar crops alongside the saved sequence, outcome evidence, processor version, and reason validation failed. Saving a revised sequence archives the prior sequence and analysis; rerunning determinations retains the approved sequence and prior analysis for comparison.
 
 ## Open decisions
 

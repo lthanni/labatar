@@ -219,22 +219,25 @@ interpreting that sequence as move data. The approved framebar sequence is a
 reusable input to the second stage, so corrections to phase and multihit rules
 do not require decoding the source video again.
 
-### Stage 1: framebar sequence extraction
+### Stage 1: visual framebar transcription
 
-Read the video and persist one ordered observation per sampled source frame.
-Each observation should retain the source frame index and timestamp, both
-players' stabilized per-cell state labels, and enough capture metadata to
-reproduce or review the classification (source dimensions, effective framebar
-geometry, frame rate, color-map/calibration snapshot, and extractor version).
-Keep `unmapped` cells explicit; do not replace them with a guessed phase.
+For occasional move-data gathering, Codex extracts enlarged framebar crops
+with `scripts/framebar-review.mjs` and reads the counts printed beneath the
+colored runs. Save an ordered run-length sequence of **game-frame cells**,
+not the number of video frames for which a color stays visible. Each joint
+segment records a state for both players, a game-frame count, and an
+approximate video timestamp. For example:
+`[startup: 9, active: 2, gap: 4, active: 5, recovery: 18]`. Repeated states stay
+separate when another state appears between them. Keep the reviewed video
+frame indices, MP4 dimensions and frame rate, and the sequence revision.
 
-This artifact records observations, not move conclusions. It must not contain
-derived startup/active/recovery totals or numbered hit windows as authoritative
-data. A compact display such as `startup, active, gap, active, recovery` can be
-generated from the cell observations for review, but the stored per-frame
-observations remain the source of truth. The artifact is versioned and stored
-with the take independently of the final analysis, so it remains available
-when interpretation is rerun.
+This artifact records the ordered state counts, not move conclusions. It does
+not contain numbered hit windows or final move determinations. Other
+video-derived observations used by the move analysis, such as detected hitbox
+boxes, may be stored alongside the state segments as separate observation
+arrays. The reviewer displays the state/count sequence rather than every
+video frame. The artifact is versioned and stored with the take independently
+of the final analysis, so it remains available when interpretation is rerun.
 
 ### Review and approval
 
@@ -257,11 +260,11 @@ recorded evidence. The interpreter may determine that it contains two active
 windows and that the second contains five active frames; changing that rule
 should produce a new determination from the same approved sequence.
 
-This boundary applies to conclusions supported by framebar observations.
-Hitbox geometry, input-history recognition, and other measurements that use
-different video regions need their own captured observation artifacts or a
-separate video-backed stage; they must not be presented as if they were
-recomputed from the framebar sequence.
+This boundary applies to conclusions supported by captured observations.
+Hitbox geometry and other measurements that use different video regions must
+remain separately modeled observations in the saved artifact. Input-history
+recognition still needs its own captured observations or a separate video-backed
+stage; it must not be presented as if it were recomputed from framebar states.
 
 ## Calibration contract
 

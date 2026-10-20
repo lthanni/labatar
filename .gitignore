@@ -3,6 +3,8 @@
 /replays/
 /electron/generated/
 /.dev/recordings/
+/.dev/framebar-review/
+/.dev/diagnostics/
 /.dev/electron-user-data/
 *.log
 npm-debug.log*

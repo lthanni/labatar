@@ -110,15 +110,20 @@ The first implementation has the nonstandard catalog tag, recipe queue
 preview, packaged Windows input worker, Electron capture runner, persisted
 pause/resume state, one-MP4-per-move manifest, and video approval gate. The UI
 queues `1`–`9`, `236`, and `214`, optionally prefixed with `j.`, followed by
-`A`, `B`, `C`, `F`, or `EX` (`A+B`), plus grounded `2AA` and `5AA`. For `j.`
-moves, the input worker presses jump, releases it, pauses briefly, then sends
-the listed input. Player 1's
+`A`, `B`, `C`, `F`, or `EX` (`A+B`), plus `j.A`, `j.B`, `j.C`, and grounded
+`2AA` and `5AA`. For `j.`
+moves, the input worker sends Down then Up for a superjump and starts the listed
+input without an added neutral pause. Its scheduled attack begins 25 ms after
+Up for a neutral jump attack, 45 ms after Up for a directional jump attack,
+or 85 ms after Up for a jump special. Player 1's
 keyboard bindings determine the physical keys;
 directions are relative to the selected facing. Only `5A` and right-facing
 `236A` have been confirmed in game. Other recipes need video review, and their
-timing is not frame accurate. Charged, stance, dependent, and other
-unimplemented inputs remain visible with skip reasons. The jump delay and
-airborne input recognition still need in-game validation.
+timing is not frame accurate; Windows scheduling and game input polling can
+change the effective interval. Charged, stance, dependent, and other
+unimplemented inputs remain visible with skip reasons. Superjump recognition,
+the shorter jump motion steps, and airborne input recognition still need
+in-game validation.
 
 The command **Gather whiff data for all moves** runs against the selected
 character/support variant. The user first sets the training position, facing,
@@ -154,14 +159,15 @@ always skips tagged moves and shows them in a manual-capture list.
 An untagged move enters the automated queue when it has a supported recipe
 and its selected evidence slot is missing or needs redo. Supported recipes are
 `1`–`9`, `236`, and `214` with `A`, `B`, `C`, `F`, or `EX`, with an optional
-`j.` prefix for jump attacks, plus grounded `2AA` and `5AA`. AA sends two
+`j.` prefix for jump attacks, plus neutral jump `j.A`, `j.B`, `j.C` and
+grounded `2AA` and `5AA`. AA sends two
 separate A taps while holding Down for `2AA`. Its recording contains the base
 `2A` or `5A` action before the AA follow-up. When both actions share one continuous
 framebar episode, processing splits at the end of the base A's first active
 window. Recovery and startup cells before the next active window become AA
 startup. A separate second episode also links to AA when both are detected.
 Jump attacks use the same
-grounded reset point; the worker sends jump before the motion or attack.
+grounded reset point; the worker sends Down then Up before the motion or attack.
 The runner sends `EX` by pressing the configured `A` and `B` keys together.
 Bracketed charged inputs (such as `5[C]` or `236[EX]`) hold their attack
 button(s) for the pass's configured 100–5000 ms duration (1000 ms by default).
