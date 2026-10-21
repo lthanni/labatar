@@ -503,8 +503,24 @@ async function accessRole(db, email) {
 
 export async function authorizeAccessAdmin(request, env, fetcher = fetch) {
   const email = await verifyAccessJwt(request.headers.get("Cf-Access-Jwt-Assertion"), env, fetcher);
-  if (!ownerEmails(env).includes(email)) throw new Error("Access administration is unavailable.");
+  if (!ownerEmails(env).includes(email)) throw new AccessAdminDenied(email);
   return email;
+}
+
+class AccessAdminDenied extends Error {
+  constructor(email) {
+    super(`Signed in as ${email}, but this account is not an access administrator.`);
+  }
+}
+
+function accessAdminFailure(error) {
+  return fail(
+    error instanceof AccessAdminDenied
+      ? error.message
+      : "Could not verify the Cloudflare Access session.",
+    403,
+    true,
+  );
 }
 
 function accessEmail(value) {
@@ -726,8 +742,8 @@ export async function handleRequest(
     let adminEmail;
     try {
       adminEmail = await getAccessAdmin(request, env);
-    } catch {
-      return fail("Access administration required.", 403, true);
+    } catch (error) {
+      return accessAdminFailure(error);
     }
     if (!["GET", "PUT", "DELETE"].includes(request.method))
       return fail("Method not allowed.", 405, true);
@@ -740,8 +756,8 @@ export async function handleRequest(
   if (request.method === "GET" && /^\/v1\/editor\/access(?:\.(?:js|css))?$/.test(path)) {
     try {
       await getAccessAdmin(request, env);
-    } catch {
-      return fail("Access administration required.", 403, true);
+    } catch (error) {
+      return accessAdminFailure(error);
     }
     if (!env.ASSETS) return fail("Admin assets are unavailable.", 503, true);
     const asset = await env.ASSETS.fetch(request);

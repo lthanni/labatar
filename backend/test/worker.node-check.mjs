@@ -280,6 +280,32 @@ test("Access identity requires a valid signature, audience, issuer and time", as
     .run();
   assert.equal(await authorizeEditor(accessRequest, roleEnv, fetcher), "editor@example.com");
   await assert.rejects(() => authorizeAccessAdmin(accessRequest, roleEnv, fetcher));
+  const deniedAdmin = await handleRequest(
+    new Request("https://api.example.com/v1/editor/access", {
+      headers: { "Cf-Access-Jwt-Assertion": valid },
+    }),
+    roleEnv,
+    {},
+    undefined,
+    undefined,
+    (request, env) => authorizeAccessAdmin(request, env, fetcher),
+  );
+  assert.equal(deniedAdmin.status, 403);
+  assert.deepEqual(await deniedAdmin.json(), {
+    error: "Signed in as editor@example.com, but this account is not an access administrator.",
+  });
+  const invalidAdmin = await handleRequest(
+    new Request("https://api.example.com/v1/editor/access"),
+    roleEnv,
+    {},
+    undefined,
+    undefined,
+    (request, env) => authorizeAccessAdmin(request, env, fetcher),
+  );
+  assert.equal(invalidAdmin.status, 403);
+  assert.deepEqual(await invalidAdmin.json(), {
+    error: "Could not verify the Cloudflare Access session.",
+  });
   const ownerRequest = new Request(accessRequest.url, {
     headers: { "Cf-Access-Jwt-Assertion": await token({ ...claims, email: "owner@example.com" }) },
   });
