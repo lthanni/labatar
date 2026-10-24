@@ -30,15 +30,35 @@ release. Add a tool name to select part of the graph. For example, run
 
 - Inspect `package.json` scripts before invoking them with `vp run`; a script can call
   `pnpm` internally even when the outer command uses `vp`.
+- Treat the main checkout's `node_modules` as active user state. For release
+  verification, use CI or an isolated checkout with its own dependencies and
+  package store. Do not reinstall dependencies in the main checkout solely to
+  validate a release.
 - Use `vp install --frozen-lockfile` for dependency repair. Before running an
   install, verify that `node_modules` resolves inside this repository and that
   the current account can modify it. If the checkout is owned by another
   account, request the required permission first; do not retry an access-denied
   install as the sandbox account.
+- Before replacing or force-reinstalling `node_modules`, check for development
+  servers, Electron processes, and IDE helpers using that checkout. Their open
+  files can leave an install incomplete. Stop the affected processes first, or
+  use an isolated checkout if stopping them would disrupt the user. After a
+  failed install, diagnose the failure before retrying; do not run builds
+  against the partial dependency tree.
 - Before an Electron build, check that `node_modules/.bin/tsc` and
-  `node_modules/electron/dist/electron.exe` exist. If a package-manager command
-  fails partway through, repair the install before running any more builds.
+  `node_modules/electron/dist/electron.exe` exist. Also verify that `vite`
+  resolves and the Electron distribution contains its required resources;
+  the executable alone does not prove the install is complete.
 - Run `vp env doctor` when dependency or runtime behavior is unexpected.
+
+## Release verification
+
+- After pushing a release tag, confirm the release workflow completed
+  successfully and the published GitHub release has the expected installer and
+  update files. For a stable release, confirm it is neither a draft nor a
+  prerelease. A pushed tag alone is not a completed release.
+- Report release status and local checkout health separately. A successful CI
+  build does not show that the user's local `node_modules` is usable.
 
 ## Assumption checking
 
