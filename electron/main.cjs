@@ -1793,6 +1793,10 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
       preparationDurationMs: Date.now() - startedAtMs,
     });
     await client.call("StartRecord");
+    // StartRecord acknowledges the request before OBS has necessarily started
+    // its output. A lobby can end in the same game-log batch, so wait before
+    // allowing its stop handler to run.
+    await waitForObsRecordingState(client, true);
     logRecordingDiagnostic("obs-start-record-complete", {
       source,
       matchId: metadata?.matchId ?? null,
@@ -4223,6 +4227,7 @@ function queueFinalizedChapterJobs(recording) {
     if (
       recording.source === "automatic" &&
       recording.manifestPath &&
+      recording.games?.length > 0 &&
       getCaptureSettings().autoGameChapters
     ) {
       const workId = `game-chapters:${recording.sessionId}`;
@@ -4880,10 +4885,8 @@ async function trimRecordingClip(request = {}) {
     rootItem.backupManifestPath = path.join(tempFolder, "original-root.labatar.json");
     items.push(rootItem);
 
-    const visitChildren = async (parentId, parentStart, parentEnd) => {
-      for (const child of childrenByParent.get(parentId) ?? []) {
-        if (child.visited) continue;
-        child.visited = true;
+    const updateLinkedClips = async () => {
+      for (const child of childrenByParent.get(recordingId) ?? []) {
         if (
           clipTrimJobs.has(child.videoPath) ||
           clipExportSourceCounts.has(child.videoPath) ||
@@ -4896,42 +4899,12 @@ async function trimRecordingClip(request = {}) {
         }
         clipTrimJobs.add(child.videoPath);
         lockedClipPaths.push(child.videoPath);
-        const mapping = planChildClipMapping(child.manifest.clip, parentStart, parentEnd);
+        const mapping = planChildClipMapping(child.manifest.clip, actualStart, endTime);
         const nextChildManifest = { ...child.manifest };
         if (mapping.detached) {
           nextChildManifest.clip = null;
         } else {
           nextChildManifest.clip = mapping.clip;
-          if (mapping.partial) {
-            const childProbe = await probeChapters(executable, child.videoPath);
-            // Cropping a clip that carries local match/analysis data needs a separate time remap.
-            planClipTrim(
-              child.manifest,
-              mapping.localStartTime,
-              mapping.localEndTime,
-              childProbe.durationMs,
-            );
-            child.candidateVideoPath = path.join(tempFolder, `item-${candidateNumber++}.mp4`);
-            let childCreationTime = null;
-            if (childProbe.creationTime && Number.isFinite(Date.parse(childProbe.creationTime))) {
-              childCreationTime = new Date(
-                Date.parse(childProbe.creationTime) + mapping.localStartTime * 1000,
-              ).toISOString();
-            }
-            await encodeTrim({
-              sourcePath: child.videoPath,
-              outputPath: child.candidateVideoPath,
-              localStart: mapping.localStartTime,
-              localEnd: mapping.localEndTime,
-              chapters: mapChaptersToTrim(
-                childProbe.chapters,
-                mapping.localStartTime,
-                mapping.localEndTime,
-              ),
-              creationTime: childCreationTime,
-            });
-            await visitChildren(child.id, mapping.localStartTime, mapping.localEndTime);
-          }
         }
         await stageManifest(child, nextChildManifest);
         child.backupVideoPath = path.join(tempFolder, `original-${candidateNumber}.mp4`);
@@ -4942,7 +4915,7 @@ async function trimRecordingClip(request = {}) {
         items.push(child);
       }
     };
-    await visitChildren(recordingId, actualStart, endTime);
+    await updateLinkedClips();
 
     await replaceTrimmedFiles(items);
     return { recording: await getRecordedVideoForPath(videoPath), actualStartTime: actualStart };
@@ -6352,7 +6325,23 @@ const portraitLibraryRoot = () => path.join(app.getPath("userData"), "portraits"
 const uiArtworkPakEntries = new Map([
   ["srcdata/munged/frames/levels~mode_replay~replay_controls~icons~frames~btnd.munged", "flow"],
   ["srcdata/munged/frames/sprites~hud~player_panel~chakrahud~chakradot_1.munged", "pips"],
+  ["srcdata/munged/frames/sprites~hud~player_panel~chihud~chi_frame.munged", "chi_frame"],
+  ["srcdata/munged/frames/sprites~hud~player_panel~chihud~chi_frame_bg.munged", "chi_frame_bg"],
+  ...Array.from({ length: 6 }, (_, index) => {
+    const dot = index + 2;
+    return [
+      `srcdata/munged/frames/sprites~hud~player_panel~chakrahud~chakradot_${dot}.munged`,
+      `chakradot_${dot}`,
+    ];
+  }),
 ]);
+const uiArtworkNames = [
+  "flow",
+  "pips",
+  "chi_frame",
+  "chi_frame_bg",
+  ...Array.from({ length: 6 }, (_, index) => `chakradot_${index + 2}`),
+];
 const uiArtworkLibraryPath = (name) => path.join(portraitLibraryRoot(), "ui", `${name}.png`);
 const artworkJobs = new Map();
 let portraitLibraryInitialization = null;
@@ -6577,6 +6566,12 @@ ipcMain.handle("artwork:get-status", async () => {
   for (const [name, label] of [
     ["flow", "Flow icon"],
     ["pips", "Pips icon"],
+    ["chi_frame", "Chi meter frame"],
+    ["chi_frame_bg", "Chi meter background"],
+    ...Array.from({ length: 6 }, (_, index) => [
+      `chakradot_${index + 2}`,
+      `Chakra dot ${index + 2}`,
+    ]),
   ]) {
     if (!(await fs.promises.stat(uiArtworkLibraryPath(name)).catch(() => null))?.isFile()) {
       missing.push(label);
@@ -6640,7 +6635,7 @@ ipcMain.handle("artwork:extract", async (event) => {
     );
     if (savedPortraits === 0) throw new Error("No character portraits were found.");
     const importedUiArtwork = [];
-    for (const name of ["flow", "pips"]) {
+    for (const name of uiArtworkNames) {
       const decodedIcon = path.join(decodedDirectory, "ui", `${name}.png`);
       if (!(await fs.promises.stat(decodedIcon).catch(() => null))?.isFile()) continue;
       const target = uiArtworkLibraryPath(name);
@@ -7200,6 +7195,7 @@ ipcMain.handle("combo-candidates:submit", async (event, request) => {
   const recordingPath = resolveRecordingPath(String(request?.recordingId ?? ""));
   return submitComboCandidate({
     recordingPath,
+    parent: BrowserWindow.fromWebContents(event.sender),
     combo: request?.combo,
     originCandidateId: request?.originCandidateId,
     onProgress: (progress) => {
@@ -7627,7 +7623,10 @@ void app.whenReady().then(() => {
           headers: { "Content-Type": "image/png", "Cache-Control": "no-store" },
         });
       }
-      if (url.hostname === "artwork" && /^\/(flow|pips)\.png$/.test(url.pathname)) {
+      if (
+        url.hostname === "artwork" &&
+        /^\/(flow|pips|chakradot_[2-7]|chi_frame|chi_frame_bg)\.png$/.test(url.pathname)
+      ) {
         const filePath = uiArtworkLibraryPath(url.pathname.slice(1, -4));
         const stat = await fs.promises.stat(filePath);
         if (!stat.isFile() || stat.size > 1024 * 1024) {

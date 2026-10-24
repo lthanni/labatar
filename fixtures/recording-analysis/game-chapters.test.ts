@@ -120,17 +120,22 @@ describe("automatic MP4 game chapters", () => {
         metadata: { lobbyId: "lobby-1" },
         games: [{ matchId: "a", lobbyId: "lobby-1", gameNumber: 1, logTime: "19:37:55" }],
       };
+      await addGameChaptersToMp4({ executable: ffmpeg, videoPath: base, manifest });
+      expect((await probeChapters(ffmpeg, base)).chapters).toEqual([
+        { startMs: 0, title: "Recording start" },
+        { startMs: 1000, title: "Labatar Game 1" },
+      ]);
       expect(
         (await addGameChaptersToMp4({ executable: ffmpeg, videoPath: source, manifest })).added,
       ).toBe(1);
       const after = await probeChapters(ffmpeg, source);
-      expect(after.chapters.map((chapter: { title: string }) => chapter.title).sort()).toEqual([
-        "Labatar Game 1",
-        "Unnamed 1",
+      expect(after.chapters).toEqual([
+        { startMs: 0, title: "Unnamed 1" },
+        { startMs: 1000, title: "Labatar Game 1" },
       ]);
       expect(Math.abs(after.durationMs - before.durationMs)).toBeLessThan(1000);
       await addGameChaptersToMp4({ executable: ffmpeg, videoPath: source, manifest });
-      expect((await probeChapters(ffmpeg, source)).chapters).toHaveLength(2);
+      expect((await probeChapters(ffmpeg, source)).chapters).toEqual(after.chapters);
       expect((await readFile(source)).length).toBeGreaterThan(0);
     } finally {
       await rm(directory, { recursive: true, force: true });

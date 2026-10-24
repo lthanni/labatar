@@ -6,9 +6,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 const require = createRequire(import.meta.url);
 const {
+  planChildClipMapping,
   planClipTrim,
   planRecordingTrim,
   replaceClipAndRollback,
+  replaceTrimmedFiles,
 } = require("../../electron/clip-trim.cjs");
 
 const manifest = {
@@ -69,6 +71,50 @@ describe("chapterless recording trim planning", () => {
     ).toThrow(/linked/);
     expect(() => planRecordingTrim(recording, 0, 10, 10_000, [])).toThrow(/shorter range/);
     expect(() => planRecordingTrim(recording, 2, 11, 10_000, [])).toThrow(/outside/);
+  });
+});
+
+describe("linked clips after a parent trim", () => {
+  it("rebases a fully retained clip without changing its length", () => {
+    expect(planChildClipMapping(manifest.clip, 20, 70)).toEqual({
+      detached: false,
+      clip: { ...manifest.clip, startTime: 10, endTime: 40, manualChapterStartMs: 40_000 },
+    });
+  });
+
+  it("detaches a clip extending past either end of the retained range", () => {
+    expect(planChildClipMapping(manifest.clip, 35, 70)).toEqual({ detached: true });
+    expect(planChildClipMapping(manifest.clip, 20, 55)).toEqual({ detached: true });
+    expect(planChildClipMapping(manifest.clip, 35, 55)).toEqual({ detached: true });
+    expect(manifest.clip).toMatchObject({ startTime: 30, endTime: 60 });
+  });
+
+  it("changes only a detached clip's metadata during replacement", async () => {
+    const folder = await mkdtemp(path.join(tmpdir(), "labatar-detached-clip-"));
+    const videoPath = path.join(folder, "clip.mp4");
+    const manifestPath = `${videoPath}.labatar.json`;
+    const originalManifestContent = JSON.stringify(manifest);
+    const candidateManifestPath = path.join(folder, "candidate.labatar.json");
+    const backupManifestPath = path.join(folder, "backup.labatar.json");
+    try {
+      await writeFile(videoPath, "full-exported-clip");
+      await writeFile(manifestPath, originalManifestContent);
+      await writeFile(candidateManifestPath, JSON.stringify({ ...manifest, clip: null }));
+      await replaceTrimmedFiles([
+        {
+          videoPath,
+          manifestPath,
+          candidateManifestPath,
+          backupManifestPath,
+          originalStat: await stat(videoPath),
+          originalManifestContent,
+        },
+      ]);
+      expect(await readFile(videoPath, "utf8")).toBe("full-exported-clip");
+      expect(JSON.parse(await readFile(manifestPath, "utf8")).clip).toBeNull();
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
   });
 });
 

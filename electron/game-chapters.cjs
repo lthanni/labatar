@@ -106,6 +106,11 @@ function buildChapterMetadata(existing, generated, durationMs, preserveExisting 
         Number.isFinite(chapter.startMs) && chapter.startMs >= 0 && chapter.startMs < durationMs,
     )
     .sort((a, b) => a.startMs - b.startMs);
+  // FFmpeg moves the first MP4 chapter to time zero. Keep the first real
+  // marker at its intended time by giving the lead-in its own chapter.
+  if (chapters[0]?.startMs > 0) {
+    chapters.unshift({ startMs: 0, title: "Recording start" });
+  }
   const lines = [";FFMETADATA1"];
   for (let index = 0; index < chapters.length; index += 1) {
     const chapter = chapters[index];

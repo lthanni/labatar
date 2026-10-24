@@ -114,13 +114,15 @@ function planChildClipMapping(clip, parentStartTime, parentEndTime) {
   ) {
     throw new Error("A linked clip has invalid source timing; the recording was not changed.");
   }
-  const overlapStart = Math.round(Math.max(clip.startTime, parentStartTime) * 1000) / 1000;
-  const overlapEnd = Math.round(Math.min(clip.endTime, parentEndTime) * 1000) / 1000;
-  if (overlapEnd <= overlapStart) return { detached: true };
+  // Exported clips own their media. A parent trim must not crop a clip that
+  // extends beyond the retained range; it only invalidates the source link.
+  if (clip.startTime < parentStartTime || clip.endTime > parentEndTime) {
+    return { detached: true };
+  }
   const nextClip = {
     ...clip,
-    startTime: Math.round((overlapStart - parentStartTime) * 1000) / 1000,
-    endTime: Math.round((overlapEnd - parentStartTime) * 1000) / 1000,
+    startTime: Math.round((clip.startTime - parentStartTime) * 1000) / 1000,
+    endTime: Math.round((clip.endTime - parentStartTime) * 1000) / 1000,
   };
   if (Number.isFinite(clip.manualChapterStartMs)) {
     const markerSeconds = clip.manualChapterStartMs / 1000;
@@ -132,9 +134,6 @@ function planChildClipMapping(clip, parentStartTime, parentEndTime) {
   }
   return {
     detached: false,
-    localStartTime: Math.round((overlapStart - clip.startTime) * 1000) / 1000,
-    localEndTime: Math.round((overlapEnd - clip.startTime) * 1000) / 1000,
-    partial: overlapStart > clip.startTime + 0.001 || overlapEnd < clip.endTime - 0.001,
     clip: nextClip,
   };
 }
