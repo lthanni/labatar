@@ -101,10 +101,10 @@ export function ArtworkPanel({ onImported }: { onImported: () => void }) {
           <Typography variant="h6">Game artwork</Typography>
           <Typography variant="body2" color="text.secondary">
             Decode the game&apos;s encoded files to display character and support portraits and the
-            Flow and Pips icons. You should only need to do this once, or again if a game update
-            adds new characters or supports. The app reads the data_packages folder inside your
-            selected game folder automatically. Decoded artwork stays on this computer and is not
-            added to the repository.
+            Flow and Pips icons, including the colored dots and Chi meter on combo cards. You should
+            only need to do this once, or again if a game update adds new characters or supports.
+            The app reads the data_packages folder inside your selected game folder automatically.
+            Decoded artwork stays on this computer and is not added to the repository.
           </Typography>
         </div>
         <Stack direction="row" spacing={1}>

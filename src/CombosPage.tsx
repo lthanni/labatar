@@ -23,6 +23,11 @@ import {
 } from "@mui/material";
 import supportMap from "../electron/support-map.json";
 import { ComboRouteText } from "./ComboRouteText";
+import {
+  comboScreenPositions,
+  comboScreenPositionOrEmpty,
+  isComboScreenPosition,
+} from "./combo-screen-position";
 import { ComboCandidateReview } from "./ComboCandidateReview";
 import {
   candidateComboFromItem,
@@ -422,6 +427,118 @@ function ComboSourceCounts({ local, candidates }: { local: number; candidates: n
   );
 }
 
+function ComboPipIcons({ pips }: { pips: number }) {
+  const [available, setAvailable] = useState(true);
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    const refresh = () => {
+      setAvailable(true);
+      setVersion((current) => current + 1);
+    };
+    window.addEventListener("labatar-artwork-imported", refresh);
+    return () => window.removeEventListener("labatar-artwork-imported", refresh);
+  }, []);
+
+  const count = Number.isFinite(pips) ? Math.min(7, Math.max(0, Math.trunc(pips))) : 0;
+  if (count === 0) return null;
+  if (!available) return <Typography variant="caption">{pips} pips</Typography>;
+
+  return (
+    <Box
+      role="img"
+      aria-label={`${pips} ${pips === 1 ? "pip" : "pips"}`}
+      title={`${pips} ${pips === 1 ? "pip" : "pips"}`}
+      sx={{ display: "flex", flexShrink: 0, alignItems: "center", gap: 0.25 }}
+    >
+      {Array.from({ length: count }, (_, index) => 8 - count + index).map((dot) => (
+        <Box
+          key={dot}
+          component="img"
+          src={`labatar-media://artwork/${dot === 1 ? "pips" : `chakradot_${dot}`}.png?v=${version}`}
+          alt=""
+          onError={() => setAvailable(false)}
+          sx={{ width: 16, height: 16, objectFit: "contain", display: "block" }}
+        />
+      ))}
+    </Box>
+  );
+}
+
+function ComboFlowMeter({ flow }: { flow: number }) {
+  const [available, setAvailable] = useState(true);
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    const refresh = () => {
+      setAvailable(true);
+      setVersion((current) => current + 1);
+    };
+    window.addEventListener("labatar-artwork-imported", refresh);
+    return () => window.removeEventListener("labatar-artwork-imported", refresh);
+  }, []);
+
+  if (!available) return <Chip size="small" label={`${flow} flow`} variant="outlined" />;
+  const amount = Number.isFinite(flow) ? Math.max(0, flow) : 0;
+  const fill = Math.min(amount / 500, 1);
+
+  return (
+    <Box
+      role="meter"
+      aria-label="Flow cost"
+      aria-valuemin={0}
+      aria-valuemax={500}
+      aria-valuenow={Math.min(amount, 500)}
+      aria-valuetext={`${flow} flow`}
+      title={`${flow} flow`}
+      sx={{ width: 120, height: 18, position: "relative", flexShrink: 0 }}
+    >
+      <Box
+        component="img"
+        src={`labatar-media://artwork/chi_frame_bg.png?v=${version}`}
+        alt=""
+        onError={() => setAvailable(false)}
+        sx={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+      />
+      <Box
+        sx={{
+          position: "absolute",
+          left: "2.5%",
+          top: "27%",
+          width: `${fill * 95}%`,
+          height: "48%",
+          bgcolor: "#38d4e7",
+          backgroundImage: "linear-gradient(110deg, #22c6db, #8beaf2)",
+          clipPath: "polygon(0 0, 98% 0, 100% 100%, 2% 100%)",
+        }}
+      />
+      <Box
+        component="img"
+        src={`labatar-media://artwork/chi_frame.png?v=${version}`}
+        alt=""
+        onError={() => setAvailable(false)}
+        sx={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+      />
+      <Typography
+        component="span"
+        aria-hidden="true"
+        sx={{
+          position: "absolute",
+          right: 7,
+          top: -1,
+          color: "#fff",
+          fontSize: 13,
+          fontWeight: 900,
+          fontVariantNumeric: "tabular-nums",
+          lineHeight: "18px",
+          WebkitTextStroke: "0.5px #1c2a30",
+          textShadow: "1px 1px 0 #1c2a30, -1px -1px 0 #1c2a30",
+        }}
+      >
+        {flow}
+      </Typography>
+    </Box>
+  );
+}
+
 function PortraitPicker({
   open,
   kind,
@@ -541,7 +658,7 @@ const blankLocal = (characterId: string, supportId: string): LocalCombo => ({
   starter: "",
   name: "",
   route: "",
-  screenPosition: "",
+  screenPosition: "corner",
   damage: "",
   pips: 0,
   flow: 0,
@@ -566,7 +683,9 @@ function LocalComboDialog({
   const [personalForm, setPersonalForm] = useState<PersonalComboEntry>(personal);
   const [formError, setFormError] = useState("");
   useEffect(() => {
-    setForm(draft);
+    setForm(
+      draft ? { ...draft, screenPosition: comboScreenPositionOrEmpty(draft.screenPosition) } : null,
+    );
     setPersonalForm({ ...personal, difficulty: personal.difficulty ?? draft?.difficulty ?? null });
     setFormError("");
   }, [draft]);
@@ -579,16 +698,14 @@ function LocalComboDialog({
       form.route,
       form.publishedBase?.starterIsNonAttackStance ?? false,
     );
-    if (
-      !form.characterId.trim() ||
-      !form.supportId.trim() ||
-      !starter ||
-      !form.route.trim() ||
-      (!form.originCatalog && !form.name.trim())
-    )
+    if (!form.characterId.trim() || !form.supportId.trim() || !starter || !form.route.trim())
       return;
     if (!slugComboText(form.characterId) || !slugComboText(form.supportId)) {
       setFormError("Choose valid character and support IDs.");
+      return;
+    }
+    if (!isComboScreenPosition(form.screenPosition)) {
+      setFormError("Choose a screen position.");
       return;
     }
     if (form.route.length > 2000 || form.name.length > 160 || form.screenPosition.length > 100) {
@@ -641,18 +758,16 @@ function LocalComboDialog({
             <TextField
               label="Character ID"
               required
-              disabled={Boolean(form.publishedId)}
+              disabled
               value={form.characterId}
-              onChange={(e) => update("characterId", e.target.value)}
-              helperText="Lowercase catalog ID"
+              helperText="Current character selection"
             />
             <TextField
               label="Support ID"
               required
-              disabled={Boolean(form.publishedId)}
+              disabled
               value={form.supportId}
-              onChange={(e) => update("supportId", e.target.value)}
-              helperText="Lowercase catalog ID"
+              helperText="Current support selection"
             />
             {form.originCatalog ? (
               <TextField
@@ -660,14 +775,13 @@ function LocalComboDialog({
                 value={form.editorName ?? ""}
                 onChange={(e) => update("editorName", e.target.value)}
               />
-            ) : (
+            ) : form.id ? (
               <TextField
                 label="My combo name"
-                required
                 value={form.name}
                 onChange={(e) => update("name", e.target.value)}
               />
-            )}
+            ) : null}
             <TextField
               label="Route"
               required
@@ -676,10 +790,17 @@ function LocalComboDialog({
               helperText={`Starter: ${comboStarterFromRoute(form.route, form.publishedBase?.starterIsNonAttackStance ?? false) || "Enter a route"}`}
               sx={{ gridColumn: { sm: "span 2" } }}
             />
-            <TextField
+            <SelectField
               label="Screen position"
               value={form.screenPosition}
-              onChange={(e) => update("screenPosition", e.target.value)}
+              width={0}
+              options={comboScreenPositions
+                .map((position): [string, string] => [
+                  position,
+                  position[0].toUpperCase() + position.slice(1),
+                ])
+                .concat([["", "Choose a position"]])}
+              onChange={(value) => update("screenPosition", value)}
             />
             <TextField
               label="Damage"
@@ -700,90 +821,38 @@ function LocalComboDialog({
               onChange={(e) => update("flow", Math.max(0, Number(e.target.value) || 0))}
               slotProps={{ htmlInput: { min: 0 } }}
             />
-            {!form.originCatalog && !form.id && (
+            {Boolean(form.id || form.originCatalog) && (
               <SelectField
-                label="My difficulty"
-                value={String(personalForm.difficulty ?? "")}
+                label="Hitconfirm"
+                value={form.hitconfirm}
                 width={0}
                 options={[
-                  ["", "Unrated"],
-                  ...[1, 2, 3, 4, 5].map((n): [string, string] => [String(n), String(n)]),
+                  ["unknown", "Unknown"],
+                  ["yes", "Yes"],
+                  ["no", "No"],
                 ]}
-                onChange={(v) =>
-                  setPersonalForm((old) => ({ ...old, difficulty: v ? Number(v) : null }))
-                }
+                onChange={(v) => update("hitconfirm", v as ConfirmFact)}
               />
             )}
-            <SelectField
-              label="Hitconfirm"
-              value={form.hitconfirm}
-              width={0}
-              options={[
-                ["unknown", "Unknown"],
-                ["yes", "Yes"],
-                ["no", "No"],
-              ]}
-              onChange={(v) => update("hitconfirm", v as ConfirmFact)}
-            />
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={form.counterhit}
-                  onChange={(e) => update("counterhit", e.target.checked)}
-                />
-              }
-              label="Requires counterhit"
-            />
-            {!form.originCatalog && !form.id && (
-              <>
-                <SelectField
-                  label="Status"
-                  value={personalForm.status}
-                  width={0}
-                  options={[
-                    ["", "Blank / not tracked"],
-                    ...comboStatuses.map((status): [string, string] => [status, status]),
-                  ]}
-                  onChange={(value) =>
-                    setPersonalForm((old) => ({ ...old, status: value as ComboStatus }))
-                  }
-                />
-                <SelectField
-                  label="Role"
-                  value={personalForm.role}
-                  width={0}
-                  options={[
-                    ["", "Not set"],
-                    ["Autopilot", "Autopilot"],
-                    ["Situational", "Situational"],
-                  ]}
-                  onChange={(value) =>
-                    setPersonalForm((old) => ({ ...old, role: value as ComboRole }))
-                  }
-                />
-                <TextField
-                  label="When I use it"
-                  value={personalForm.condition}
-                  onChange={(e) =>
-                    setPersonalForm((old) => ({ ...old, condition: e.target.value }))
-                  }
-                />
-                <TextField
-                  label="Personal note"
-                  multiline
-                  minRows={2}
-                  value={personalForm.note}
-                  onChange={(e) => setPersonalForm((old) => ({ ...old, note: e.target.value }))}
-                  sx={{ gridColumn: { sm: "span 2" } }}
-                />
-              </>
+            {Boolean(form.id || form.originCatalog) && (
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={form.counterhit}
+                    onChange={(e) => update("counterhit", e.target.checked)}
+                  />
+                }
+                label="Requires counterhit"
+              />
             )}
-            <TextField
-              label="YouTube URL (for editor submission)"
-              value={form.youtubeUrl}
-              onChange={(e) => update("youtubeUrl", e.target.value)}
-              sx={{ gridColumn: { sm: "span 2" } }}
-            />
+            {Boolean(form.id || form.originCatalog) && (
+              <TextField
+                label="YouTube URL (for editor submission)"
+                value={form.youtubeUrl}
+                onChange={(e) => update("youtubeUrl", e.target.value)}
+                sx={{ gridColumn: { sm: "span 2" } }}
+              />
+            )}
             {form.publishedId && (
               <>
                 <Divider sx={{ gridColumn: "1 / -1" }} />
@@ -1234,11 +1303,9 @@ function PublishDialog({
       item.route.length > 2000 ||
       !item.damage.trim() ||
       item.damage.length > 100 ||
-      item.screenPosition.length > 100
+      !isComboScreenPosition(item.screenPosition)
     )
-      return setError(
-        "Complete the route and damage, and keep route, damage, and position within catalog limits.",
-      );
+      return setError("Complete the route and damage, and choose a valid screen position.");
     if (form.note.trim().length > 1000)
       return setError("Editor note must be at most 1000 characters.");
     const notes = item.local?.editorNotes ?? normalizeComboNotes(item.local?.publishedBase?.notes);
@@ -2034,37 +2101,32 @@ export function CombosPage({ active }: { active: boolean }) {
         : statusFilter === "all" || entry(item.id).status === statusFilter) &&
       (effectiveTagFilter === "all" || entry(item.id).tags.includes(effectiveTagFilter)),
   );
-  const groups = [
-    [
-      "Autopilot",
-      shown.filter(
+  const showNewCombos = ["gameplan", "all"].includes(statusFilter) && effectiveTagFilter === "all";
+  const positionColumns = comboScreenPositions.map((position) => ({
+    position,
+    label: position[0].toUpperCase() + position.slice(1),
+  }));
+  const positionGroups = positionColumns.map(({ position, label }) => ({
+    label,
+    combos: shown.filter((item) => item.screenPosition.trim().toLowerCase() === position),
+    newCombos: showNewCombos
+      ? newCombos.filter((item) => item.screenPosition.trim().toLowerCase() === position)
+      : [],
+  }));
+  const otherPositionCombos = shown.filter(
+    (item) =>
+      !positionColumns.some(
+        ({ position }) => item.screenPosition.trim().toLowerCase() === position,
+      ),
+  );
+  const otherPositionNewCombos = showNewCombos
+    ? newCombos.filter(
         (item) =>
-          ["Using", "Learning"].includes(entry(item.id).status) &&
-          entry(item.id).role === "Autopilot",
-      ),
-    ],
-    [
-      "Situational",
-      shown.filter(
-        (item) =>
-          ["Using", "Learning"].includes(entry(item.id).status) &&
-          entry(item.id).role === "Situational",
-      ),
-    ],
-    [
-      "Role not set",
-      shown.filter(
-        (item) => ["Using", "Learning"].includes(entry(item.id).status) && !entry(item.id).role,
-      ),
-    ],
-    [
-      "Candidates",
-      shown.filter((item) => ["Saved for later", "Considering"].includes(entry(item.id).status)),
-    ],
-    ["Maybe someday", shown.filter((item) => entry(item.id).status === "Maybe someday")],
-    ["Retired", shown.filter((item) => entry(item.id).status === "Retired")],
-    ["Dismissed", shown.filter((item) => entry(item.id).status === "Dismissed")],
-  ] as const;
+          !positionColumns.some(
+            ({ position }) => item.screenPosition.trim().toLowerCase() === position,
+          ),
+      )
+    : [];
   const filtered = useMemo(
     () =>
       items
@@ -2091,22 +2153,12 @@ export function CombosPage({ active }: { active: boolean }) {
   const selectedPublicationConflict = publicationMatches.find(
     ({ localId, readyToReplace }) => localId === selectedId && !readyToReplace,
   );
-  const visibleGameplan = [
-    ...shown,
-    ...(["gameplan", "all"].includes(statusFilter) && effectiveTagFilter === "all"
-      ? newCombos
-      : []),
-  ];
+  const visibleGameplan = [...shown, ...(showNewCombos ? newCombos : [])];
   const activeCandidateCountForStarter = candidatesLoaded
     ? countCandidates(upstreamCandidates, character, support, starter)
     : 0;
   const renderedCandidateIds = new Set(
-    [
-      ...shown,
-      ...(["gameplan", "all"].includes(statusFilter) && effectiveTagFilter === "all"
-        ? newCombos.slice(0, 5)
-        : []),
-    ]
+    [...shown, ...(showNewCombos ? newCombos : [])]
       .filter((item) => item.candidate && isActiveCandidate(item.candidate))
       .map((item) => item.candidate!.id),
   );
@@ -2882,7 +2934,7 @@ export function CombosPage({ active }: { active: boolean }) {
           <Box
             sx={{
               display: "grid",
-              gridTemplateColumns: { xs: "1fr", lg: "minmax(0, 1.3fr) minmax(330px, .85fr)" },
+              gridTemplateColumns: { xs: "1fr", xl: "minmax(0, 1fr) minmax(330px, .38fr)" },
               gap: 2,
               alignItems: "start",
             }}
@@ -3037,225 +3089,335 @@ export function CombosPage({ active }: { active: boolean }) {
                           : "No routes for this starter yet. Add a local combo or browse Raw."}
                     </Alert>
                   )}
-                {groups.map(([label, combos]) =>
-                  combos.length ||
-                  (["Autopilot", "Situational"].includes(label) &&
-                    ["gameplan", "all", "Using", "Learning"].includes(statusFilter)) ? (
-                    <Box key={label}>
-                      <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1 }}>
-                        {label}{" "}
-                        <Typography component="span" color="text.secondary">
-                          ({combos.length})
+                {starter && (
+                  <Box
+                    sx={{
+                      display: "grid",
+                      gridTemplateColumns: { xs: "1fr", md: "repeat(3, minmax(0, 1fr))" },
+                      gap: 1.5,
+                    }}
+                  >
+                    {[
+                      ...positionGroups,
+                      ...(otherPositionCombos.length || otherPositionNewCombos.length
+                        ? [
+                            {
+                              label: "Other positions",
+                              combos: otherPositionCombos,
+                              newCombos: otherPositionNewCombos,
+                            },
+                          ]
+                        : []),
+                    ].map(({ label, combos, newCombos: newPositionCombos }) => (
+                      <Box
+                        key={label}
+                        sx={{
+                          minWidth: 0,
+                          gridColumn: label === "Other positions" ? { md: "1 / -1" } : undefined,
+                        }}
+                      >
+                        <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1 }}>
+                          {label}{" "}
+                          <Typography component="span" color="text.secondary">
+                            ({combos.length + newPositionCombos.length})
+                          </Typography>
                         </Typography>
-                      </Typography>
-                      <Stack spacing={1}>
-                        {combos.length === 0 && (
-                          <Paper variant="outlined" sx={{ p: 1.5, color: "text.secondary" }}>
-                            {effectiveTagFilter !== "all" ||
-                            !["gameplan", "all"].includes(statusFilter)
-                              ? `No ${label.toLowerCase()} routes match this filter.`
-                              : label === "Autopilot"
-                                ? newCombos.length
-                                  ? "No autopilot saved yet. Review new combos below or add your own."
-                                  : "No autopilot saved yet. Add your own or browse Raw."
-                                : newCombos.length
-                                  ? "No situational routes saved yet. Review new combos below or add your own."
-                                  : "No situational routes saved yet. Add your own or browse Raw."}
-                          </Paper>
-                        )}
-                        {combos.map((item) => {
-                          const personal = entry(item.id);
-                          return (
+                        <Stack spacing={1}>
+                          {combos.length === 0 && newPositionCombos.length === 0 && (
+                            <Paper variant="outlined" sx={{ p: 1.5, color: "text.secondary" }}>
+                              No saved combos here.
+                            </Paper>
+                          )}
+                          {combos.map((item) => {
+                            const personal = entry(item.id);
+                            return (
+                              <Card
+                                key={item.id}
+                                variant="outlined"
+                                onClick={() => setSelectedId(item.id)}
+                                sx={{
+                                  cursor: "pointer",
+                                  borderColor:
+                                    scopeSelected?.id === item.id ? "primary.main" : undefined,
+                                  p: 1.5,
+                                }}
+                              >
+                                <Box
+                                  sx={{
+                                    display: "grid",
+                                    gridTemplateColumns: "minmax(0, 1fr) auto",
+                                    gridTemplateAreas: '"heading rail" "route rail" "details rail"',
+                                    gridTemplateRows: "auto minmax(0, 1fr) auto",
+                                    columnGap: 1,
+                                    rowGap: 1,
+                                    minHeight: 140,
+                                  }}
+                                >
+                                  <Box
+                                    sx={{
+                                      gridArea: "heading",
+                                      minWidth: 0,
+                                      display: "flex",
+                                      alignItems: "center",
+                                      justifyContent: "space-between",
+                                      flexWrap: "wrap",
+                                      gap: 1,
+                                      pb: 1,
+                                      borderBottom: 1,
+                                      borderColor: "divider",
+                                    }}
+                                  >
+                                    <Box sx={{ minWidth: 0, flex: "1 1 88px" }}>
+                                      <Typography sx={{ fontWeight: 700 }}>
+                                        {comboDisplayName(item, personal)}
+                                      </Typography>
+                                      {(label === "Other positions" || personal.condition) && (
+                                        <Typography variant="body2" color="text.secondary">
+                                          {label === "Other positions"
+                                            ? item.screenPosition || "Position unknown"
+                                            : personal.condition}
+                                          {label === "Other positions" && personal.condition
+                                            ? ` · ${personal.condition}`
+                                            : ""}
+                                        </Typography>
+                                      )}
+                                    </Box>
+                                  </Box>
+                                  <Box
+                                    sx={{
+                                      gridArea: "rail",
+                                      borderLeft: 1,
+                                      borderColor: "divider",
+                                      pl: 1,
+                                      display: "flex",
+                                      flexDirection: "column",
+                                      alignItems: "flex-end",
+                                      justifyContent: "space-between",
+                                      gap: 1,
+                                    }}
+                                  >
+                                    <Box sx={{ textAlign: "right" }}>
+                                      <Typography variant="h5" sx={{ fontWeight: 800 }}>
+                                        {item.damage || "—"}
+                                      </Typography>
+                                      <Typography variant="caption">damage</Typography>
+                                    </Box>
+                                    <Box
+                                      sx={{
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        alignItems: "flex-end",
+                                        gap: 0.5,
+                                      }}
+                                    >
+                                      <ComboPipIcons pips={item.pips} />
+                                      <ComboFlowMeter flow={item.flow} />
+                                    </Box>
+                                  </Box>
+                                  <Typography
+                                    variant="body2"
+                                    sx={{
+                                      gridArea: "route",
+                                      fontFamily: "monospace",
+                                      overflowWrap: "anywhere",
+                                    }}
+                                  >
+                                    {item.route}
+                                  </Typography>
+                                  <Stack
+                                    direction="row"
+                                    spacing={0.5}
+                                    sx={{
+                                      gridArea: "details",
+                                      minWidth: 0,
+                                      flexWrap: "wrap",
+                                      alignItems: "end",
+                                    }}
+                                  >
+                                    <Chip size="small" label={personal.status} />
+                                    <Chip
+                                      size="small"
+                                      label={`Difficulty ${effectiveDifficulty(item, personal) ?? "—"}`}
+                                      variant="outlined"
+                                    />
+                                    {item.counterhit === "yes" && (
+                                      <Chip
+                                        size="small"
+                                        label="CH only"
+                                        color="warning"
+                                        title="Requires a counterhit"
+                                      />
+                                    )}
+                                    {item.candidate && (
+                                      <Chip size="small" label="Candidate" color="secondary" />
+                                    )}
+                                    {item.local && (
+                                      <Chip
+                                        size="small"
+                                        label={
+                                          item.local.originCatalog ? "Local revision" : "Local"
+                                        }
+                                        color="info"
+                                      />
+                                    )}
+                                    {gapFor(item.id) && (
+                                      <Chip
+                                        size="small"
+                                        label={gapFor(item.id)}
+                                        color="warning"
+                                        variant="outlined"
+                                      />
+                                    )}
+                                  </Stack>
+                                </Box>
+                              </Card>
+                            );
+                          })}
+                          {newPositionCombos.length > 0 && (
+                            <Typography variant="subtitle2" sx={{ pt: 1, fontWeight: 700 }}>
+                              New combos ({newPositionCombos.length})
+                            </Typography>
+                          )}
+                          {newPositionCombos.map((item) => (
                             <Card
                               key={item.id}
                               variant="outlined"
                               onClick={() => setSelectedId(item.id)}
                               sx={{
                                 cursor: "pointer",
+                                p: 1.5,
                                 borderColor:
                                   scopeSelected?.id === item.id ? "primary.main" : undefined,
-                                p: 1.5,
                               }}
                             >
-                              <Stack
-                                direction="row"
-                                sx={{ justifyContent: "space-between", gap: 1 }}
+                              <Box
+                                sx={{
+                                  display: "grid",
+                                  gridTemplateColumns: "minmax(0, 1fr) auto",
+                                  gridTemplateAreas: '"heading rail" "route rail" "details rail"',
+                                  gridTemplateRows: "auto minmax(0, 1fr) auto",
+                                  columnGap: 1,
+                                  rowGap: 1,
+                                  minHeight: 140,
+                                }}
                               >
-                                <Box sx={{ minWidth: 0 }}>
-                                  <Typography sx={{ fontWeight: 700 }}>
-                                    {comboDisplayName(item, personal)}
-                                  </Typography>
-                                  <Typography variant="body2" color="text.secondary">
-                                    {item.screenPosition || "Position unknown"}
-                                    {personal.condition ? ` · ${personal.condition}` : ""}
-                                  </Typography>
+                                <Box
+                                  sx={{
+                                    gridArea: "heading",
+                                    minWidth: 0,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "space-between",
+                                    flexWrap: "wrap",
+                                    gap: 1,
+                                    pb: 1,
+                                    borderBottom: 1,
+                                    borderColor: "divider",
+                                  }}
+                                >
+                                  <Box sx={{ minWidth: 0, flex: "1 1 88px" }}>
+                                    <Typography sx={{ fontWeight: 700 }}>
+                                      {comboDisplayName(item, entry(item.id))}
+                                    </Typography>
+                                    <Typography variant="body2" color="text.secondary">
+                                      {item.screenPosition || "Position unknown"}
+                                    </Typography>
+                                  </Box>
                                 </Box>
-                                <Box sx={{ textAlign: "right", flexShrink: 0 }}>
-                                  <Typography variant="h5" sx={{ fontWeight: 800 }}>
-                                    {item.damage || "—"}
-                                  </Typography>
-                                  <Typography variant="caption">damage</Typography>
+                                <Box
+                                  sx={{
+                                    gridArea: "rail",
+                                    borderLeft: 1,
+                                    borderColor: "divider",
+                                    pl: 1,
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    alignItems: "flex-end",
+                                    justifyContent: "space-between",
+                                    gap: 1,
+                                  }}
+                                >
+                                  <Box sx={{ textAlign: "right" }}>
+                                    <Typography variant="h5" sx={{ fontWeight: 800 }}>
+                                      {item.damage || "—"}
+                                    </Typography>
+                                    <Typography variant="caption">damage</Typography>
+                                  </Box>
+                                  <Box
+                                    sx={{
+                                      display: "flex",
+                                      flexDirection: "column",
+                                      alignItems: "flex-end",
+                                      gap: 0.5,
+                                    }}
+                                  >
+                                    <ComboPipIcons pips={item.pips} />
+                                    <ComboFlowMeter flow={item.flow} />
+                                  </Box>
                                 </Box>
-                              </Stack>
-                              <Typography
-                                variant="body2"
-                                sx={{ fontFamily: "monospace", my: 1, overflowWrap: "anywhere" }}
-                              >
-                                {item.route}
-                              </Typography>
-                              <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap" }}>
-                                <Chip size="small" label={personal.status} />
-                                <Chip
-                                  size="small"
-                                  label={personal.role || "Role not set"}
-                                  variant="outlined"
-                                />
-                                <Chip
-                                  size="small"
-                                  label={`${item.pips} pips · ${item.flow} flow`}
-                                  variant="outlined"
-                                />
-                                <Chip
-                                  size="small"
-                                  label={`Difficulty ${effectiveDifficulty(item, personal) ?? "—"}`}
-                                  variant="outlined"
-                                />
-                                {item.candidate && (
-                                  <Chip size="small" label="Candidate" color="secondary" />
-                                )}
-                                {item.local && (
+                                <Typography
+                                  variant="body2"
+                                  sx={{
+                                    gridArea: "route",
+                                    fontFamily: "monospace",
+                                    overflowWrap: "anywhere",
+                                  }}
+                                >
+                                  {item.route}
+                                </Typography>
+                                <Stack
+                                  direction="row"
+                                  spacing={0.5}
+                                  sx={{
+                                    gridArea: "details",
+                                    minWidth: 0,
+                                    flexWrap: "wrap",
+                                    alignItems: "end",
+                                  }}
+                                >
+                                  {item.published?.editorPickReason && (
+                                    <Chip size="small" color="warning" label="Editor's pick" />
+                                  )}
                                   <Chip
                                     size="small"
-                                    label={item.local.originCatalog ? "Local revision" : "Local"}
-                                    color="info"
-                                  />
-                                )}
-                                {gapFor(item.id) && (
-                                  <Chip
-                                    size="small"
-                                    label={gapFor(item.id)}
-                                    color="warning"
                                     variant="outlined"
+                                    label={`Difficulty ${effectiveDifficulty(item, entry(item.id)) ?? "—"}`}
                                   />
-                                )}
-                              </Stack>
+                                  {item.counterhit === "yes" && (
+                                    <Chip
+                                      size="small"
+                                      label="CH only"
+                                      color="warning"
+                                      title="Requires a counterhit"
+                                    />
+                                  )}
+                                  {item.candidate && (
+                                    <Chip size="small" label="Candidate" color="secondary" />
+                                  )}
+                                  {item.local && (
+                                    <Chip
+                                      size="small"
+                                      label={item.local.originCatalog ? "Local revision" : "Local"}
+                                      color="info"
+                                    />
+                                  )}
+                                  {gapFor(item.id) && (
+                                    <Chip
+                                      size="small"
+                                      label={gapFor(item.id)}
+                                      color="warning"
+                                      variant="outlined"
+                                    />
+                                  )}
+                                </Stack>
+                              </Box>
                             </Card>
-                          );
-                        })}
-                      </Stack>
-                    </Box>
-                  ) : null,
+                          ))}
+                        </Stack>
+                      </Box>
+                    ))}
+                  </Box>
                 )}
-                {["gameplan", "all"].includes(statusFilter) &&
-                  effectiveTagFilter === "all" &&
-                  newCombos.length > 0 && (
-                    <Paper variant="outlined" sx={{ p: 2, bgcolor: "action.hover" }}>
-                      <Stack
-                        direction="row"
-                        sx={{ justifyContent: "space-between", alignItems: "center", gap: 1 }}
-                      >
-                        <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
-                          New combos ({newCombos.length})
-                        </Typography>
-                        {newCombos.length > 5 && (
-                          <Button
-                            size="small"
-                            onClick={() => {
-                              setRaw({
-                                ...emptyRaw(),
-                                source: candidateOnly ? "Candidate" : "all",
-                                character,
-                                support,
-                                starter,
-                                status: "",
-                              });
-                              setTab("raw");
-                            }}
-                          >
-                            View all in Raw
-                          </Button>
-                        )}
-                      </Stack>
-                      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                        Routes and local drafts for this starter that you have not tracked yet.
-                        Editor picks appear first.
-                      </Typography>
-                      <Stack spacing={1}>
-                        {newCombos.slice(0, 5).map((item) => (
-                          <Card
-                            key={item.id}
-                            variant="outlined"
-                            onClick={() => setSelectedId(item.id)}
-                            sx={{
-                              cursor: "pointer",
-                              p: 1.5,
-                              borderColor:
-                                scopeSelected?.id === item.id ? "primary.main" : undefined,
-                            }}
-                          >
-                            <Stack
-                              direction="row"
-                              sx={{ justifyContent: "space-between", alignItems: "start", gap: 1 }}
-                            >
-                              <Box sx={{ minWidth: 0 }}>
-                                <Typography sx={{ fontWeight: 700 }}>
-                                  {comboDisplayName(item, entry(item.id))}
-                                </Typography>
-                                <Typography variant="body2" color="text.secondary">
-                                  {item.screenPosition || "Position unknown"}
-                                </Typography>
-                              </Box>
-                              <Box sx={{ textAlign: "right", flexShrink: 0 }}>
-                                <Typography variant="h5" sx={{ fontWeight: 800 }}>
-                                  {item.damage || "—"}
-                                </Typography>
-                                <Typography variant="caption">damage</Typography>
-                              </Box>
-                            </Stack>
-                            <Typography
-                              variant="body2"
-                              sx={{ fontFamily: "monospace", my: 1, overflowWrap: "anywhere" }}
-                            >
-                              {item.route}
-                            </Typography>
-                            <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap" }}>
-                              {item.published?.editorPickReason && (
-                                <Chip size="small" color="warning" label="Editor's pick" />
-                              )}
-                              <Chip
-                                size="small"
-                                variant="outlined"
-                                label={`${item.pips} pips · ${item.flow} flow`}
-                              />
-                              <Chip
-                                size="small"
-                                variant="outlined"
-                                label={`Difficulty ${effectiveDifficulty(item, entry(item.id)) ?? "—"}`}
-                              />
-                              {item.candidate && (
-                                <Chip size="small" label="Candidate" color="secondary" />
-                              )}
-                              {item.local && (
-                                <Chip
-                                  size="small"
-                                  label={item.local.originCatalog ? "Local revision" : "Local"}
-                                  color="info"
-                                />
-                              )}
-                              {gapFor(item.id) && (
-                                <Chip
-                                  size="small"
-                                  label={gapFor(item.id)}
-                                  color="warning"
-                                  variant="outlined"
-                                />
-                              )}
-                            </Stack>
-                          </Card>
-                        ))}
-                      </Stack>
-                    </Paper>
-                  )}
               </Stack>
             </Paper>
             <ComboDetail
@@ -3756,9 +3918,7 @@ export function CombosPage({ active }: { active: boolean }) {
       />
       <LocalComboDialog
         draft={localDraft}
-        personal={
-          localDraft?.id ? entry(localDraft.id) : { ...emptyPersonalEntry(), status: "Considering" }
-        }
+        personal={localDraft?.id ? entry(localDraft.id) : emptyPersonalEntry()}
         onClose={() => setLocalDraft(null)}
         onSave={saveLocal}
       />
@@ -4178,7 +4338,7 @@ function ComboDetail({
                 title={`Combo video: ${item.route}`}
                 src={videoUrl}
                 sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
-                allow="encrypted-media; picture-in-picture; fullscreen"
+                allow="clipboard-write; encrypted-media; picture-in-picture; fullscreen"
                 allowFullScreen
                 sx={{ width: "100%", aspectRatio: "16 / 9", border: 0 }}
               />

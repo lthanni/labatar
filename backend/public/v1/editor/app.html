@@ -99,8 +99,14 @@
         </label>
         <div class="grid three">
           <label
-            >Screen position <input id="screen-position" maxlength="100" placeholder="midscreen"
-          /></label>
+            >Screen position
+            <select id="screen-position">
+              <option value="" disabled>Choose a position</option>
+              <option value="corner" selected>Corner</option>
+              <option value="midscreen">Midscreen</option>
+              <option value="fullscreen">Fullscreen</option>
+            </select>
+          </label>
           <label>Damage <input id="damage" required maxlength="100" placeholder="3200" /></label>
           <label
             >Start video at (seconds)
@@ -156,7 +162,7 @@
           <iframe
             id="youtube-preview"
             title="YouTube preview"
-            allow="encrypted-media; picture-in-picture; fullscreen"
+            allow="clipboard-write; encrypted-media; picture-in-picture; fullscreen"
             allowfullscreen
             hidden
           ></iframe>

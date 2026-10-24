@@ -31,6 +31,11 @@ import { useObsRecording } from "./ObsRecordingContext";
 import { RecordingViewer } from "./RecordingViewer";
 import { ComboTable, ComboWorkspace, type ComboTableRow } from "./ComboTable";
 import { comboStarterLabel } from "./combo-starter";
+import {
+  comboScreenPositions,
+  comboScreenPositionOrEmpty,
+  isComboScreenPosition,
+} from "./combo-screen-position";
 import { formatComboRecordingBaseName } from "./combo-recording-name";
 import {
   ComboInlineFilters,
@@ -112,7 +117,6 @@ const supportsByCharacter: Record<string, string[]> = Object.fromEntries(
   ]),
 );
 
-const screenPositions = ["corner", "midscreen", "fullscreen"];
 const techEditorSections = ["moves", "pressure", "neutral", "misc"] as const;
 const techEditorSectionStorageKey = "labatar-tech-editor-section";
 const measuredFields: Array<{ key: TechMeasuredField; label: string }> = [
@@ -230,7 +234,7 @@ const emptyMoveDraft: MoveDraft = {
 const emptyComboDraft: ComboDraft = {
   route: "",
   routingMode: "autopilot",
-  screenPosition: "",
+  screenPosition: "corner",
   damage: "",
   notes: [],
   requiresCounterhit: false,
@@ -1395,7 +1399,7 @@ export function TechSection({
     setComboDraft({
       route: combo.route,
       routingMode: combo.routingMode === "unique" ? "unique" : "autopilot",
-      screenPosition: combo.screenPosition,
+      screenPosition: comboScreenPositionOrEmpty(combo.screenPosition),
       damage: combo.damage,
       notes: [...(combo.notes ?? [])],
       requiresCounterhit: combo.requiresCounterhit === true,
@@ -1409,7 +1413,7 @@ export function TechSection({
   };
 
   const saveCombo = () => {
-    if (!comboDraft.route.trim()) return;
+    if (!comboDraft.route.trim() || !isComboScreenPosition(comboDraft.screenPosition)) return;
     const comboValues = {
       character,
       support,
@@ -2123,7 +2127,10 @@ export function TechSection({
                               }))
                             }
                           >
-                            {screenPositions.map((position) => (
+                            <MenuItem value="" disabled>
+                              Choose a position
+                            </MenuItem>
+                            {comboScreenPositions.map((position) => (
                               <MenuItem key={position} value={position}>
                                 {position}
                               </MenuItem>
@@ -2417,7 +2424,10 @@ export function TechSection({
                         <Button
                           variant="contained"
                           onClick={saveCombo}
-                          disabled={!comboDraft.route.trim()}
+                          disabled={
+                            !comboDraft.route.trim() ||
+                            !isComboScreenPosition(comboDraft.screenPosition)
+                          }
                         >
                           {editingComboId ? "Save changes" : "Add combo"}
                         </Button>

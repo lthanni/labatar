@@ -13,10 +13,6 @@ type YouTubeApi = {
   Player: new (
     element: HTMLElement,
     options: {
-      videoId: string;
-      width: string;
-      height: string;
-      playerVars: Record<string, string | number>;
       events: {
         onReady: () => void;
         onStateChange: (event: { data: number }) => void;
@@ -118,21 +114,25 @@ export const YouTubeRecordingPlayer = forwardRef<
     let reportedTime = -1;
     const host = hostRef.current;
     if (!host) return;
-    const element = document.createElement("div");
-    host.appendChild(element);
+    const frame = document.createElement("iframe");
+    const origin = window.location.origin;
+    const playerUrl = new URL(`https://www.youtube.com/embed/${videoId}`);
+    playerUrl.searchParams.set("enablejsapi", "1");
+    playerUrl.searchParams.set("controls", "1");
+    playerUrl.searchParams.set("playsinline", "1");
+    if (origin.startsWith("http")) playerUrl.searchParams.set("origin", origin);
+    frame.title = title;
+    frame.allow = "autoplay; clipboard-write; encrypted-media; picture-in-picture; fullscreen";
+    frame.allowFullscreen = true;
+    frame.style.width = "100%";
+    frame.style.height = "100%";
+    frame.style.border = "0";
+    frame.src = playerUrl.toString();
+    host.appendChild(frame);
     void loadYouTubeApi().then(
       (api) => {
         if (cancelled) return;
-        const origin = window.location.origin;
-        playerRef.current = new api.Player(element, {
-          videoId,
-          width: "100%",
-          height: "100%",
-          playerVars: {
-            controls: 1,
-            playsinline: 1,
-            ...(origin.startsWith("http") ? { origin } : {}),
-          },
+        playerRef.current = new api.Player(frame, {
           events: {
             onReady: () => {
               if (cancelled) return;

@@ -231,7 +231,7 @@ function PublishedComboPlayer({ combo }: { combo: PublishedCombo | null }) {
         title={"Combo video: " + combo.route}
         src={embedUrl}
         sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
-        allow="encrypted-media; picture-in-picture; fullscreen"
+        allow="clipboard-write; encrypted-media; picture-in-picture; fullscreen"
         allowFullScreen
         sx={{ width: "100%", aspectRatio: "16 / 9", border: 0 }}
       />

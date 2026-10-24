@@ -98,7 +98,9 @@ function payload() {
   const screenPosition = fields["screen-position"].value.trim();
   if (!route || route.length > 2000) throw new Error("Enter a route of at most 2000 characters.");
   if (!damage || damage.length > 100) throw new Error("Enter damage of at most 100 characters.");
-  if (screenPosition.length > 100) throw new Error("Screen position is too long.");
+  if (!["corner", "midscreen", "fullscreen"].includes(screenPosition)) {
+    throw new Error("Choose Corner, Midscreen, or Fullscreen.");
+  }
   const moveIds = lines("move-ids");
   if (moveIds.length > 100 || !moveIds.every((moveId) => slugPattern.test(moveId))) {
     throw new Error("Move IDs must be lowercase slugs, at most 100 entries.");
@@ -240,7 +242,11 @@ function loadRecord(record) {
     "editor-pick-context": record.editorPickContext ?? "",
     route: record.route,
     "routing-mode": record.routingMode ?? "autopilot",
-    "screen-position": record.screenPosition ?? "",
+    "screen-position": ["corner", "midscreen", "fullscreen"].includes(
+      record.screenPosition?.toLowerCase(),
+    )
+      ? record.screenPosition.toLowerCase()
+      : "",
     damage: record.damage,
     "start-seconds": String(record.startSeconds ?? 0),
     pips: String(record.resourceCosts?.pips ?? 0),

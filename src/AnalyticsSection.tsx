@@ -520,6 +520,177 @@ function PortraitFilterButton({
   );
 }
 
+function CollapsedCharacterRows({
+  rows,
+  data,
+  getPortrait,
+  disabledMatchups,
+  disabledPoiSupports,
+  onExpand,
+}: {
+  rows: string[];
+  data: MatchupData;
+  getPortrait: AnalyticsSectionProps["getPortrait"];
+  disabledMatchups: Set<string>;
+  disabledPoiSupports: Set<string>;
+  onExpand: () => void;
+}) {
+  const visibleRows = rows.slice(0, 3);
+  const cardHeight = 70;
+  const reveal = 28;
+  return (
+    <Box
+      component="button"
+      type="button"
+      aria-label={`Expand ${rows.length} character rows`}
+      aria-expanded={false}
+      title={`Expand character rows: ${rows.join(", ")}`}
+      onClick={onExpand}
+      sx={{
+        position: "relative",
+        width: "100%",
+        height: cardHeight + reveal * (visibleRows.length - 1) + 20,
+        p: 0,
+        border: 0,
+        bgcolor: "transparent",
+        color: "text.primary",
+        cursor: "pointer",
+        textAlign: "left",
+        "&:focus-visible": { outline: "2px solid", outlineColor: "primary.light" },
+        "&:hover .collapsed-character-card": { borderColor: "primary.light" },
+      }}
+    >
+      {visibleRows.map((row, index) => {
+        const supports = supportFilters(row, data.supportsByCharacter.get(row) ?? []);
+        const portraitUrl = getPortrait(row, "Support #1")?.portraitUrl ?? null;
+        const selected = data.columns.some(
+          (column) =>
+            data.cells.has(`${row}\u0000${column}`) &&
+            !disabledMatchups.has(`${row}\u0000${column}`),
+        );
+        return (
+          <Box
+            key={row}
+            className="collapsed-character-card"
+            aria-hidden="true"
+            sx={{
+              position: "absolute",
+              top: index * reveal,
+              left: 0,
+              zIndex: visibleRows.length - index,
+              width: "100%",
+              height: cardHeight,
+              boxSizing: "border-box",
+              display: "flex",
+              alignItems: "center",
+              gap: 0.25,
+              p: 0.5,
+              border: "1px solid",
+              borderColor: selected ? "primary.main" : "grey.800",
+              borderRadius: 1,
+              bgcolor: "background.paper",
+            }}
+          >
+            <Box
+              sx={{
+                width: 48,
+                height: 58,
+                flexShrink: 0,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                border: "1px solid",
+                borderColor: selected ? "primary.main" : "grey.800",
+                borderRadius: 0.5,
+                bgcolor: selected ? "action.selected" : "background.default",
+              }}
+            >
+              {portraitUrl ? (
+                <Box
+                  component="img"
+                  src={portraitUrl}
+                  alt=""
+                  loading="lazy"
+                  sx={{
+                    width: 43,
+                    height: 43,
+                    objectFit: "contain",
+                    filter: selected ? "none" : "grayscale(1)",
+                    opacity: selected ? 1 : 0.5,
+                  }}
+                />
+              ) : (
+                <Typography
+                  variant="caption"
+                  sx={{ fontSize: "0.6rem", lineHeight: 1, textAlign: "center" }}
+                >
+                  {displayCharacterName(row)}
+                </Typography>
+              )}
+              <Typography variant="caption" sx={{ lineHeight: 1 }}>
+                {data.playerCharacterCounts.get(row) ?? 0}
+              </Typography>
+            </Box>
+            {supports.slots.map((support) => {
+              const supportUrl = getPortrait(row, `Support #${support.slot}`)?.supportUrl ?? null;
+              const supportSelected =
+                selected && !disabledPoiSupports.has(getPoiSupportKey(row, support.name));
+              return (
+                <Box
+                  key={support.slot}
+                  sx={{
+                    width: 43,
+                    height: 58,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    border: "1px solid",
+                    borderColor: supportSelected ? "primary.main" : "grey.800",
+                    borderRadius: 0.5,
+                    bgcolor: supportSelected ? "action.selected" : "background.default",
+                  }}
+                >
+                  {supportUrl ? (
+                    <Box
+                      component="img"
+                      src={supportUrl}
+                      alt=""
+                      loading="lazy"
+                      sx={{
+                        width: 36,
+                        height: 42,
+                        objectFit: "contain",
+                        filter: supportSelected ? "none" : "grayscale(1)",
+                        opacity: supportSelected ? 1 : 0.5,
+                      }}
+                    />
+                  ) : (
+                    <Typography variant="caption" sx={{ fontSize: "0.6rem" }}>
+                      #{support.slot}
+                    </Typography>
+                  )}
+                  <Typography variant="caption" sx={{ lineHeight: 1 }}>
+                    {support.games}
+                  </Typography>
+                </Box>
+              );
+            })}
+          </Box>
+        );
+      })}
+      <Typography
+        component="span"
+        variant="caption"
+        sx={{ position: "absolute", bottom: 0, left: 4, color: "primary.light", lineHeight: 1.2 }}
+      >
+        {rows.length > 3 ? `+${rows.length - 3} more · ` : ""}Expand {rows.length} characters
+      </Typography>
+    </Box>
+  );
+}
+
 function MatchupHeatmap({
   data,
   getPortrait,
@@ -534,6 +705,8 @@ function MatchupHeatmap({
   disabledOpponentCharacters,
   disabledOpponentSupports,
   disabledPoiSupports,
+  charactersCollapsed,
+  onCharactersCollapsedChange,
   onToggle,
   onToggleOpponentCharacter,
   onToggleAllOpponentCharacters,
@@ -554,6 +727,8 @@ function MatchupHeatmap({
   disabledOpponentCharacters: Set<string>;
   disabledOpponentSupports: Set<string>;
   disabledPoiSupports: Set<string>;
+  charactersCollapsed: boolean;
+  onCharactersCollapsedChange: (collapsed: boolean) => void;
   onToggle: (key: string) => void;
   onToggleOpponentCharacter: (value: string) => void;
   onToggleAllOpponentCharacters: (selectAll: boolean) => void;
@@ -576,6 +751,52 @@ function MatchupHeatmap({
   const allOpponentCharactersSelected =
     activeOpponentColumns.length > 0 &&
     activeOpponentColumns.every((column) => !disabledOpponentCharacters.has(column));
+  const collapsedStats = columns.map((column) => {
+    const stats = rows
+      .filter((row) => !disabledMatchups.has(`${row}\u0000${column}`))
+      .map((row) => cells.get(`${row}\u0000${column}`))
+      .filter((cell): cell is MatchupStats => Boolean(cell));
+    return {
+      column,
+      games: stats.reduce((total, cell) => total + cell.games, 0),
+      wins: stats.reduce((total, cell) => total + cell.wins, 0),
+      losses: stats.reduce((total, cell) => total + cell.losses, 0),
+    };
+  });
+  const collapsedOverall = collapsedStats.reduce(
+    (total, cell) => ({
+      games: total.games + cell.games,
+      wins: total.wins + cell.wins,
+      losses: total.losses + cell.losses,
+    }),
+    { games: 0, wins: 0, losses: 0 },
+  );
+  const visibleRows = charactersCollapsed && rows.length > 1 ? [] : rows;
+  const collapsedRateCell = (stats: MatchupStats, label: string, disabled = false) => {
+    const rate = stats.wins + stats.losses ? getWinRate(stats.wins, stats.losses) : null;
+    const description = `${label}: ${stats.games} games in enabled character matchups, ${rate === null ? "no decided games" : `${rate}% win rate`}`;
+    const color =
+      rate === null ? "rgba(255,255,255,0.04)" : rate >= 50 ? "144,202,249" : "239,154,154";
+    const opacity = rate === null ? 1 : 0.2 + Math.abs(rate - 50) / 100;
+    return (
+      <Box
+        role="img"
+        aria-label={description}
+        title={description}
+        sx={{
+          minHeight: 116,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          borderRadius: 0.5,
+          bgcolor: disabled || !stats.games ? "#424242" : `rgba(${color}, ${opacity})`,
+          color: "text.primary",
+        }}
+      >
+        <Typography variant="caption">{rate === null ? "—" : `${rate}%`}</Typography>
+      </Box>
+    );
+  };
   const corner = (
     <Box
       sx={{
@@ -619,6 +840,27 @@ function MatchupHeatmap({
             ))}
         </Select>
       </FormControl>
+      {rows.length > 1 && (
+        <Box
+          component="button"
+          type="button"
+          aria-expanded={!charactersCollapsed}
+          onClick={() => onCharactersCollapsedChange(!charactersCollapsed)}
+          sx={{
+            alignSelf: "flex-start",
+            border: 0,
+            bgcolor: "transparent",
+            color: "primary.light",
+            font: "inherit",
+            fontSize: "0.75rem",
+            cursor: "pointer",
+            "&:hover": { textDecoration: "underline" },
+            "&:focus-visible": { outline: "2px solid", outlineColor: "primary.light" },
+          }}
+        >
+          {charactersCollapsed ? "Expand characters" : "Collapse characters"}
+        </Box>
+      )}
     </Box>
   );
   if (columns.length === 0) {
@@ -733,7 +975,29 @@ function MatchupHeatmap({
             </Card>
           );
         })}
-        {rows.map((row) => {
+        {charactersCollapsed && rows.length > 1 && (
+          <Fragment>
+            <CollapsedCharacterRows
+              rows={rows}
+              data={data}
+              getPortrait={getPortrait}
+              disabledMatchups={disabledMatchups}
+              disabledPoiSupports={disabledPoiSupports}
+              onExpand={() => onCharactersCollapsedChange(false)}
+            />
+            {collapsedRateCell(collapsedOverall, "All characters")}
+            {collapsedStats.map((stats) => (
+              <Fragment key={stats.column}>
+                {collapsedRateCell(
+                  stats,
+                  `All characters vs ${stats.column}`,
+                  disabledOpponentCharacters.has(stats.column),
+                )}
+              </Fragment>
+            ))}
+          </Fragment>
+        )}
+        {visibleRows.map((row) => {
           const supports = supportsByCharacter.get(row) ?? [];
           const supportOptions = supportFilters(row, supports);
           const rowCells = columns
@@ -961,6 +1225,7 @@ export function AnalyticsSection({
   const [disabledOpponentSupports, setDisabledOpponentSupports] = useState<Set<string>>(new Set());
   const [disabledPoiSupports, setDisabledPoiSupports] = useState<Set<string>>(new Set());
   const [disabledOpponents, setDisabledOpponents] = useState<Set<string>>(new Set());
+  const [charactersCollapsed, setCharactersCollapsed] = useState(false);
   useEffect(() => {
     setDisabledOpponents(new Set());
   }, [playerOfInterest]);
@@ -1150,7 +1415,9 @@ export function AnalyticsSection({
     () => (playerOfInterest ? buildTimeline(chartGames, playerOfInterest) : []),
     [chartGames, playerOfInterest],
   );
-  const matchupPanelHeight = Math.min(500, Math.max(320, chartMatchupData.rows.length * 72 + 175));
+  const matchupPanelHeight = charactersCollapsed
+    ? 320
+    : Math.min(500, Math.max(320, chartMatchupData.rows.length * 72 + 175));
 
   return (
     <Stack
@@ -1176,6 +1443,8 @@ export function AnalyticsSection({
           disabledOpponentCharacters={disabledOpponentCharacters}
           disabledOpponentSupports={disabledOpponentSupports}
           disabledPoiSupports={disabledPoiSupports}
+          charactersCollapsed={charactersCollapsed}
+          onCharactersCollapsedChange={setCharactersCollapsed}
           onToggle={toggleMatchup}
           onToggleOpponentCharacter={toggleOpponentCharacter}
           onToggleAllOpponentCharacters={toggleAllOpponentCharacters}

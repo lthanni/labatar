@@ -3511,10 +3511,11 @@ export function RecordingViewer({
           <DialogContent>
             <Typography>
               {confirmTrim === "fast"
-                ? "This copies the video without re-encoding it. The start may move earlier to the previous keyframe. Partly overlapping linked clips may still be re-encoded."
+                ? "This copies the video without re-encoding it. The start may move earlier to the previous keyframe."
                 : "This re-encodes the selected range for an accurate cut."}{" "}
-              The recording is replaced at its current location. Chapters and linked clips move with
-              the retained range; clips outside it are detached.
+              The recording is replaced at its current location. Chapters and clips fully within the
+              retained range move with it. Clips extending outside that range keep their full video
+              and are detached.
             </Typography>
           </DialogContent>
           <DialogActions>
