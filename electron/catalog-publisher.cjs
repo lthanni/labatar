@@ -104,14 +104,14 @@ async function listEditorCombos(ses, timeoutMs = 15000, onReset) {
   );
 }
 
-function signInToCatalog(ses, parent, verifyAccess = listEditorCombos) {
+function signInToCatalog(ses, parent, verifyAccess = listEditorCombos, targetUrl = editorAppUrl) {
   return new Promise((resolve, reject) => {
     const authWindow = new BrowserWindow({
       width: 850,
       height: 760,
       minWidth: 600,
       minHeight: 500,
-      title: "Sign in to publish",
+      title: "Sign in to Labatar catalog",
       autoHideMenuBar: true,
       ...(parent ? { parent, modal: true } : {}),
       webPreferences: {
@@ -137,7 +137,11 @@ function signInToCatalog(ses, parent, verifyAccess = listEditorCombos) {
       } catch {
         return;
       }
-      if (currentUrl.origin !== catalogOrigin || currentUrl.pathname !== "/v1/editor/app") return;
+      if (
+        currentUrl.origin !== catalogOrigin ||
+        currentUrl.pathname !== new URL(targetUrl).pathname
+      )
+        return;
       checking = true;
       try {
         const items = await verifyAccess(ses);
@@ -162,7 +166,7 @@ function signInToCatalog(ses, parent, verifyAccess = listEditorCombos) {
         reject(new Error("Catalog sign-in was cancelled."));
       }
     });
-    void authWindow.loadURL(editorAppUrl).catch((error) => {
+    void authWindow.loadURL(targetUrl).catch((error) => {
       if (finished) return;
       finished = true;
       authWindow.close();

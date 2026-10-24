@@ -209,6 +209,16 @@ function routingMode(value) {
   throw new Error("Invalid routing mode.");
 }
 
+function comboScreenPosition(value) {
+  if (value === undefined || value === "") return "corner";
+  if (typeof value !== "string") throw new Error("Invalid screen position.");
+  const position = value.trim().toLowerCase();
+  if (!["corner", "midscreen", "fullscreen"].includes(position)) {
+    throw new Error("Screen position must be corner, midscreen, or fullscreen.");
+  }
+  return position;
+}
+
 function optionalBoolean(value, field) {
   if (value === undefined) return false;
   if (typeof value !== "boolean") throw new Error(`${field} must be a boolean.`);
@@ -356,7 +366,7 @@ export function validateRecord(kind, value, pathId) {
     ),
     routingMode: routingMode(value.routingMode),
     moveIds: value.moveIds.map((item) => id(item, "moveId")),
-    screenPosition: optionalContent(value.screenPosition, "screenPosition", 100),
+    screenPosition: comboScreenPosition(value.screenPosition),
     damage: content(value.damage, "damage", 100),
     notes: comboNotes(value.notes, route),
     youtubeVideoId: videoId,
@@ -482,6 +492,13 @@ export async function authorizeComboPreview(request, env, fetcher = fetch) {
   const email = await verifyAccessJwt(request.headers.get("Cf-Access-Jwt-Assertion"), env, fetcher);
   if (!(ownerEmails(env).includes(email) || (await accessRole(env.DB, email))))
     throw new Error("Combos preview access is unavailable.");
+  return email;
+}
+
+export async function authorizeComboUpload(request, env, fetcher = fetch) {
+  const email = await verifyAccessJwt(request.headers.get("Cf-Access-Jwt-Assertion"), env, fetcher);
+  if (!(ownerEmails(env).includes(email) || (await accessRole(env.DB, email))))
+    throw new Error("This account cannot submit combo videos.");
   return email;
 }
 
@@ -702,6 +719,7 @@ export async function handleRequest(
   getEditor = authorizeEditor,
   getComboPreview = authorizeComboPreview,
   getAccessAdmin = authorizeAccessAdmin,
+  getComboUpload = authorizeComboUpload,
 ) {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -719,6 +737,7 @@ export async function handleRequest(
     request,
     env,
     getEditor,
+    getComboUpload,
     validateRecord,
     youtubeVideoId,
   );

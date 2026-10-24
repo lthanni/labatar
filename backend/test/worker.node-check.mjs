@@ -6,6 +6,7 @@ import { webcrypto } from "node:crypto";
 import {
   authorizeAccessAdmin,
   authorizeComboPreview,
+  authorizeComboUpload,
   authorizeEditor,
   handleRequest,
   validateRecord,
@@ -76,6 +77,18 @@ test("only YouTube links become video IDs; local media cannot enter the shared r
   assert.equal(result.youtubeVideoId, videoId);
   assert.equal(result.youtubeUrl, undefined);
   assert.equal(result.recordingId, undefined);
+  assert.equal(
+    validateRecord("combo", { ...combo(), screenPosition: "Corner" }, "aang-basic").screenPosition,
+    "corner",
+  );
+  assert.equal(
+    validateRecord("combo", { ...combo(), screenPosition: undefined }, "aang-basic").screenPosition,
+    "corner",
+  );
+  assert.throws(
+    () => validateRecord("combo", { ...combo(), screenPosition: "wall" }, "aang-basic"),
+    /Screen position/,
+  );
   assert.throws(() =>
     validateRecord("combo", { ...combo(), recordingId: "local-1" }, "aang-basic"),
   );
@@ -266,6 +279,7 @@ test("Access identity requires a valid signature, audience, issuer and time", as
   const db = database();
   const roleEnv = { ...env, DB: db, EDITOR_EMAILS: "owner@example.com" };
   await assert.rejects(() => authorizeComboPreview(accessRequest, roleEnv, fetcher));
+  await assert.rejects(() => authorizeComboUpload(accessRequest, roleEnv, fetcher));
   await db
     .prepare(
       "INSERT INTO catalog_access_roles (email, role, updated_at, updated_by) VALUES (?, ?, ?, ?)",
@@ -273,12 +287,14 @@ test("Access identity requires a valid signature, audience, issuer and time", as
     .bind("editor@example.com", "viewer", new Date().toISOString(), "owner@example.com")
     .run();
   assert.equal(await authorizeComboPreview(accessRequest, roleEnv, fetcher), "editor@example.com");
+  assert.equal(await authorizeComboUpload(accessRequest, roleEnv, fetcher), "editor@example.com");
   await assert.rejects(() => authorizeEditor(accessRequest, roleEnv, fetcher));
   await db
     .prepare("UPDATE catalog_access_roles SET role = 'editor' WHERE email = ?")
     .bind("editor@example.com")
     .run();
   assert.equal(await authorizeEditor(accessRequest, roleEnv, fetcher), "editor@example.com");
+  assert.equal(await authorizeComboUpload(accessRequest, roleEnv, fetcher), "editor@example.com");
   await assert.rejects(() => authorizeAccessAdmin(accessRequest, roleEnv, fetcher));
   const deniedAdmin = await handleRequest(
     new Request("https://api.example.com/v1/editor/access", {
@@ -317,6 +333,7 @@ test("Access identity requires a valid signature, audience, issuer and time", as
     .prepare("DELETE FROM catalog_access_roles WHERE email = ?")
     .bind("editor@example.com")
     .run();
+  await assert.rejects(() => authorizeComboUpload(accessRequest, roleEnv, fetcher));
   await assert.rejects(() =>
     authorizeEditor(accessRequest, { ...env, DB: db, EDITOR_EMAILS: "other@example.com" }, fetcher),
   );

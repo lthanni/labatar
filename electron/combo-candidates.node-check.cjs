@@ -9,6 +9,7 @@ const {
   previewComboCandidate,
   requestCandidateEditor,
   checkCandidateAccess,
+  checkCandidateUploadAccess,
   listComboCandidates,
   downloadComboCandidate,
 } = require("./combo-candidates.cjs");
@@ -184,6 +185,18 @@ void test("candidate sign-in check recovers a stalled publisher session", async 
   assert.equal(await checkCandidateAccess(ses, 5), true);
   assert.equal(requests, 2);
   assert.equal(resets, 1);
+});
+
+void test("combo upload checks its own email permission instead of editor access", async () => {
+  const paths = [];
+  const ses = {
+    async fetch(url) {
+      paths.push(new URL(url).pathname);
+      return Response.json({ allowed: true });
+    },
+  };
+  assert.equal(await checkCandidateUploadAccess(ses), true);
+  assert.deepEqual(paths, ["/v1/editor/candidates/upload"]);
 });
 
 void test("candidate GET recovers without repeating a write", async () => {
@@ -434,9 +447,15 @@ void test("candidate client uploads every MP4 byte in ordered chunks before comp
   const parts = [];
   const progress = [];
   try {
-    global.fetch = async (url, options) => {
-      const pathname = new URL(url).pathname;
-      if (pathname === "/v1/candidates" && options.method === "POST") {
+    let signedIn = false;
+    const ses = {
+      async fetch(url, options) {
+        assert.equal(new URL(url).pathname, "/v1/editor/candidates/upload");
+        assert.equal(options.credentials, "include");
+        if ((options.method ?? "GET") === "GET")
+          return signedIn
+            ? Response.json({ allowed: true })
+            : Response.redirect("https://example.com");
         const body = JSON.parse(options.body);
         assert.equal(body.fileSize, bytes.length);
         assert.equal(body.fileName, "combo.mp4");
@@ -446,7 +465,10 @@ void test("candidate client uploads every MP4 byte in ordered chunks before comp
           { id, token, partSize: 8 * 1024 * 1024, partCount: 2 },
           { status: 201 },
         );
-      }
+      },
+    };
+    global.fetch = async (url, options) => {
+      const pathname = new URL(url).pathname;
       if (pathname.startsWith(`/v1/candidates/${id}/parts/`)) {
         assert.equal(options.headers["X-Candidate-Token"], token);
         const number = Number(pathname.split("/").at(-1));
@@ -468,6 +490,12 @@ void test("candidate client uploads every MP4 byte in ordered chunks before comp
       combo: { id: "aang-5b" },
       originCandidateId,
       onProgress: (item) => progress.push(item),
+      ses,
+      signIn: async (_session, _parent, verifyAccess, targetUrl) => {
+        assert.equal(new URL(targetUrl).pathname, "/v1/editor/candidates/upload");
+        signedIn = true;
+        assert.equal(await verifyAccess(ses), true);
+      },
     });
     assert.deepEqual(result, { id });
     assert.deepEqual(Buffer.concat(parts), bytes);

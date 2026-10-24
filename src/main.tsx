@@ -46,7 +46,6 @@ import { ObsRecordingControls, ObsRecordingProvider, useObsRecording } from "./O
 import { MoveCapturePanel } from "./MoveCapturePanel";
 import { RecordingViewer } from "./RecordingViewer";
 import { TechSection } from "./TechSection";
-import { PublishedTechSection } from "./PublishedTechSection";
 import { CombosPage } from "./CombosPage";
 import { ArtworkPanel } from "./ArtworkPanel";
 import {
@@ -1091,53 +1090,16 @@ function App() {
   const captureTabIndex = 2;
   const nerdProcessingTabIndex = 3;
   const techTabIndex = 4;
-  const publishedTechTabIndex = 5;
+  const legacyPublishedTechTabIndex = 5;
   const combosTabIndex = 6;
   const recordingTabAvailable = Boolean(window.electronAPI?.recordings);
   const artworkTabAvailable = Boolean(window.electronAPI?.artwork);
   const tabStorageKey = "avatar-app-last-tab-v2";
   const comboEditorModeStorageKey = "labatar-combos-editor-mode";
-  const [comboPreviewAccess, setComboPreviewAccess] = useState(developerTabsAvailable);
-  const [comboPreviewChecking, setComboPreviewChecking] = useState(false);
-  const [comboPreviewError, setComboPreviewError] = useState<string | null>(null);
   const { state: obsState } = useObsRecording();
-  useEffect(() => {
-    if (developerTabsAvailable || !window.electronAPI?.comboPreview) return;
-    let active = true;
-    setComboPreviewChecking(true);
-    void window.electronAPI.comboPreview
-      .checkAccess()
-      .then((allowed) => {
-        if (active) setComboPreviewAccess(allowed);
-      })
-      .catch(() => {
-        if (active) setComboPreviewAccess(false);
-      })
-      .finally(() => {
-        if (active) setComboPreviewChecking(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-  const signInForComboPreview = async () => {
-    if (!window.electronAPI?.comboPreview) return;
-    setComboPreviewChecking(true);
-    setComboPreviewError(null);
-    try {
-      const allowed = await window.electronAPI.comboPreview.checkAccess({ interactive: true });
-      setComboPreviewAccess(allowed);
-      if (!allowed) setComboPreviewError("This account does not have preview access yet.");
-    } catch (error) {
-      setComboPreviewError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setComboPreviewChecking(false);
-    }
-  };
   const availableTabIndices = [
     0,
     ...(recordingTabAvailable ? [recordingsTabIndex] : []),
-    publishedTechTabIndex,
     combosTabIndex,
     ...(developerTabsAvailable ? [captureTabIndex, nerdProcessingTabIndex, techTabIndex] : []),
   ];
@@ -1152,6 +1114,7 @@ function App() {
     ) {
       return combosTabIndex;
     }
+    if (savedTab === legacyPublishedTechTabIndex) return combosTabIndex;
     return availableTabIndices.includes(savedTab) ? savedTab : 0;
   });
   const [mountedTabs, setMountedTabs] = useState(() => ({
@@ -1160,7 +1123,6 @@ function App() {
     capture: developerTabsAvailable && tab === captureTabIndex,
     nerdProcessing: developerTabsAvailable && tab === nerdProcessingTabIndex,
     tech: tab === techTabIndex,
-    publishedTech: tab === publishedTechTabIndex,
     combos: tab === combosTabIndex,
   }));
   const [comboEditorMode, setComboEditorMode] = useState(() => {
@@ -1218,7 +1180,6 @@ function App() {
       nerdProcessing:
         developerTabsAvailable && (current.nerdProcessing || nextTab === nerdProcessingTabIndex),
       tech: current.tech || nextTab === techTabIndex,
-      publishedTech: current.publishedTech || nextTab === publishedTechTabIndex,
       combos: current.combos || nextTab === combosTabIndex,
     }));
     localStorage.setItem(tabStorageKey, String(nextTab));
@@ -1660,11 +1621,7 @@ function App() {
         >
           <Tab label="Match history" />
           {recordingTabAvailable && <Tab label="Recordings" value={recordingsTabIndex} />}
-          <Tab label="Tech" value={publishedTechTabIndex} />
-          <Tab
-            label={comboPreviewAccess ? "Combos" : "Combos · Coming soon"}
-            value={combosTabIndex}
-          />
+          <Tab label="Combos" value={combosTabIndex} />
           {developerTabsAvailable && <Tab label="Dev-only capture" value={captureTabIndex} />}
           {developerTabsAvailable && <Tab label="Nerd processing" value={nerdProcessingTabIndex} />}
           {developerTabsAvailable && <Tab label="Tech editor" value={techTabIndex} />}
@@ -2029,33 +1986,7 @@ function App() {
               />
             </Box>
           )}
-          {!comboPreviewAccess && (
-            <Card sx={{ maxWidth: 560, mx: "auto", mt: 6, textAlign: "center" }}>
-              <CardContent sx={{ py: 5 }}>
-                <Typography variant="h5" gutterBottom>
-                  Combos are coming soon
-                </Typography>
-                <Typography color="text.secondary" sx={{ mb: 3 }}>
-                  We’re still preparing this page for everyone.
-                </Typography>
-                {window.electronAPI?.comboPreview && (
-                  <Button
-                    variant="outlined"
-                    disabled={comboPreviewChecking}
-                    onClick={() => void signInForComboPreview()}
-                  >
-                    {comboPreviewChecking ? "Checking access…" : "Have preview access? Sign in"}
-                  </Button>
-                )}
-                {comboPreviewError && (
-                  <Alert severity="info" sx={{ mt: 2, textAlign: "left" }}>
-                    {comboPreviewError}
-                  </Alert>
-                )}
-              </CardContent>
-            </Card>
-          )}
-          {comboPreviewAccess && !comboEditorMode && <CombosPage active={tab === combosTabIndex} />}
+          {!comboEditorMode && <CombosPage active={tab === combosTabIndex} />}
         </Box>
       )}
       {developerTabsAvailable && (mountedTabs.tech || mountedTabs.combos) && (
@@ -2072,11 +2003,6 @@ function App() {
             recordingsRefreshToken={recordingsRefreshToken}
             combosOnly={tab === combosTabIndex && comboEditorMode}
           />
-        </Box>
-      )}
-      {mountedTabs.publishedTech && (
-        <Box sx={{ display: tab === publishedTechTabIndex ? "block" : "none" }}>
-          <PublishedTechSection active={tab === publishedTechTabIndex} view="moves" />
         </Box>
       )}
     </Box>

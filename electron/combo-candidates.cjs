@@ -15,6 +15,7 @@ const {
 
 const api = `${catalogOrigin}/v1/candidates`;
 const editorApi = `${catalogOrigin}/v1/editor/candidates`;
+const uploadApi = `${editorApi}/upload`;
 const candidateIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const maxFileSize = 2 * 1024 * 1024 * 1024;
 
@@ -31,6 +32,26 @@ async function checkCandidateAccess(ses, timeoutMs = 15000) {
         signal,
       });
       return result.authenticationRequired ? null : true;
+    },
+    timeoutMs,
+  );
+}
+
+async function checkCandidateUploadAccess(ses, timeoutMs = 15000) {
+  return publisherReadWithRecovery(
+    ses,
+    "Combo upload sign-in check",
+    async (signal) => {
+      const result = await fetchEditorResponse(ses, uploadApi, {
+        credentials: "include",
+        redirect: "manual",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+        signal,
+      });
+      if (result.authenticationRequired) return null;
+      if (result.body?.allowed !== true) throw new Error("Invalid combo upload access response.");
+      return true;
     },
     timeoutMs,
   );
@@ -56,7 +77,15 @@ async function responseJson(response) {
   return data;
 }
 
-async function submitComboCandidate({ recordingPath, combo, originCandidateId, onProgress }) {
+async function submitComboCandidate({
+  recordingPath,
+  combo,
+  originCandidateId,
+  onProgress,
+  parent,
+  ses = publisherSession(),
+  signIn = signInToCatalog,
+}) {
   if (path.extname(recordingPath).toLowerCase() !== ".mp4") {
     throw new Error("Link a local MP4 before submitting this combo.");
   }
@@ -67,9 +96,15 @@ async function submitComboCandidate({ recordingPath, combo, originCandidateId, o
     if (!stat.isFile() || stat.size < 1 || stat.size > maxFileSize) {
       throw new Error("The linked MP4 must be between 1 byte and 2 GiB.");
     }
-    created = await responseJson(
-      await fetch(api, {
+    if (!(await checkCandidateUploadAccess(ses))) {
+      await signIn(ses, parent, checkCandidateUploadAccess, uploadApi);
+    }
+    const result = await publisherRequestWithTimeout("Combo upload creation", (signal) =>
+      fetchEditorResponse(ses, uploadApi, {
         method: "POST",
+        credentials: "include",
+        redirect: "manual",
+        cache: "no-store",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({
           combo,
@@ -77,8 +112,11 @@ async function submitComboCandidate({ recordingPath, combo, originCandidateId, o
           fileName: path.basename(recordingPath),
           fileSize: stat.size,
         }),
+        signal,
       }),
     );
+    if (result.authenticationRequired) throw new Error("Combo upload sign-in expired. Try again.");
+    created = result.body;
     if (
       !candidateIdPattern.test(created.id ?? "") ||
       !/^[0-9a-f]{64}$/.test(created.token ?? "") ||
@@ -372,6 +410,7 @@ async function previewComboCandidate(id, request, ses = publisherSession(), time
 module.exports = {
   requestCandidateEditor,
   checkCandidateAccess,
+  checkCandidateUploadAccess,
   candidateServiceStatus,
   submitComboCandidate,
   listComboCandidates,

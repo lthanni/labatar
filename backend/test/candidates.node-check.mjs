@@ -105,13 +105,18 @@ function combo() {
 
 async function submit(env, options = {}) {
   const response = await handleRequest(
-    request("/v1/candidates", "POST", {
+    request("/v1/editor/candidates/upload", "POST", {
       combo: options.combo ?? combo(),
       ...(options.originCandidateId ? { originCandidateId: options.originCandidateId } : {}),
       fileName: "test.mp4",
       fileSize: 3,
     }),
     env,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    async () => "uploader@example.com",
   );
   assert.equal(response.status, 201);
   const created = await response.json();
@@ -143,6 +148,23 @@ void test("candidate MP4 enters an editor-only queue and can be rejected with it
   const videos = bucket();
   const env = { DB: db, CANDIDATE_VIDEOS: videos };
   try {
+    const body = { combo: combo(), fileName: "test.mp4", fileSize: 3 };
+    assert.equal((await handleRequest(request("/v1/candidates", "POST", body), env)).status, 403);
+    assert.equal(
+      (await handleRequest(request("/v1/editor/candidates/upload", "POST", body), env)).status,
+      403,
+    );
+    assert.equal((await handleRequest(request("/v1/editor/candidates/upload"), env)).status, 403);
+    const uploadAccess = await handleRequest(
+      request("/v1/editor/candidates/upload"),
+      env,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      async () => "uploader@example.com",
+    );
+    assert.deepEqual(await uploadAccess.json(), { allowed: true });
     assert.deepEqual((await (await handleRequest(request("/health"), env)).json()).features, {
       comboNotes: true,
       comboCandidates: true,
@@ -374,12 +396,17 @@ void test("candidate requires a valid MP4 upload and an editor can record its Yo
   const env = { DB: db, CANDIDATE_VIDEOS: videos };
   try {
     const invalid = await handleRequest(
-      request("/v1/candidates", "POST", {
+      request("/v1/editor/candidates/upload", "POST", {
         combo: { ...combo(), youtubeUrl: `https://youtu.be/${videoId}` },
         fileName: "test.mp4",
         fileSize: 3,
       }),
       env,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      async () => "uploader@example.com",
     );
     assert.equal(invalid.status, 400);
     const created = await submit(env);

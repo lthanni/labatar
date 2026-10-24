@@ -34,7 +34,7 @@ async function loadPeople() {
     const address = document.createElement("td");
     address.textContent = entry.email;
     const role = document.createElement("td");
-    role.textContent = entry.role === "editor" ? "Editor + viewer" : "Viewer";
+    role.textContent = entry.role === "editor" ? "Editor + uploader" : "Uploader";
     const actions = document.createElement("td");
     const change = document.createElement("button");
     change.type = "button";

@@ -513,19 +513,22 @@ export async function handleCandidateRequest(
   request,
   env,
   getEditor,
+  getComboUpload,
   validateRecord,
   youtubeVideoId,
 ) {
   const path = new URL(request.url).pathname;
   const publicRoot = path === "/v1/candidates";
+  const uploadRoot = path === "/v1/editor/candidates/upload";
   const part = /^\/v1\/candidates\/([^/]+)\/parts\/([^/]+)$/.exec(path);
   const finish = /^\/v1\/candidates\/([^/]+)\/(complete|abort)$/.exec(path);
   const editorRoot = path === "/v1/editor/candidates";
-  const editorDelete = /^\/v1\/editor\/candidates\/([^/]+)$/.exec(path);
+  const editorDelete = uploadRoot ? null : /^\/v1\/editor\/candidates\/([^/]+)$/.exec(path);
   const editorItem = /^\/v1\/editor\/candidates\/([^/]+)\/(video|approve|reject|uploaded)$/.exec(
     path,
   );
-  if (!publicRoot && !part && !finish && !editorRoot && !editorDelete && !editorItem) return null;
+  if (!publicRoot && !uploadRoot && !part && !finish && !editorRoot && !editorDelete && !editorItem)
+    return null;
   if (!env.CANDIDATE_VIDEOS) return fail("Candidate video storage is unavailable.", 503);
   const candidateId = part?.[1] ?? finish?.[1] ?? editorDelete?.[1] ?? editorItem?.[1];
   if (candidateId && !candidateIdPattern.test(candidateId))
@@ -537,8 +540,18 @@ export async function handleCandidateRequest(
       return fail("Editor authentication required.", 401);
     }
   }
+  if (uploadRoot) {
+    try {
+      await getComboUpload(request, env);
+    } catch {
+      return fail("Combo upload permission required.", 403);
+    }
+  }
   try {
     if (publicRoot && request.method === "POST")
+      return fail("Sign in with an approved email to upload combos. Update the desktop app.", 403);
+    if (uploadRoot && request.method === "GET") return json({ allowed: true });
+    if (uploadRoot && request.method === "POST")
       return createCandidate(request, env, validateRecord);
     if (part && request.method === "PUT") return uploadPart(request, env, part[1], part[2]);
     if (finish?.[2] === "complete" && request.method === "POST")
