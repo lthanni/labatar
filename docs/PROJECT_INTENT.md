@@ -60,7 +60,7 @@ Key files:
 - `src/AnalyticsSection.tsx` — summary and analysis cards
 - `src/RecordingViewer.tsx` — video review, playback, diagnostics, and calibration workflows
 - `src/ObsRecordingPanel.tsx` — OBS control and recording UI
-- `src/TechSection.tsx` — tech catalog and combo/tech selection tools
+- `src/TechSection.tsx` — development move editor
 - `src/detector-config.ts`, `src/framebar-detector.ts`, and `src/input-display.ts` — recording-analysis calibration and detector logic
 
 ## Core subsystems

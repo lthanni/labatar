@@ -56,7 +56,6 @@ describe("personal combo workspace", () => {
       candidateSubmissions: {
         "local-candidate-1": { id: "queue-1", submittedAt: "2026-01-01" },
       },
-      legacyImports: { "dev-route": "local-candidate-1" },
     });
     const result = replaceLocalComboWithCatalog(workspace, "local-candidate-1", published);
     expect(result.localCombos).toEqual([]);
@@ -70,7 +69,6 @@ describe("personal combo workspace", () => {
     expect(result.recordingLinks[published.id]?.recordingId).toBe("candidate.mp4");
     expect(result.recordingLinks["local-candidate-1"]).toBeUndefined();
     expect(result.candidateSubmissions).toEqual({});
-    expect(result.legacyImports["dev-route"]).toBe(published.id);
     expect(comboItems([], [], [], result.snapshots)[0].id).toBe(published.id);
     expect(parseComboWorkspace({ version: 1, ...result }).entries[published.id].status).toBe(
       "Using",
@@ -212,14 +210,13 @@ describe("personal combo workspace", () => {
     expect(effectiveDifficulty(comboItems([published], [], [])[0], emptyPersonalEntry())).toBe(3);
   });
 
-  it("restores private recording links and Dev import bookkeeping without adding public combo fields", () => {
+  it("restores private recording links without adding public combo fields", () => {
     const data = parseComboWorkspace({
       version: 1,
       recordingLinks: {
         "local-one": { recordingId: "Imported Combos/route.mp4", name: "route.mp4" },
         broken: { recordingId: 7, name: "bad" },
       },
-      legacyImports: { "Aang:old-combo": "local-one", invalid: 7 },
       localCombos: [
         {
           id: "local-one",
@@ -227,15 +224,12 @@ describe("personal combo workspace", () => {
           supportId: "katara",
           route: "5B > 236A",
           name: "Mine",
-          legacyTechComboId: "Aang:old-combo",
         },
       ],
     });
     expect(data.recordingLinks).toEqual({
       "local-one": { recordingId: "Imported Combos/route.mp4", name: "route.mp4" },
     });
-    expect(data.legacyImports).toEqual({ "Aang:old-combo": "local-one" });
-    expect(data.localCombos[0].legacyTechComboId).toBe("Aang:old-combo");
     expect(comboItems([], [], data.localCombos)[0]).not.toHaveProperty("recordingId");
     expect(parseComboWorkspace({ version: 1 }).recordingLinks).toEqual({});
   });

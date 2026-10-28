@@ -60,7 +60,6 @@ export type LocalCombo = {
   moveIds?: string[];
   routingMode?: "autopilot" | "unique";
   editorNotes?: ComboNote[];
-  legacyTechComboId?: string;
 };
 
 export type ComboRecordingLink = { recordingId: string; name: string };
@@ -73,7 +72,6 @@ export type ComboWorkspaceData = {
     string,
     { id: string; originCandidateId?: string; submittedAt: string; draftSignature?: string }
   >;
-  legacyImports: Record<string, string>;
   snapshots: Record<string, CatalogComboSnapshot>;
   characterId: string;
   supportId: string;
@@ -157,7 +155,6 @@ export function emptyComboWorkspace(): ComboWorkspaceData {
     entries: {},
     recordingLinks: {},
     candidateSubmissions: {},
-    legacyImports: {},
     snapshots: {},
     characterId: "",
     supportId: "",
@@ -261,9 +258,6 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
             ...(Array.isArray(item.editorNotes)
               ? { editorNotes: normalizeComboNotes(item.editorNotes) }
               : {}),
-            ...(typeof item.legacyTechComboId === "string"
-              ? { legacyTechComboId: item.legacyTechComboId }
-              : {}),
           },
         ];
       })
@@ -290,12 +284,6 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
           ? { draftSignature: submission.draftSignature }
           : {}),
       };
-    }
-  }
-  const legacyImports: Record<string, string> = {};
-  if (record(value.legacyImports)) {
-    for (const [legacyId, comboId] of Object.entries(value.legacyImports)) {
-      if (legacyId && text(comboId)) legacyImports[legacyId] = text(comboId);
     }
   }
   if (record(value.snapshots)) {
@@ -332,7 +320,6 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
     entries,
     recordingLinks,
     candidateSubmissions,
-    legacyImports,
     snapshots,
     characterId: text(value.characterId),
     supportId: text(value.supportId),
@@ -496,18 +483,12 @@ export function replaceLocalComboWithCatalog(
   delete recordingLinks[localId];
   const candidateSubmissions = { ...workspace.candidateSubmissions };
   delete candidateSubmissions[localId];
-  const legacyImports = Object.fromEntries(
-    Object.entries(workspace.legacyImports)
-      .filter(([, comboId]) => !(local.originCatalog && comboId === localId))
-      .map(([legacyId, comboId]) => [legacyId, comboId === localId ? published.id : comboId]),
-  );
   return {
     ...workspace,
     localCombos: workspace.localCombos.filter((combo) => combo.id !== localId),
     entries,
     recordingLinks,
     candidateSubmissions,
-    legacyImports,
     snapshots: {
       ...workspace.snapshots,
       [published.id]: catalogSnapshot(comboItems([published], [], [])[0]),

@@ -438,6 +438,96 @@ test("only owner can manage individual viewer and editor roles", async () => {
   }
 });
 
+test("denied uploader can request access using the verified email, once per day", async () => {
+  const db = database();
+  const env = {
+    DB: db,
+    DISCORD_ALERT_WEBHOOK_URL: "https://discord.com/api/webhooks/123/token",
+  };
+  const alerts = [];
+  const sendDiscord = async (_url, options) => {
+    alerts.push(JSON.parse(options.body));
+    return new Response(null, { status: 204 });
+  };
+  const ask = (getIdentity, headers = { "X-Labatar-Access-Request": "1" }) =>
+    handleRequest(
+      request("/v1/editor/upload-access-request", "POST", { email: "spoof@example.com" }, headers),
+      env,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      sendDiscord,
+      getIdentity,
+    );
+  try {
+    const unsigned = await ask(async () => {
+      throw new Error("No valid Access identity.");
+    });
+    assert.equal(unsigned.status, 401);
+    assert.equal((await ask(async () => "player@example.com", {})).status, 400);
+    assert.equal(
+      (
+        await ask(async () => "player@example.com", {
+          "X-Labatar-Access-Request": "1",
+          Origin: "https://evil.example",
+        })
+      ).status,
+      400,
+    );
+    assert.equal(alerts.length, 0);
+    const first = await ask(async () => "player@example.com");
+    assert.deepEqual(await first.json(), { sent: true, alreadyRequested: false });
+    assert.match(alerts[0].content, /player@example.com/);
+    assert.doesNotMatch(alerts[0].content, /spoof@example.com/);
+    assert.deepEqual(alerts[0].allowed_mentions, { parse: [] });
+    const duplicate = await ask(async () => "player@example.com");
+    assert.deepEqual(await duplicate.json(), { sent: false, alreadyRequested: true });
+    assert.equal(alerts.length, 1);
+    await db
+      .prepare(
+        "INSERT INTO catalog_access_roles (email, role, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+      )
+      .bind("player@example.com", "viewer", new Date().toISOString(), "owner@example.com")
+      .run();
+    assert.equal((await ask(async () => "player@example.com")).status, 409);
+  } finally {
+    db.close();
+  }
+});
+
+test("failed Discord access request can be retried", async () => {
+  const db = database();
+  const env = {
+    DB: db,
+    DISCORD_ALERT_WEBHOOK_URL: "https://discord.com/api/webhooks/123/token",
+  };
+  const signedRequest = () =>
+    request("/v1/editor/upload-access-request", "POST", undefined, {
+      "X-Labatar-Access-Request": "1",
+    });
+  const call = (fetchDiscord) =>
+    handleRequest(
+      signedRequest(),
+      env,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fetchDiscord,
+      async () => "player@example.com",
+    );
+  try {
+    assert.equal((await call(async () => new Response(null, { status: 500 }))).status, 502);
+    const retry = await call(async () => new Response(null, { status: 204 }));
+    assert.deepEqual(await retry.json(), { sent: true, alreadyRequested: false });
+  } finally {
+    db.close();
+  }
+});
+
 void test("Combos preview permission is separate from editor permission", async () => {
   const db = database();
   const env = { DB: db };

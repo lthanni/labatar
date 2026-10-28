@@ -5,6 +5,7 @@ const {
   dialog,
   ipcMain,
   Menu,
+  nativeImage,
   protocol,
   shell,
   safeStorage,
@@ -45,11 +46,8 @@ const { replaceLocalRecordingWithYouTube } = require("./youtube-recording-replac
 const { createYouTubeUploadService } = require("./youtube-upload.cjs");
 const { publishCombo } = require("./catalog-publisher.cjs");
 const {
-  checkComboPreviewAccess,
-  requestComboPreviewAccess,
-} = require("./combo-preview-access.cjs");
-const {
   candidateServiceStatus,
+  requestComboUploadAccess,
   submitComboCandidate,
   listComboCandidates,
   approveComboCandidate,
@@ -272,11 +270,19 @@ const recordingDiagnosticLogFile = () => path.join(app.getPath("userData"), "rec
 const defaultObsProfileName = "Labatar Recording";
 const labatarRecordingFrameRate = { numerator: 60, denominator: 1 };
 const labatarSceneCollectionName = "Labatar";
-const labatarSceneNames = {
-  gameOnly: "Labatar - Game Only",
-  gameDesktopMic: "Labatar - Game + Desktop + Mic",
-  gameMic: "Labatar - Game + Mic",
-};
+const {
+  sceneName: labatarGameSceneName,
+  inputNames: labatarInputNames,
+  toggleKeys: labatarToggleKeys,
+  legacySceneToggles,
+  sceneTogglesFromItems,
+  updateSceneToggles,
+} = require("./obs-scene-toggles.cjs");
+const {
+  pressureBaseTransform,
+  pressureFramebarTransform,
+  pressureGameItems,
+} = require("./pressure-framebar.cjs");
 const labatarGameCaptureWindow = "Avatar Legends#3A The Fighting Game:ABAREENGINE:Atla.exe";
 const labatarGameAudioWindow = labatarGameCaptureWindow;
 const recordingTagOptions = {
@@ -339,6 +345,7 @@ let obsState = {
   profiles: [],
   currentSceneCollectionName: null,
   currentSceneName: null,
+  sourceToggles: null,
   recordDirectory: null,
   videoSettings: null,
   automation: {
@@ -452,8 +459,29 @@ function sendObsState() {
   mainWindow.webContents.send("obs:state", publicObsState());
 }
 
+const normalWindowIcon = path.join(__dirname, "assets", "icon.png");
+const recordingWindowIcon = path.join(__dirname, "assets", "icon-recording.png");
+const recordingTaskbarOverlay = nativeImage.createFromPath(
+  path.join(__dirname, "assets", "recording-dot.png"),
+);
+
+function updateRecordingWindowIcon() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const recording = obsState.status === "connected" && obsState.recording.active;
+  if (process.platform === "win32" || process.platform === "linux") {
+    mainWindow.setIcon(recording ? recordingWindowIcon : normalWindowIcon);
+  }
+  if (process.platform === "win32") {
+    mainWindow.setOverlayIcon(
+      recording ? recordingTaskbarOverlay : null,
+      recording ? "Recording" : "",
+    );
+  }
+}
+
 function setObsState(patch) {
   obsState = { ...obsState, ...patch };
+  if (patch.status !== undefined || patch.recording !== undefined) updateRecordingWindowIcon();
   sendObsState();
 }
 
@@ -499,6 +527,35 @@ function rememberPreparedObsProfile(target, result) {
   };
 }
 
+async function readLabatarSceneToggles(client, sceneCollectionName) {
+  if (sceneCollectionName !== labatarSceneCollectionName) return null;
+  try {
+    const { sceneItems = [] } = await client.call("GetSceneItemList", {
+      sceneName: labatarGameSceneName,
+    });
+    const gameItems = pressureGameItems(sceneItems, labatarInputNames.game);
+    if (gameItems.length < 2) return null;
+    const overlay = await client.call("GetSceneItemTransform", {
+      sceneName: labatarGameSceneName,
+      sceneItemId: gameItems[1].sceneItemId,
+    });
+    const crop = overlay.sceneItemTransform;
+    return {
+      ...sceneTogglesFromItems(sceneItems),
+      pressureFramebarReady:
+        Number(crop?.sourceWidth) >= 8 &&
+        Number(crop?.sourceHeight) >= 8 &&
+        Number(crop?.cropLeft) > 0 &&
+        Number(crop?.cropTop) > 0,
+      gameAudioAvailable: sceneItems.some(
+        (item) => item.sourceName === labatarInputNames.gameAudio,
+      ),
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function refreshObsState(client = getObsClient()) {
   const startedAt = Date.now();
   logRecordingDiagnostic("obs-refresh-start");
@@ -519,6 +576,10 @@ async function refreshObsState(client = getObsClient()) {
     if (version.availableRequests?.includes("GetRecordDirectory")) {
       recordDirectory = (await client.call("GetRecordDirectory")).recordDirectory;
     }
+    const sourceToggles = await readLabatarSceneToggles(
+      client,
+      sceneCollections?.currentSceneCollectionName,
+    );
     setObsState({
       status: "connected",
       error: null,
@@ -528,6 +589,7 @@ async function refreshObsState(client = getObsClient()) {
       profiles: profiles.profiles,
       currentSceneCollectionName: sceneCollections?.currentSceneCollectionName ?? null,
       currentSceneName: currentScene?.sceneName ?? currentScene?.currentProgramSceneName ?? null,
+      sourceToggles,
       recordDirectory,
       videoSettings: videoSettings
         ? {
@@ -2308,6 +2370,27 @@ async function connectToObs(request = {}) {
     if (obsClient !== client) return;
     invalidatePreparedObsProfile();
   });
+  client.on("CurrentProgramSceneChanged", ({ sceneName }) => {
+    if (obsClient !== client) return;
+    setObsState({ currentSceneName: sceneName });
+  });
+  client.on("CurrentSceneCollectionChanged", ({ sceneCollectionName }) => {
+    if (obsClient !== client) return;
+    setObsState({ currentSceneCollectionName: sceneCollectionName, sourceToggles: null });
+    void readLabatarSceneToggles(client, sceneCollectionName).then((sourceToggles) => {
+      if (obsClient === client && obsState.currentSceneCollectionName === sceneCollectionName) {
+        setObsState({ sourceToggles });
+      }
+    });
+  });
+  client.on("SceneItemEnableStateChanged", ({ sceneName }) => {
+    if (obsClient !== client || sceneName !== labatarGameSceneName) return;
+    void readLabatarSceneToggles(client, obsState.currentSceneCollectionName).then(
+      (sourceToggles) => {
+        if (obsClient === client) setObsState({ sourceToggles });
+      },
+    );
+  });
   client.on("ConnectionError", (error) => {
     if (obsClient !== client || token !== obsConnectionToken) return;
     setObsState({ error: error?.message ?? "OBS connection error." });
@@ -2591,36 +2674,45 @@ async function setupLabatarObsScenes(request = {}) {
     use_device_timing: false,
   };
 
-  const gameScene = labatarSceneNames.gameOnly;
-  const desktopMicScene = labatarSceneNames.gameDesktopMic;
-  const micScene = labatarSceneNames.gameMic;
-  const gameInputName = "Labatar - Atla.exe Game Capture";
-  const gameAudioInputName = "Labatar - Atla.exe Audio";
-  const desktopAudioInputName = "Labatar - Desktop Audio";
-  const micInputName = "Labatar - Microphone";
+  const gameScene = labatarGameSceneName;
+  const {
+    game: gameInputName,
+    gameAudio: gameAudioInputName,
+    desktopAudio: desktopAudioInputName,
+    microphone: micInputName,
+  } = labatarInputNames;
   const managedInputNames = new Set([
     gameInputName,
     ...(separateGameAudio ? [gameAudioInputName] : []),
     desktopAudioInputName,
     micInputName,
   ]);
-  const desiredSceneInputs = new Map([
-    [gameScene, [gameInputName, ...(separateGameAudio ? [gameAudioInputName] : [])]],
-    [desktopMicScene, [gameInputName, desktopAudioInputName, micInputName]],
-    [micScene, [gameInputName, ...(separateGameAudio ? [gameAudioInputName] : []), micInputName]],
-  ]);
-
   const sceneList = await client.call("GetSceneList");
-  const desiredSceneNames = new Set(Object.values(labatarSceneNames));
   const existingSceneNames = new Set((sceneList.scenes ?? []).map((scene) => scene.sceneName));
-  for (const sceneName of Object.values(labatarSceneNames)) {
-    if (!existingSceneNames.has(sceneName)) {
-      await client.call("CreateScene", { sceneName });
+  const selectedSceneName =
+    current.sceneCollections?.currentSceneCollectionName === labatarSceneCollectionName
+      ? current.currentScene?.sceneName
+      : null;
+  let desiredToggles = legacySceneToggles(selectedSceneName ?? "Labatar - Game Only");
+  if (existingSceneNames.has(gameScene)) {
+    const existingItems = await client.call("GetSceneItemList", { sceneName: gameScene });
+    if ((existingItems.sceneItems ?? []).length) {
+      desiredToggles = sceneTogglesFromItems(existingItems.sceneItems);
     }
+  } else {
+    if (selectedSceneName && existingSceneNames.has(selectedSceneName)) {
+      const selectedItems = await client.call("GetSceneItemList", {
+        sceneName: selectedSceneName,
+      });
+      if ((selectedItems.sceneItems ?? []).length) {
+        desiredToggles = sceneTogglesFromItems(selectedItems.sceneItems);
+      }
+    }
+    await client.call("CreateScene", { sceneName: gameScene });
   }
   await client.call("SetCurrentProgramScene", { sceneName: gameScene });
   for (const scene of sceneList.scenes ?? []) {
-    if (!desiredSceneNames.has(scene.sceneName)) {
+    if (scene.sceneName !== gameScene) {
       await client.call("RemoveScene", { sceneName: scene.sceneName });
     }
   }
@@ -2660,7 +2752,7 @@ async function setupLabatarObsScenes(request = {}) {
 
   async function resizeOutputToSourceSize(sceneName, inputName) {
     const items = await client.call("GetSceneItemList", { sceneName });
-    const sourceItem = (items.sceneItems ?? []).find((item) => item.sourceName === inputName);
+    const sourceItem = pressureGameItems(items.sceneItems ?? [], inputName)[0];
     if (!sourceItem) return null;
     const transform = await client.call("GetSceneItemTransform", {
       sceneName,
@@ -2684,30 +2776,6 @@ async function setupLabatarObsScenes(request = {}) {
     };
   }
 
-  async function normalizeGameCaptureTransform(sceneName) {
-    const items = await client.call("GetSceneItemList", { sceneName });
-    const sourceItem = (items.sceneItems ?? []).find((item) => item.sourceName === gameInputName);
-    if (!sourceItem) return;
-    await client.call("SetSceneItemTransform", {
-      sceneName,
-      sceneItemId: sourceItem.sceneItemId,
-      sceneItemTransform: {
-        alignment: 5,
-        positionX: 0,
-        positionY: 0,
-        rotation: 0,
-        scaleX: 1,
-        scaleY: 1,
-        cropLeft: 0,
-        cropTop: 0,
-        cropRight: 0,
-        cropBottom: 0,
-        boundsType: "OBS_BOUNDS_NONE",
-        boundsAlignment: 0,
-      },
-    });
-  }
-
   const existingInputs = await client.call("GetInputList");
   for (const input of existingInputs.inputs ?? []) {
     const inputKind = input.inputKind ?? input.unversionedInputKind;
@@ -2726,65 +2794,121 @@ async function setupLabatarObsScenes(request = {}) {
     }
   }
 
-  for (const sceneName of [gameScene, desktopMicScene, micScene]) {
-    await ensureInput(sceneName, gameInputName, "game_capture", gameCaptureSettings);
-  }
+  await ensureInput(gameScene, gameInputName, "game_capture", gameCaptureSettings);
   await ensureLabatarVideoSettings(client, version);
   const outputResolution = await resizeOutputToSourceSize(gameScene, gameInputName);
-  if (outputResolution) {
-    for (const sceneName of [gameScene, desktopMicScene, micScene]) {
-      await normalizeGameCaptureTransform(sceneName);
-    }
-  }
   if (separateGameAudio) {
-    for (const sceneName of [gameScene, micScene]) {
-      await ensureInput(
-        sceneName,
-        gameAudioInputName,
-        "wasapi_process_output_capture",
-        gameAudioSettings,
-      );
-    }
+    await ensureInput(
+      gameScene,
+      gameAudioInputName,
+      "wasapi_process_output_capture",
+      gameAudioSettings,
+    );
   }
   await ensureInput(
-    desktopMicScene,
+    gameScene,
     desktopAudioInputName,
     "wasapi_output_capture",
     desktopAudioSettings,
   );
-  await ensureInput(desktopMicScene, micInputName, "wasapi_input_capture", micAudioSettings);
-  await ensureInput(micScene, micInputName, "wasapi_input_capture", micAudioSettings);
+  await ensureInput(gameScene, micInputName, "wasapi_input_capture", micAudioSettings);
 
-  for (const [sceneName, desiredInputs] of desiredSceneInputs) {
-    const desiredInputSet = new Set(desiredInputs);
-    const items = await client.call("GetSceneItemList", { sceneName });
-    for (const item of items.sceneItems ?? []) {
-      if (!desiredInputSet.has(item.sourceName)) {
-        await client.call("RemoveSceneItem", {
-          sceneName,
-          sceneItemId: item.sceneItemId,
-        });
-      } else if (!item.sceneItemEnabled) {
-        await client.call("SetSceneItemEnabled", {
-          sceneName,
-          sceneItemId: item.sceneItemId,
-          sceneItemEnabled: true,
-        });
-      }
-    }
-    const finalItems = await client.call("GetSceneItemList", { sceneName });
-    const itemBySourceName = new Map(
-      (finalItems.sceneItems ?? []).map((item) => [item.sourceName, item]),
-    );
-    for (const [sceneItemIndex, inputName] of desiredInputs.entries()) {
-      const item = itemBySourceName.get(inputName);
-      if (!item) continue;
-      await client.call("SetSceneItemIndex", {
-        sceneName,
+  // The game scene reuses the same game source twice. The lower item remains
+  // the full game image; the upper item contains only the P2 framebar.
+  let pressureItems =
+    (await client.call("GetSceneItemList", { sceneName: gameScene })).sceneItems ?? [];
+  const desiredInputNames = new Set(managedInputNames);
+  for (const item of pressureItems) {
+    if (!desiredInputNames.has(item.sourceName)) {
+      await client.call("RemoveSceneItem", {
+        sceneName: gameScene,
         sceneItemId: item.sceneItemId,
-        sceneItemIndex,
       });
     }
+  }
+  pressureItems =
+    (await client.call("GetSceneItemList", { sceneName: gameScene })).sceneItems ?? [];
+  let gameItems = pressureGameItems(pressureItems, gameInputName);
+  if (gameItems.length === 1) {
+    await client.call("CreateSceneItem", {
+      sceneName: gameScene,
+      sourceName: gameInputName,
+      sceneItemEnabled: false,
+    });
+  }
+  pressureItems =
+    (await client.call("GetSceneItemList", { sceneName: gameScene })).sceneItems ?? [];
+  gameItems = pressureGameItems(pressureItems, gameInputName);
+  for (const extra of gameItems.slice(2)) {
+    await client.call("RemoveSceneItem", {
+      sceneName: gameScene,
+      sceneItemId: extra.sceneItemId,
+    });
+  }
+  const [baseItem, overlayItem] = gameItems;
+  if (!baseItem || !overlayItem) {
+    throw new Error("OBS could not create the pressure framebar game source.");
+  }
+  await client.call("SetSceneItemTransform", {
+    sceneName: gameScene,
+    sceneItemId: baseItem.sceneItemId,
+    sceneItemTransform: pressureBaseTransform(),
+  });
+  const baseTransform = await client.call("GetSceneItemTransform", {
+    sceneName: gameScene,
+    sceneItemId: baseItem.sceneItemId,
+  });
+  const sourceWidth = Number(baseTransform.sceneItemTransform?.sourceWidth ?? 0);
+  const sourceHeight = Number(baseTransform.sceneItemTransform?.sourceHeight ?? 0);
+  const overlayTransform = pressureFramebarTransform(sourceWidth, sourceHeight);
+  if (overlayTransform) {
+    await client.call("SetSceneItemTransform", {
+      sceneName: gameScene,
+      sceneItemId: overlayItem.sceneItemId,
+      sceneItemTransform: overlayTransform,
+    });
+  }
+  const audioNames = [
+    ...(separateGameAudio ? [gameAudioInputName] : []),
+    desktopAudioInputName,
+    micInputName,
+  ];
+  const audioItems = [];
+  for (const inputName of audioNames) {
+    const matching = pressureItems.filter((item) => item.sourceName === inputName);
+    for (const extra of matching.slice(1)) {
+      await client.call("RemoveSceneItem", {
+        sceneName: gameScene,
+        sceneItemId: extra.sceneItemId,
+      });
+    }
+    if (matching[0]) audioItems.push(matching[0]);
+  }
+  if (desiredToggles.gameAudio && desiredToggles.desktopAudio) {
+    desiredToggles.desktopAudio = false;
+  }
+  const orderedItems = [...audioItems, baseItem, overlayItem];
+  for (const [sceneItemIndex, item] of orderedItems.entries()) {
+    await client.call("SetSceneItemIndex", {
+      sceneName: gameScene,
+      sceneItemId: item.sceneItemId,
+      sceneItemIndex,
+    });
+    const enabled =
+      item === baseItem
+        ? true
+        : item === overlayItem
+          ? Boolean(overlayTransform) && desiredToggles.pressureFramebar
+          : item.sourceName === gameAudioInputName
+            ? desiredToggles.gameAudio
+            : item.sourceName === desktopAudioInputName
+              ? desiredToggles.desktopAudio
+              : desiredToggles.microphone;
+    await client.call("SetSceneItemEnabled", {
+      sceneName: gameScene,
+      sceneItemId: item.sceneItemId,
+      sceneItemEnabled: enabled,
+    });
   }
   await client.call("SetCurrentProgramScene", { sceneName: gameScene });
 
@@ -2799,9 +2923,10 @@ async function setupLabatarObsScenes(request = {}) {
     profileName,
     recordDirectory,
     sceneCollectionName: labatarSceneCollectionName,
-    scenes: Object.values(labatarSceneNames),
+    scenes: [gameScene],
     gameAudioMode: separateGameAudio ? "separate" : "window-capture",
     outputResolution,
+    pressureFramebarReady: Boolean(overlayTransform),
     profileCreated,
     ...refreshed,
   };
@@ -3602,6 +3727,7 @@ ipcMain.handle("obs:disconnect", async () => {
     error: null,
     currentSceneCollectionName: null,
     currentSceneName: null,
+    sourceToggles: null,
     videoSettings: null,
     recording: { active: false, paused: false, outputPath: null },
   });
@@ -3618,11 +3744,68 @@ ipcMain.handle("obs:prepare-profile", async (_, request) => {
 ipcMain.handle("obs:setup-scenes", async (_, request) => setupLabatarObsScenes(request));
 ipcMain.handle("obs:set-scene", async (_, sceneName) => {
   const requestedSceneName = String(sceneName ?? "");
-  if (!Object.values(labatarSceneNames).includes(requestedSceneName)) {
+  if (requestedSceneName !== labatarGameSceneName) {
     throw new Error("Unknown Labatar scene.");
   }
   const client = getObsClient();
   await client.call("SetCurrentProgramScene", { sceneName: requestedSceneName });
+  await refreshObsState(client);
+  return publicObsState();
+});
+ipcMain.handle("obs:set-source-toggle", async (_, request) => {
+  const { key, enabled } = request ?? {};
+  if (!labatarToggleKeys.includes(key) || typeof enabled !== "boolean") {
+    throw new Error("Invalid OBS source toggle.");
+  }
+  const client = getObsClient();
+  const current = await refreshObsState(client);
+  if (current.recordStatus.outputActive) {
+    throw new Error("Stop the active OBS recording before changing capture sources.");
+  }
+  if (current.sceneCollections?.currentSceneCollectionName !== labatarSceneCollectionName) {
+    throw new Error("Apply Labatar OBS setup before changing capture sources.");
+  }
+  const { sceneItems = [] } = await client.call("GetSceneItemList", {
+    sceneName: labatarGameSceneName,
+  });
+  const gameItems = pressureGameItems(sceneItems, labatarInputNames.game);
+  const overlayItem = gameItems[1];
+  const itemByKey = {
+    pressureFramebar: overlayItem,
+    gameAudio: sceneItems.find((item) => item.sourceName === labatarInputNames.gameAudio),
+    desktopAudio: sceneItems.find((item) => item.sourceName === labatarInputNames.desktopAudio),
+    microphone: sceneItems.find((item) => item.sourceName === labatarInputNames.microphone),
+  };
+  if (!itemByKey[key]) {
+    throw new Error(`The ${key} source is unavailable. Apply Labatar OBS setup again.`);
+  }
+  if (key === "pressureFramebar" && enabled) {
+    const transform = await client.call("GetSceneItemTransform", {
+      sceneName: labatarGameSceneName,
+      sceneItemId: overlayItem.sceneItemId,
+    });
+    if (
+      Number(transform.sceneItemTransform?.sourceWidth) < 8 ||
+      Number(transform.sceneItemTransform?.cropLeft) <= 0
+    ) {
+      throw new Error("Open the game and apply Labatar OBS setup to place the P2 crop.");
+    }
+  }
+  const previous = sceneTogglesFromItems(sceneItems);
+  const next = updateSceneToggles(previous, key, enabled, {
+    gameAudioAvailable: Boolean(itemByKey.gameAudio),
+  });
+  const changedKeys = labatarToggleKeys
+    .filter((changedKey) => itemByKey[changedKey] && next[changedKey] !== previous[changedKey])
+    .sort((a, b) => Number(next[a]) - Number(next[b]));
+  for (const changedKey of changedKeys) {
+    const item = itemByKey[changedKey];
+    await client.call("SetSceneItemEnabled", {
+      sceneName: labatarGameSceneName,
+      sceneItemId: item.sceneItemId,
+      sceneItemEnabled: next[changedKey],
+    });
+  }
   await refreshObsState(client);
   return publicObsState();
 });
@@ -6927,8 +7110,16 @@ function startNextYouTubeUpload() {
           });
         },
       });
-      clearRecordingWork(job.workId);
-      job.resolve({ ...result, url: `https://www.youtube.com/watch?v=${result.videoId}` });
+      const url = `https://www.youtube.com/watch?v=${result.videoId}`;
+      setRecordingWork(job.workId, {
+        phase: "ready",
+        title: "YouTube upload ready",
+        detail: "Review and link the uploaded video",
+        url,
+        completed: undefined,
+        total: undefined,
+      });
+      job.resolve({ ...result, url });
     } catch (error) {
       if (
         job.cancelRequested ||
@@ -7055,6 +7246,11 @@ ipcMain.handle("recordings:youtube-upload-dismiss-error", (_, request) => {
   const workId = `youtube-upload:${String(request?.recordingId ?? "")}`;
   if (recordingWork.get(workId)?.phase === "failed") clearRecordingWork(workId);
 });
+ipcMain.handle("recordings:youtube-upload-acknowledge", (_, request) => {
+  const workId = `youtube-upload:${String(request?.recordingId ?? "")}`;
+  const work = recordingWork.get(workId);
+  if (work?.phase === "ready" && work.url === request?.url) clearRecordingWork(workId);
+});
 ipcMain.handle("recordings:open-youtube-terms", () =>
   shell.openExternal("https://www.youtube.com/t/terms"),
 );
@@ -7077,9 +7273,12 @@ ipcMain.handle("recordings:youtube-replacement-info", async (_, request) => {
   }
   return { durationMs: manifest.youtubeDurationMs, hasLocalVideo: false };
 });
-ipcMain.handle("recordings:set-youtube-link", async (_, request) =>
-  setRecordingYouTubeLink(request),
-);
+ipcMain.handle("recordings:set-youtube-link", async (_, request) => {
+  const recording = await setRecordingYouTubeLink(request);
+  const workId = `youtube-upload:${String(request?.recordingId ?? "")}`;
+  if (recordingWork.get(workId)?.phase === "ready") clearRecordingWork(workId);
+  return recording;
+});
 ipcMain.handle("recordings:open-youtube-video", async (_, request) => {
   const filePath = resolveRecordingPath(String(request?.recordingId ?? ""));
   const { youtubeUrl } = await readRecordingManifest(filePath, "none");
@@ -7185,12 +7384,8 @@ ipcMain.handle("catalog:publish-combo", async (event, request) => {
     throw error;
   }
 });
-ipcMain.handle("catalog:combo-preview-access", (event, request) =>
-  request?.interactive
-    ? requestComboPreviewAccess(BrowserWindow.fromWebContents(event.sender))
-    : checkComboPreviewAccess(),
-);
 ipcMain.handle("combo-candidates:status", () => candidateServiceStatus());
+ipcMain.handle("combo-candidates:request-upload-access", () => requestComboUploadAccess());
 ipcMain.handle("combo-candidates:submit", async (event, request) => {
   const recordingPath = resolveRecordingPath(String(request?.recordingId ?? ""));
   return submitComboCandidate({
@@ -7451,7 +7646,7 @@ function createWindow() {
   const window = new BrowserWindow({
     width: 1200,
     height: 800,
-    icon: path.join(__dirname, "assets", "icon.png"),
+    icon: normalWindowIcon,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -7475,6 +7670,7 @@ function createWindow() {
     },
   );
   mainWindow = window;
+  updateRecordingWindowIcon();
   latestRendererSnapshot = null;
   latestRendererSnapshotAt = null;
   let lastRendererPid = null;

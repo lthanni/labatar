@@ -1,8 +1,9 @@
 # OBS recording profile contract
 
 This document defines the OBS assumptions that affect Labatar recording
-analysis. It is intentionally separate from the scene-collection export:
-`Labatar.json` describes scenes and sources, while the OBS profile's
+analysis. It is intentionally separate from the checked-in `Labatar.json`
+scene-collection export, which is a snapshot rather than the runtime setup.
+The app manages the current scene through OBS WebSocket, while the OBS profile's
 `basic.ini` stores video/output settings such as frame rate.
 
 ## Required timing setting
@@ -22,6 +23,25 @@ source when the game is available. The base canvas preserves the raw capture
 size, while the recorded output is normalized to even dimensions. This allows a
 windowed DXGI source such as `2560x1441` to produce the expected `2560x1440`
 recording without treating the one-pixel source discrepancy as a setup failure.
+
+The managed `Labatar` scene collection contains one `Labatar - Game` scene. It
+contains the full game capture and independently switchable P2 crop, game audio,
+desktop audio, and microphone scene items. Game audio and desktop audio are
+mutually exclusive to avoid recording the game sound twice. Turning off desktop
+audio restores the separate game-audio source when OBS provides one. Setup
+adopts the switch state of the selected legacy scene on first migration and
+preserves the current switches on later runs. Source switches are unavailable
+during an active recording. The selected switches affect both manual and
+automatic recordings.
+
+The P2 item layers a tight crop from the same game-capture source directly
+below the P1 framebar. The measured 2560×1441 OBS scene used a
+1377/1309/177/86 pixel crop (left/top/right/bottom) at position (175, 1355).
+The crop coordinates scale with the source dimensions when OBS can read the
+game capture. If the game source is unavailable during setup, the overlay stays
+hidden until setup is run again with the game open. The scene uses the same 60 fps
+recording profile for every source combination.
+
 Resolution and frame rate are separate requirements: matching the source
 resolution does not make a 30fps recording suitable for exact frame-data
 analysis.

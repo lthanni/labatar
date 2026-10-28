@@ -38,3 +38,9 @@ CREATE TABLE IF NOT EXISTS catalog_access_roles (
   updated_at TEXT NOT NULL,
   updated_by TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS catalog_upload_access_requests (
+  email TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL,
+  requested_at TEXT NOT NULL
+);

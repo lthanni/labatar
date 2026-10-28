@@ -67,12 +67,10 @@ import type { ProcessingConfigurationResult } from "./processing-config-types";
 import {
   techCatalogStorageKey,
   techCatalogUpdatedEvent,
-  techSelectComboEvent,
   techSelectRecordingEvent,
-  techSelectedComboStorageKey,
   techSelectedRecordingStorageKey,
 } from "./tech-types";
-import type { TechCatalog, TechCombo, TechMove } from "./tech-types";
+import type { TechCatalog, TechMove } from "./tech-types";
 import { resolveFlowStance } from "./common-tech-moves";
 import { moveNotationsMatch, normalizeMoveNotation, stanceFollowupMatches } from "./move-notation";
 import { inputButtonDisplayColors, inputButtonSlotRatios } from "./input-display-config";
@@ -367,7 +365,7 @@ type FrameStepTrigger = {
 
 type ExactReviewFrame = {
   frameIndex: number;
-  data: string;
+  url: string;
 };
 
 function frameIndexForTime(time: number) {
@@ -590,6 +588,18 @@ export function RecordingViewer({
   const [chapterLoadError, setChapterLoadError] = useState<string | null>(null);
   const [chapterRefreshToken, setChapterRefreshToken] = useState(0);
   const [reviewFrame, setReviewFrame] = useState<ExactReviewFrame | null>(null);
+  const reviewFrameUrl = useRef<string | null>(null);
+  const replaceReviewFrame = useCallback((frame: ExactReviewFrame | null) => {
+    const previousUrl = reviewFrameUrl.current;
+    reviewFrameUrl.current = frame?.url ?? null;
+    setReviewFrame(frame);
+    if (previousUrl && previousUrl !== frame?.url) URL.revokeObjectURL(previousUrl);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (reviewFrameUrl.current) URL.revokeObjectURL(reviewFrameUrl.current);
+    };
+  }, []);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [clipRange, setClipRange] = useState<[number, number]>([0, 0]);
   const [clipMode, setClipMode] = useState(false);
@@ -767,15 +777,36 @@ export function RecordingViewer({
               (recording) => !recording.moveTake && !recording.id.startsWith("moves/"),
             )
           : result.recordings;
+      const pendingRecordingId =
+        mode === "recordings" && !panelOnly
+          ? localStorage.getItem(techSelectedRecordingStorageKey)
+          : null;
+      const byId = new Map(tabRecordings.map((recording) => [recording.id, recording]));
+      const pendingRecording = pendingRecordingId ? byId.get(pendingRecordingId) : null;
+      if (pendingRecording) {
+        setRecordingListTab(recordingLibraryTab(pendingRecording, byId));
+        setSelectedTagFilters(emptyRecordingTags);
+        setExpandedRecordingIds((current) => {
+          const next = new Set(current);
+          const seen = new Set<string>([pendingRecording.id]);
+          let parentId = pendingRecording.clip?.sourceRecordingId;
+          while (parentId && !seen.has(parentId)) {
+            next.add(parentId);
+            seen.add(parentId);
+            parentId = byId.get(parentId)?.clip?.sourceRecordingId;
+          }
+          return next;
+        });
+      }
       setFolder(result.folder);
       setRecordings(tabRecordings);
-      setSelectedId((current) =>
-        tabRecordings.some((recording) => recording.id === current)
-          ? current
-          : panelOnly
-            ? null
-            : (tabRecordings[0]?.id ?? null),
-      );
+      if (pendingRecording) {
+        setSelectedId(pendingRecording.id);
+      } else {
+        setSelectedId((current) =>
+          byId.has(current ?? "") ? current : panelOnly ? null : (tabRecordings[0]?.id ?? null),
+        );
+      }
     } catch (loadError) {
       if (generation === loadGeneration.current) {
         setError(loadError instanceof Error ? loadError.message : String(loadError));
@@ -901,33 +932,41 @@ export function RecordingViewer({
       const nextTime = frameIndex / FRAME_RATE;
       const video = videoRef.current;
       video?.pause();
-      if (video && Math.abs(video.currentTime - nextTime) > 0.0001) {
-        video.currentTime = nextTime;
+      // The JPEG covers the player; seeking the video here decodes every review frame twice.
+      const binary = atob(decodedFrame.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
       }
+      const url = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
       currentFrameIndex.current = decodedFrame.frameIndex;
       setCurrentTime(nextTime);
+      savePlaybackPosition(selectedRecording.id, nextTime);
       setPlaybackError(null);
-      setReviewFrame({ frameIndex: decodedFrame.frameIndex, data: decodedFrame.data });
+      replaceReviewFrame({ frameIndex: decodedFrame.frameIndex, url });
     },
-    [closeFrameReader, selectedRecording],
+    [closeFrameReader, replaceReviewFrame, savePlaybackPosition, selectedRecording],
   );
 
   useEffect(() => {
     reviewRequestId.current += 1;
-    setReviewFrame(null);
+    replaceReviewFrame(null);
     void closeFrameReader();
     return () => {
       reviewRequestId.current += 1;
       void closeFrameReader();
     };
-  }, [closeFrameReader, selectedRecording?.id]);
+  }, [closeFrameReader, replaceReviewFrame, selectedRecording?.id]);
 
   useEffect(() => {
     if (active) return;
     reviewRequestId.current += 1;
     const video = videoRef.current;
     if (video && selectedRecording) {
-      savePlaybackPosition(selectedRecording.id, video.currentTime);
+      savePlaybackPosition(
+        selectedRecording.id,
+        reviewFrame ? reviewFrame.frameIndex / FRAME_RATE : video.currentTime,
+      );
       video.pause();
       video.removeAttribute("src");
       video.load();
@@ -939,11 +978,18 @@ export function RecordingViewer({
     void closeFrameReader();
     setRecordings((current) => (current.length ? [] : current));
     setChapters((current) => (current.length ? [] : current));
-    setReviewFrame(null);
+    replaceReviewFrame(null);
     setLoading(false);
     setIsPlaying(false);
     restoredRecordingId.current = null;
-  }, [active, closeFrameReader, savePlaybackPosition, selectedRecording]);
+  }, [
+    active,
+    closeFrameReader,
+    replaceReviewFrame,
+    reviewFrame,
+    savePlaybackPosition,
+    selectedRecording,
+  ]);
 
   useEffect(() => {
     setShowAnalysisDebug(false);
@@ -1044,7 +1090,10 @@ export function RecordingViewer({
         return next.size === current.size ? current : next;
       });
       if (selectedRecording && videoRef.current) {
-        savePlaybackPosition(selectedRecording.id, videoRef.current.currentTime);
+        savePlaybackPosition(
+          selectedRecording.id,
+          reviewFrame ? reviewFrame.frameIndex / FRAME_RATE : videoRef.current.currentTime,
+        );
       }
       if (selectedRecording?.mediaKind === "youtube") {
         savePlaybackPosition(selectedRecording.id, youtubePlayerRef.current?.getCurrentTime() ?? 0);
@@ -1056,7 +1105,7 @@ export function RecordingViewer({
       setRenameError(null);
       setIsPlaying(false);
       setCurrentTime(0);
-      setReviewFrame(null);
+      replaceReviewFrame(null);
       currentFrameIndex.current = 0;
       setDuration(0);
       setClipRange([0, 0]);
@@ -1066,21 +1115,24 @@ export function RecordingViewer({
       focusPlayerAfterSelection.current = true;
       setSelectedId(recordingId);
     },
-    [mode, recordingById, savePlaybackPosition, selectedRecording],
+    [mode, recordingById, replaceReviewFrame, reviewFrame, savePlaybackPosition, selectedRecording],
   );
 
   useEffect(() => {
     const syncTechCatalog = () => setTechCatalog(readTechCatalog());
     const handleTechRecordingSelection = (event: Event) => {
-      if (panelOnly) return;
+      if (panelOnly || mode !== "recordings") return;
       const recordingId = (event as CustomEvent<string>).detail;
       if (typeof recordingId !== "string") return;
-      if (recordings.some((recording) => recording.id === recordingId)) {
+      if (!active || loading) {
+        localStorage.setItem(techSelectedRecordingStorageKey, recordingId);
+      } else if (recordings.some((recording) => recording.id === recordingId)) {
         setSelectedTagFilters(emptyRecordingTags);
         selectRecording(recordingId);
         localStorage.removeItem(techSelectedRecordingStorageKey);
       } else {
         localStorage.setItem(techSelectedRecordingStorageKey, recordingId);
+        void loadRecordings();
       }
     };
     window.addEventListener(techCatalogUpdatedEvent, syncTechCatalog);
@@ -1091,10 +1143,10 @@ export function RecordingViewer({
       window.removeEventListener("storage", syncTechCatalog);
       window.removeEventListener(techSelectRecordingEvent, handleTechRecordingSelection);
     };
-  }, [panelOnly, recordings, selectRecording]);
+  }, [active, loadRecordings, loading, mode, panelOnly, recordings, selectRecording]);
 
   useEffect(() => {
-    if (panelOnly) return;
+    if (panelOnly || mode !== "recordings" || !active || loading) return;
     const pendingRecordingId = localStorage.getItem(techSelectedRecordingStorageKey);
     if (
       !pendingRecordingId ||
@@ -1105,7 +1157,7 @@ export function RecordingViewer({
     setSelectedTagFilters(emptyRecordingTags);
     selectRecording(pendingRecordingId);
     localStorage.removeItem(techSelectedRecordingStorageKey);
-  }, [panelOnly, recordings, selectRecording]);
+  }, [active, loading, mode, panelOnly, recordings, selectRecording]);
 
   useEffect(() => {
     if (!panelOnly) return;
@@ -1186,7 +1238,7 @@ export function RecordingViewer({
       setClipExportNotice(null);
       setClipExportError(null);
       reviewRequestId.current += 1;
-      setReviewFrame(null);
+      replaceReviewFrame(null);
       await closeFrameReader();
       const video = videoRef.current;
       video?.pause();
@@ -1227,6 +1279,7 @@ export function RecordingViewer({
       clipRange,
       closeFrameReader,
       loadRecordings,
+      replaceReviewFrame,
       savePlaybackPosition,
       selectedRecording,
       trimmingClip,
@@ -1439,19 +1492,9 @@ export function RecordingViewer({
 
   const beginYouTubeUpload = useCallback(
     (recording: RecordedVideo) => {
-      const sourceIds = new Set<string>();
-      let source: RecordedVideo | undefined = recording;
-      while (source && !sourceIds.has(source.id)) {
-        sourceIds.add(source.id);
-        source = source.clip ? recordingById.get(source.clip.sourceRecordingId) : undefined;
-      }
-      const linkedToCombo = Object.values(readTechCatalog()).some((character) =>
-        (character.combos ?? []).some((combo) =>
-          Boolean(combo.recordingId && sourceIds.has(combo.recordingId)),
-        ),
-      );
-      const destination =
-        recordingInheritedTags(recording, recordingById).combo || linkedToCombo ? "combos" : "sets";
+      const destination = recordingInheritedTags(recording, recordingById).combo
+        ? "combos"
+        : "sets";
       const isMatch = recordingLibraryTab(recording, recordingById) === "matches";
       const setHashtags =
         destination === "sets" && isMatch ? setYouTubeHashtags(recording, recordingById) : [];
@@ -1645,7 +1688,12 @@ export function RecordingViewer({
           youtubeReplacementInfo?.hasLocalVideo &&
           selectedRecording?.id === youtubeLinkTarget.id
         ) {
-          savePlaybackPosition(selectedRecording.id, videoRef.current?.currentTime ?? 0);
+          savePlaybackPosition(
+            selectedRecording.id,
+            reviewFrame
+              ? reviewFrame.frameIndex / FRAME_RATE
+              : (videoRef.current?.currentTime ?? 0),
+          );
           videoRef.current?.pause();
           videoRef.current?.removeAttribute("src");
           videoRef.current?.load();
@@ -1684,6 +1732,7 @@ export function RecordingViewer({
     },
     [
       closeFrameReader,
+      reviewFrame,
       savePlaybackPosition,
       savingYouTubeLink,
       selectedRecording,
@@ -1906,18 +1955,6 @@ export function RecordingViewer({
     [recordings, selectedRecording],
   );
 
-  const linkedTechCombos = useMemo(
-    () =>
-      selectedRecording
-        ? Object.entries(techCatalog).flatMap(([character, data]) =>
-            (data?.combos ?? [])
-              .filter((combo) => combo.recordingId === selectedRecording.id)
-              .map((combo) => ({ character, combo })),
-          )
-        : [],
-    [selectedRecording, techCatalog],
-  );
-
   const canOfferTrim = Boolean(selectedRecording?.name.toLowerCase().endsWith(".mp4"));
   const hasTimelineAnalysis = Boolean(
     selectedRecording?.moveTake ||
@@ -1944,11 +1981,6 @@ export function RecordingViewer({
         : clipRange[0] < 0.05 && clipRange[1] >= duration - 0.05
           ? "Select a shorter range to trim."
           : "";
-
-  const selectLinkedCombo = (combo: TechCombo) => {
-    localStorage.setItem(techSelectedComboStorageKey, combo.id);
-    window.dispatchEvent(new CustomEvent(techSelectComboEvent, { detail: combo.id }));
-  };
 
   const clippedRegions = useMemo(
     () =>
@@ -1986,7 +2018,7 @@ export function RecordingViewer({
       video.currentTime = reviewTime;
       currentFrameIndex.current = reviewFrame.frameIndex;
       setCurrentTime(reviewTime);
-      setReviewFrame(null);
+      replaceReviewFrame(null);
       void video.play();
       return;
     }
@@ -2001,7 +2033,14 @@ export function RecordingViewer({
       currentFrameIndex.current = frameIndexForTime(video.currentTime);
       video.pause();
     }
-  }, [clipMode, clipRange, isPlaying, reviewFrame, selectedRecording?.mediaKind]);
+  }, [
+    clipMode,
+    clipRange,
+    isPlaying,
+    replaceReviewFrame,
+    reviewFrame,
+    selectedRecording?.mediaKind,
+  ]);
 
   const seekTo = useCallback(
     (nextTime: number) => {
@@ -2013,7 +2052,7 @@ export function RecordingViewer({
       }
       const video = videoRef.current;
       if (!video) return;
-      setReviewFrame(null);
+      replaceReviewFrame(null);
       video.currentTime = nextTime;
       currentFrameIndex.current = frameIndexForTime(nextTime);
       setCurrentTime(nextTime);
@@ -2021,19 +2060,39 @@ export function RecordingViewer({
         savePlaybackPosition(selectedRecording.id, nextTime);
       }
     },
-    [savePlaybackPosition, selectedRecording],
+    [replaceReviewFrame, savePlaybackPosition, selectedRecording],
   );
 
-  const showLastVideoFrame = useCallback((video: HTMLVideoElement) => {
-    if (!Number.isFinite(video.duration) || video.duration <= 0) return;
-    const lastFrame = lastFrameIndexForDuration(video.duration);
-    const lastFrameTime = Math.min(video.duration - 0.001, (lastFrame + 0.25) / FRAME_RATE);
-    video.pause();
-    video.currentTime = Math.max(0, lastFrameTime);
-    currentFrameIndex.current = lastFrame;
-    setCurrentTime(video.currentTime);
-    setReviewFrame(null);
-  }, []);
+  const setClipBoundaryToPlayhead = (boundary: "start" | "end") => {
+    const playhead = Math.max(
+      0,
+      Math.min(
+        duration,
+        reviewFrame
+          ? reviewFrame.frameIndex / FRAME_RATE
+          : (videoRef.current?.currentTime ?? currentTime),
+      ),
+    );
+    setClipRange(([start, end]) =>
+      boundary === "start"
+        ? [playhead, Math.max(end, playhead)]
+        : [Math.min(start, playhead), playhead],
+    );
+  };
+
+  const showLastVideoFrame = useCallback(
+    (video: HTMLVideoElement) => {
+      if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+      const lastFrame = lastFrameIndexForDuration(video.duration);
+      const lastFrameTime = Math.min(video.duration - 0.001, (lastFrame + 0.25) / FRAME_RATE);
+      video.pause();
+      video.currentTime = Math.max(0, lastFrameTime);
+      currentFrameIndex.current = lastFrame;
+      setCurrentTime(video.currentTime);
+      replaceReviewFrame(null);
+    },
+    [replaceReviewFrame],
+  );
 
   useEffect(() => {
     if (
@@ -2315,7 +2374,7 @@ export function RecordingViewer({
           paused: video.paused,
         });
         video.pause();
-        setReviewFrame(null);
+        replaceReviewFrame(null);
         setPlaybackError(
           error instanceof Error ? `Exact frame review failed: ${error.message}` : String(error),
         );
@@ -2352,7 +2411,7 @@ export function RecordingViewer({
         }
       }
     },
-    [loadExactReviewFrame, reviewFrame],
+    [loadExactReviewFrame, replaceReviewFrame, reviewFrame],
   );
 
   useEffect(() => {
@@ -4171,7 +4230,7 @@ export function RecordingViewer({
                 {selectedRecording.mediaKind !== "youtube" && reviewFrame && (
                   <Box
                     component="img"
-                    src={`data:image/jpeg;base64,${reviewFrame.data}`}
+                    src={reviewFrame.url}
                     alt={`Exact decoded frame ${reviewFrame.frameIndex}`}
                     onClick={togglePlayback}
                     sx={{
@@ -4753,10 +4812,18 @@ export function RecordingViewer({
                         disableSwap
                         valueLabelDisplay="auto"
                         valueLabelFormat={(value) => formatVideoTime(value)}
-                        onChange={(_, value) => {
+                        onChange={(_, value, activeThumb) => {
                           if (!Array.isArray(value)) return;
                           const [start, end] = value;
-                          if (start != null && end != null) setClipRange([start, end]);
+                          if (start == null || end == null) return;
+                          setClipRange([start, end]);
+                          const video = videoRef.current;
+                          const playhead = reviewFrame
+                            ? reviewFrame.frameIndex / FRAME_RATE
+                            : video?.currentTime;
+                          if (activeThumb === 0 && playhead != null && playhead < start) {
+                            seekTo(start);
+                          }
                         }}
                         sx={{
                           ...currentPositionMarkerSx,
@@ -4773,6 +4840,24 @@ export function RecordingViewer({
                         }}
                         disabled={!duration}
                       />
+                      <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          onClick={() => setClipBoundaryToPlayhead("start")}
+                          disabled={!duration}
+                        >
+                          Set start to playhead
+                        </Button>
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          onClick={() => setClipBoundaryToPlayhead("end")}
+                          disabled={!duration}
+                        >
+                          Set end to playhead
+                        </Button>
+                      </Stack>
                     </Box>
                     <Stack
                       direction={{ xs: "column", sm: "row" }}
@@ -5005,25 +5090,6 @@ export function RecordingViewer({
                         ))}
                       </Stack>
                     )}
-                  </Stack>
-                </>
-              )}
-              {linkedTechCombos.length > 0 && (
-                <>
-                  <Divider />
-                  <Stack spacing={0.75}>
-                    <Typography variant="subtitle2">Linked tech</Typography>
-                    {linkedTechCombos.map(({ character, combo }) => (
-                      <Button
-                        key={`${character}-${combo.id}`}
-                        variant="text"
-                        size="small"
-                        onClick={() => selectLinkedCombo(combo)}
-                        sx={{ justifyContent: "flex-start", overflowWrap: "anywhere" }}
-                      >
-                        {character} · {combo.support} · {combo.route || "Unnamed combo"}
-                      </Button>
-                    ))}
                   </Stack>
                 </>
               )}

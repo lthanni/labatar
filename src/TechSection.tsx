@@ -1,10 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Alert,
-  Autocomplete,
   Box,
   Button,
-  Checkbox,
   Chip,
   FormControl,
   FormControlLabel,
@@ -19,43 +16,10 @@ import {
   Tab,
   Tabs,
   TextField,
-  ToggleButton,
-  ToggleButtonGroup,
   Switch,
-  Tooltip,
   Typography,
 } from "@mui/material";
-import type { RecordedVideo } from "./recording-types";
 import supportMap from "../electron/support-map.json";
-import { useObsRecording } from "./ObsRecordingContext";
-import { RecordingViewer } from "./RecordingViewer";
-import { ComboTable, ComboWorkspace, type ComboTableRow } from "./ComboTable";
-import { comboStarterLabel } from "./combo-starter";
-import {
-  comboScreenPositions,
-  comboScreenPositionOrEmpty,
-  isComboScreenPosition,
-} from "./combo-screen-position";
-import { formatComboRecordingBaseName } from "./combo-recording-name";
-import {
-  ComboInlineFilters,
-  emptyComboInlineFilters,
-  matchesComboInlineFilters,
-  type ComboInlineFilterState,
-} from "./ComboInlineFilters";
-import {
-  comboNoteCategoryLabel,
-  comboNoteRangeFromSelection,
-  comboNoteRangeOffsets,
-  comboNotesOverlap,
-  normalizeComboNotes,
-} from "./combo-notes";
-import {
-  makePublishComboDraft,
-  matchesPublishedCombo,
-  publishedComboFromDraft,
-} from "./publish-combo-draft";
-import { catalogApiUrl, fetchPublishedCombos, type PublishedCombo } from "./published-catalog";
 import { moveTakeOutcomes, type MoveTakeOutcome } from "./move-capture-types";
 import { isNonMotionFMove, resolveFlowStance, withCommonTechMoves } from "./common-tech-moves";
 import { effectiveMeasurement } from "./move-measurements";
@@ -67,16 +31,11 @@ import {
 import {
   techCatalogStorageKey,
   techCatalogUpdatedEvent,
-  techSelectComboEvent,
   techSelectRecordingEvent,
-  techSelectedComboStorageKey,
   techSelectedRecordingStorageKey,
 } from "./tech-types";
 import type {
   TechCatalog,
-  TechCombo,
-  ComboNote,
-  ComboNoteRange,
   TechMove,
   TechStanceFollowupPattern,
   TechMeasuredField,
@@ -84,10 +43,8 @@ import type {
 import {
   classifyMoveInput,
   isFlowCancellableByDefault,
-  moveNotationsMatch,
   normalizeMoveNotation,
   parseMoveNotation,
-  stanceFollowupMatches,
 } from "./move-notation";
 
 type TechCharacter = {
@@ -157,54 +114,6 @@ type MoveDraft = {
   flow: string;
 };
 
-type ComboDraft = {
-  route: string;
-  routingMode: "autopilot" | "unique";
-  screenPosition: string;
-  damage: string;
-  notes: ComboNote[];
-  requiresCounterhit: boolean;
-  initialConversionHitconfirmable: boolean;
-  initialConversionSafeOnBlock: boolean;
-  pips: string;
-  flow: string;
-  recordingId: string | null;
-};
-
-function newComboNoteId(): string {
-  return (
-    globalThis.crypto?.randomUUID?.() ?? `note-${Date.now()}-${Math.random().toString(36).slice(2)}`
-  );
-}
-
-type PendingComboRecording = {
-  character: string;
-  comboId: string;
-  sessionId: string;
-};
-
-type FinalizedComboRecording = {
-  sessionId: string;
-  recordingId: string | null;
-  manifestError: string | null;
-};
-
-const pendingComboRecordingStorageKey = "labatar-pending-combo-recording-v1";
-
-function readPendingComboRecording(): PendingComboRecording | null {
-  try {
-    const value = JSON.parse(localStorage.getItem(pendingComboRecordingStorageKey) ?? "null");
-    return value &&
-      typeof value.character === "string" &&
-      typeof value.comboId === "string" &&
-      typeof value.sessionId === "string"
-      ? value
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 const emptyMoveDraft: MoveDraft = {
   input: "",
   nonstandard: false,
@@ -229,20 +138,6 @@ const emptyMoveDraft: MoveDraft = {
   hitstun: "",
   pips: "0",
   flow: "0",
-};
-
-const emptyComboDraft: ComboDraft = {
-  route: "",
-  routingMode: "autopilot",
-  screenPosition: "corner",
-  damage: "",
-  notes: [],
-  requiresCounterhit: false,
-  initialConversionHitconfirmable: false,
-  initialConversionSafeOnBlock: false,
-  pips: "0",
-  flow: "0",
-  recordingId: null,
 };
 
 function loadTechCatalog(): TechCatalog {
@@ -329,34 +224,8 @@ function loadTechCatalog(): TechCatalog {
           };
         });
       }
-      if (Array.isArray(storedCharacter.combos)) {
-        catalog[character.value].combos = storedCharacter.combos.map((combo) => {
-          const legacyCombo = combo as TechCombo & { recordingIds?: unknown };
-          return {
-            ...combo,
-            moveIds: Array.isArray(combo.moveIds)
-              ? combo.moveIds.map((moveId) => (typeof moveId === "string" ? moveId : null))
-              : [],
-            route: typeof combo.route === "string" ? combo.route : "",
-            routingMode: combo.routingMode === "unique" ? "unique" : "autopilot",
-            notes: normalizeComboNotes(combo.notes),
-            requiresCounterhit: combo.requiresCounterhit === true,
-            initialConversionHitconfirmable: combo.initialConversionHitconfirmable === true,
-            initialConversionSafeOnBlock: combo.initialConversionSafeOnBlock === true,
-            resourceCosts: {
-              pips: combo.resourceCosts?.pips ?? 0,
-              flow: combo.resourceCosts?.flow ?? 0,
-            },
-            recordingId:
-              typeof combo.recordingId === "string"
-                ? combo.recordingId
-                : Array.isArray(legacyCombo.recordingIds) &&
-                    typeof legacyCombo.recordingIds[0] === "string"
-                  ? legacyCombo.recordingIds[0]
-                  : null,
-          };
-        });
-      }
+      if (Array.isArray(storedCharacter.combos))
+        catalog[character.value].combos = storedCharacter.combos;
     }
   } catch {
     // Use the empty catalog if local storage contains invalid tech data.
@@ -384,137 +253,6 @@ function moveIdFor(character: string, input: string, existing: TechMove[]) {
   let suffix = 2;
   while (existing.some((move) => move.id === id)) id = `${base}-${suffix++}`;
   return id;
-}
-
-function getComboStarterMove(combo: TechCombo, moves: TechMove[]) {
-  const starterId = combo.moveIds[0];
-  return moves.find((move) => move.id === starterId) ?? null;
-}
-
-type ComboRouteToken = { input: string; followsStance: boolean };
-
-function parseComboRoute(route: string): ComboRouteToken[] {
-  const parts = route.split(/(->|>|,|~|\u2192)/g);
-  const tokens: ComboRouteToken[] = [];
-  let followsStance = false;
-  for (const part of parts) {
-    if (/^(?:->|>|,|~|\u2192)$/.test(part)) {
-      followsStance = part === "~";
-      continue;
-    }
-    for (const rawInput of part
-      .split(/\s+/)
-      .map((token) => token.trim())
-      .filter(Boolean)) {
-      const input =
-        rawInput.length > 1 && rawInput.endsWith("!") ? rawInput.slice(0, -1) : rawInput;
-      tokens.push({ input, followsStance });
-      followsStance = false;
-    }
-  }
-  return tokens;
-}
-
-function splitComboRoute(route: string) {
-  return parseComboRoute(route).map(({ input }) => input);
-}
-
-function findKnownMove(input: string, moves: TechMove[]) {
-  const matches = moves.filter((move) => moveNotationsMatch(move.input, input));
-  return matches[0] ?? null;
-}
-
-function resolveComboRoute(route: string, moves: TechMove[]) {
-  let activeStance: TechMove | null = null;
-  return parseComboRoute(route).map((token) => {
-    const move = token.followsStance
-      ? activeStance
-        ? (moves.find(
-            (candidate) =>
-              candidate.dependsOnMoveId === activeStance?.id &&
-              (moveNotationsMatch(candidate.input, token.input) ||
-                stanceFollowupMatches(candidate.input, token.input)),
-          ) ?? null)
-        : null
-      : findKnownMove(token.input, moves);
-    activeStance = token.followsStance ? activeStance : move?.isStanceParent ? move : null;
-    return move?.id ?? null;
-  });
-}
-
-function getComboRouteEntries(combo: TechCombo, moves: TechMove[]) {
-  const tokens = parseComboRoute(combo.route);
-  if (tokens.length > 0) {
-    let activeStance: TechMove | null = null;
-    return tokens.map((token, index) => {
-      const savedMove = moves.find((candidate) => candidate.id === combo.moveIds[index]) ?? null;
-      const move = token.followsStance
-        ? activeStance
-          ? ((savedMove?.dependsOnMoveId === activeStance.id &&
-            (moveNotationsMatch(savedMove.input, token.input) ||
-              stanceFollowupMatches(savedMove.input, token.input))
-              ? savedMove
-              : null) ??
-            moves.find(
-              (candidate) =>
-                candidate.dependsOnMoveId === activeStance?.id &&
-                (moveNotationsMatch(candidate.input, token.input) ||
-                  stanceFollowupMatches(candidate.input, token.input)),
-            ) ??
-            null)
-          : null
-        : (savedMove ?? findKnownMove(token.input, moves));
-      activeStance = token.followsStance ? activeStance : move?.isStanceParent ? move : null;
-      return { token: token.input, move, followsStance: token.followsStance };
-    });
-  }
-  return combo.moveIds.map((moveId) => {
-    const move = moves.find((candidate) => candidate.id === moveId) ?? null;
-    return { token: formatMoveLabel(move), move, followsStance: false };
-  });
-}
-
-function getComboRouteText(combo: TechCombo, moves: TechMove[]) {
-  if (combo.route.trim()) return combo.route.trim();
-  return combo.moveIds
-    .map((moveId) => formatMoveLabel(moves.find((move) => move.id === moveId) ?? null))
-    .join(" → ");
-}
-
-function getComboStarterLabel(combo: TechCombo, moves: TechMove[]) {
-  const firstRouteToken = splitComboRoute(combo.route)[0];
-  const starterMove =
-    getComboStarterMove(combo, moves) ??
-    (firstRouteToken ? findKnownMove(firstRouteToken, moves) : null);
-  const starter = starterMove
-    ? formatMoveLabel(starterMove)
-    : firstRouteToken ||
-      getComboRouteText(combo, moves).split(/\s*(?:→|->|,)\s*/)[0] ||
-      "Unknown starter";
-  const fallbackFollowup = !combo.route.trim()
-    ? moves.find((move) => move.id === combo.moveIds[1] && move.dependsOnMoveId === starterMove?.id)
-        ?.input
-    : undefined;
-  return comboStarterLabel(
-    starter,
-    combo.route,
-    starterMove?.isStanceParent === true && starterMove.isNonAttack === true,
-    fallbackFollowup,
-  );
-}
-
-function comboRecordingBaseName(combo: TechCombo, moves: TechMove[]) {
-  return formatComboRecordingBaseName({
-    character: combo.character,
-    support: combo.support,
-    starter: getComboStarterLabel(combo, moves),
-    screenPosition: combo.screenPosition,
-    damage: combo.damage,
-  });
-}
-
-function formatMoveLabel(move: TechMove | null) {
-  return move?.input ?? "Unknown move";
 }
 
 function frameValue(value: number | null) {
@@ -696,145 +434,7 @@ function MoveList({
   );
 }
 
-function getComboRouteParts(combo: TechCombo, moves: TechMove[]) {
-  const entries = getComboRouteEntries(combo, moves);
-  if (!combo.route.trim()) {
-    return entries.flatMap(({ token, move }, index) => [
-      ...(index > 0 ? [{ text: " \u2192 " }] : []),
-      { text: token === "Unknown move" ? "?" : token, invalid: !move },
-    ]);
-  }
-
-  let entryIndex = 0;
-  return getComboRouteText(combo, moves)
-    .split(/(\s+|->|>|,|~|\u2192)/g)
-    .filter(Boolean)
-    .map((part) => {
-      if (/^(?:\s+|->|>|,|~|\u2192)$/.test(part)) return { text: part };
-      const entry = entries[entryIndex++];
-      return { text: part, invalid: !entry?.move };
-    });
-}
-
-function ComboSelector({
-  combos,
-  moves,
-  recordings,
-  publishedCombos,
-  inlineFilters,
-  selectedId,
-  onEdit,
-}: {
-  combos: TechCombo[];
-  moves: TechMove[];
-  recordings: RecordedVideo[];
-  publishedCombos: PublishedCombo[] | null;
-  inlineFilters: ComboInlineFilterState;
-  selectedId: string | null;
-  onEdit: (combo: TechCombo) => void;
-}) {
-  const rows = useMemo<ComboTableRow[]>(() => {
-    const recordingsById = new Map(recordings.map((recording) => [recording.id, recording]));
-    return combos
-      .map((combo) => {
-        const recording = combo.recordingId ? recordingsById.get(combo.recordingId) : null;
-        const hasYouTube = Boolean(recording?.youtubeUrl?.trim());
-        const hasMp4 = recording?.mediaKind !== "youtube" && /\.mp4$/i.test(recording?.name ?? "");
-        const publishCombo = makePublishComboDraft(combo, recording ?? null, moves).combo;
-        const isPublished = publishedCombos?.some(
-          (item) =>
-            item.id === publishCombo.id &&
-            item.characterId === publishCombo.characterId &&
-            item.supportId === publishCombo.supportId,
-        );
-        const starter = getComboStarterLabel(combo, moves);
-        return {
-          id: combo.id,
-          starter: starter === "Unknown move" ? "" : starter,
-          position: combo.screenPosition,
-          damage: combo.damage,
-          pips: combo.resourceCosts.pips,
-          flow: combo.resourceCosts.flow,
-          requiresCounterhit: combo.requiresCounterhit === true,
-          route: getComboRouteText(combo, moves),
-          routeParts: getComboRouteParts(combo, moves),
-          notes: combo.notes,
-          mediaStatus: hasYouTube
-            ? publishedCombos && !isPublished
-              ? "ready-unpublished"
-              : "ready"
-            : hasMp4
-              ? "local-only"
-              : "missing",
-          draggableRecordingId: hasMp4 ? recording?.id : undefined,
-        } satisfies ComboTableRow;
-      })
-      .filter((row) => matchesComboInlineFilters(row, inlineFilters));
-  }, [combos, inlineFilters, moves, publishedCombos, recordings]);
-  const combosById = useMemo(() => new Map(combos.map((combo) => [combo.id, combo])), [combos]);
-
-  return (
-    <ComboTable
-      rows={rows}
-      selectedId={selectedId}
-      onSelect={(id) => {
-        const combo = combosById.get(id);
-        if (combo) onEdit(combo);
-      }}
-      emptyMessage="No combos have been added for this character and support yet."
-    />
-  );
-}
-
-function ComboRecordingViewer({
-  combo,
-  recordings,
-  onSelectRecording,
-}: {
-  combo: TechCombo | null;
-  recordings: RecordedVideo[];
-  onSelectRecording: (recordingId: string) => void;
-}) {
-  const recording = combo?.recordingId
-    ? (recordings.find((item) => item.id === combo.recordingId) ?? null)
-    : null;
-
-  return (
-    <Stack spacing={1.5} sx={{ minWidth: 0, minHeight: 360 }}>
-      {recording ? (
-        <>
-          <Button
-            size="small"
-            onClick={() => onSelectRecording(recording.id)}
-            sx={{ alignSelf: "flex-start" }}
-          >
-            Open in recording library
-          </Button>
-          <Box sx={{ flex: 1, minHeight: 320, minWidth: 0 }}>
-            <RecordingViewer active panelOnly selectedRecordingId={recording.id} />
-          </Box>
-        </>
-      ) : (
-        <Typography color="text.secondary">
-          {combo?.recordingId
-            ? "The linked recording is unavailable."
-            : "Link a recording to this combo to play it here."}
-        </Typography>
-      )}
-    </Stack>
-  );
-}
-
-export function TechSection({
-  active,
-  recordingsRefreshToken,
-  combosOnly = false,
-}: {
-  active: boolean;
-  recordingsRefreshToken: number;
-  combosOnly?: boolean;
-}) {
-  const { state: obsState, settings: obsSettings, busy: obsBusy, moveCapture } = useObsRecording();
+export function TechSection() {
   const [character, setCharacter] = useState(characters[0].value);
   const [support, setSupport] = useState(supportsByCharacter[characters[0].value][0]);
   const [section, setSection] = useState(() => {
@@ -842,79 +442,14 @@ export function TechSection({
     const savedIndex = techEditorSections.findIndex((value) => value === savedSection);
     return savedIndex >= 0 ? savedIndex : 0;
   });
-  const [selectedComboId, setSelectedComboId] = useState<string | null>(null);
-  const [comboInlineFilters, setComboInlineFilters] = useState(emptyComboInlineFilters);
   const [catalog, setCatalog] = useState<TechCatalog>(loadTechCatalog);
   const [moveDraft, setMoveDraft] = useState<MoveDraft>(emptyMoveDraft);
   const [editingMoveId, setEditingMoveId] = useState<string | null>(null);
   const [moveInputError, setMoveInputError] = useState<string | null>(null);
   const moveInputRef = useRef<HTMLInputElement>(null);
-  const [comboDraft, setComboDraft] = useState<ComboDraft>(emptyComboDraft);
-  const comboRouteInputRef = useRef<HTMLTextAreaElement>(null);
-  const [routeSelection, setRouteSelection] = useState<ComboNoteRange | null>(null);
-  const [editingComboId, setEditingComboId] = useState<string | null>(null);
-  const [publishingCombo, setPublishingCombo] = useState(false);
-  const [publishStatus, setPublishStatus] = useState<{
-    severity: "success" | "error";
-    message: string;
-  } | null>(null);
-  const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
-  const [pendingComboRecording, setPendingComboRecording] = useState(readPendingComboRecording);
-  const pendingComboRecordingRef = useRef(pendingComboRecording);
-  const [comboRecordingBusy, setComboRecordingBusy] = useState(false);
-  const [comboRecordingStatus, setComboRecordingStatus] = useState<{
-    severity: "success" | "error";
-    message: string;
-  } | null>(null);
-  const catalogRef = useRef(catalog);
-  catalogRef.current = catalog;
-  const editingComboIdRef = useRef(editingComboId);
-  editingComboIdRef.current = editingComboId;
-  const [publishedCombos, setPublishedCombos] = useState<PublishedCombo[] | null>(null);
-  const [checkingPublishedCombos, setCheckingPublishedCombos] = useState(false);
-  const publishedRequestId = useRef(0);
   const supports = useMemo(() => supportsByCharacter[character] ?? [], [character]);
   const techData = catalog[character] ?? { moves: [], combos: [] };
   const moves = techData.moves;
-  const combos = useMemo(
-    () => techData.combos.filter((combo) => combo.support === support),
-    [support, techData.combos],
-  );
-  const comboStarterOptions = useMemo(
-    () =>
-      combos.map((combo) => {
-        const starter = getComboStarterLabel(combo, moves);
-        return starter === "Unknown move" ? "" : starter;
-      }),
-    [combos, moves],
-  );
-  const selectedCombo = combos.find((combo) => combo.id === selectedComboId) ?? null;
-  const selectionOverlapsNote = Boolean(
-    routeSelection &&
-    comboDraft.notes.some(
-      (note) =>
-        note.range &&
-        comboNoteRangeOffsets(comboDraft.route, note.range) &&
-        comboNotesOverlap(routeSelection, note.range),
-    ),
-  );
-  const ownComboRecordingActive = Boolean(
-    pendingComboRecording &&
-    obsState.recording.active &&
-    obsState.recording.sessionId === pendingComboRecording.sessionId,
-  );
-  const selectedRecording =
-    recordings.find((item) => item.id === selectedCombo?.recordingId) ?? null;
-  const selectedPublishDraft = selectedCombo
-    ? makePublishComboDraft(selectedCombo, selectedRecording, moves)
-    : null;
-  const selectedAlreadyPublished = Boolean(
-    selectedPublishDraft &&
-    matchesPublishedCombo(
-      selectedPublishDraft,
-      publishedCombos?.find((item) => item.id === selectedPublishDraft.combo.id),
-    ),
-  );
   const stanceParentOptions = moves.filter(
     (move) => move.isStanceParent && move.id !== editingMoveId,
   );
@@ -946,242 +481,39 @@ export function TechSection({
     };
   }, [catalog]);
 
-  const updatePendingComboRecording = useCallback((next: PendingComboRecording | null) => {
-    pendingComboRecordingRef.current = next;
-    setPendingComboRecording(next);
-    try {
-      if (next) localStorage.setItem(pendingComboRecordingStorageKey, JSON.stringify(next));
-      else localStorage.removeItem(pendingComboRecordingStorageKey);
-    } catch {
-      // Keep the association for this session if local storage is unavailable.
-    }
-  }, []);
-
-  const refreshRecordings = useCallback(
-    async (finalized?: FinalizedComboRecording) => {
-      const recordingsApi = window.electronAPI?.recordings;
-      if (!recordingsApi) return;
-      try {
-        const result = await recordingsApi.list();
-        setRecordings(result.recordings);
-        const pending = pendingComboRecordingRef.current;
-        if (!pending) return;
-        const recording = result.recordings.find(
-          (item) =>
-            (item.source === "manual" && item.sessionId === pending.sessionId) ||
-            (finalized?.sessionId === pending.sessionId && item.id === finalized.recordingId),
-        );
-        if (!recording) {
-          if (finalized?.sessionId === pending.sessionId) {
-            setComboRecordingStatus({
-              severity: "error",
-              message:
-                "The finished recording was not found in the recording library. Try finding it again or link it manually.",
-            });
-          }
-          return;
-        }
-        if (
-          !catalogRef.current[pending.character]?.combos.some(
-            (combo) => combo.id === pending.comboId,
-          )
-        ) {
-          setComboRecordingStatus({
-            severity: "error",
-            message:
-              "The combo for this recording is no longer in the local catalog. Link the recording manually if needed.",
-          });
-          updatePendingComboRecording(null);
-          return;
-        }
-        setCatalog((current) => ({
-          ...current,
-          [pending.character]: {
-            ...current[pending.character],
-            combos: current[pending.character].combos.map((combo) =>
-              combo.id === pending.comboId ? { ...combo, recordingId: recording.id } : combo,
-            ),
-          },
-        }));
-        if (editingComboIdRef.current === pending.comboId) {
-          setComboDraft((current) => ({ ...current, recordingId: recording.id }));
-        }
-        updatePendingComboRecording(null);
-        setPublishStatus(null);
-        setComboRecordingStatus({
-          severity: "success",
-          message: `Linked ${recording.name} to the combo.`,
-        });
-      } catch (error) {
-        if (pendingComboRecordingRef.current) {
-          setComboRecordingStatus({
-            severity: "error",
-            message: `Could not check the finished recording: ${error instanceof Error ? error.message : String(error)}`,
-          });
-        }
-        // Keep the last loaded options available if a refresh fails.
-      }
-    },
-    [updatePendingComboRecording],
-  );
+  useEffect(() => {
+    localStorage.setItem(techEditorSectionStorageKey, techEditorSections[section]);
+  }, [section]);
 
   useEffect(() => {
-    if (!active) return;
-    void refreshRecordings();
-  }, [active, recordingsRefreshToken, refreshRecordings]);
-
-  useEffect(() => {
-    const recordingsApi = window.electronAPI?.recordings;
-    if (!recordingsApi) return;
-    return recordingsApi.onFinalized((finalized) => {
-      if (pendingComboRecordingRef.current?.sessionId === finalized.sessionId) {
-        void refreshRecordings(finalized);
-      }
-    });
-  }, [refreshRecordings]);
-
-  useEffect(() => {
-    if (!active) return;
-    const requestId = ++publishedRequestId.current;
-    setPublishedCombos(null);
-    setCheckingPublishedCombos(true);
-    void fetchPublishedCombos().then(
-      (items) => {
-        if (publishedRequestId.current === requestId) {
-          setPublishedCombos(items);
-          setCheckingPublishedCombos(false);
-        }
-      },
-      () => {
-        if (publishedRequestId.current === requestId) {
-          setPublishedCombos(null);
-          setCheckingPublishedCombos(false);
-        }
-      },
-    );
-    return () => {
-      publishedRequestId.current += 1;
-    };
-  }, [active]);
-
-  useEffect(() => {
-    const selectCombo = (comboId: string) => {
-      for (const [characterValue, data] of Object.entries(catalog)) {
-        const combo = data.combos.find((candidate) => candidate.id === comboId);
-        if (!combo) continue;
-        setCharacter(characterValue);
-        setSupport(combo.support);
-        setComboInlineFilters(emptyComboInlineFilters());
-        setSelectedComboId(combo.id);
-        setPublishStatus(null);
-        return;
-      }
-    };
-    const handleComboSelection = (event: Event) => {
-      const comboId = (event as CustomEvent<string>).detail;
-      if (typeof comboId === "string") selectCombo(comboId);
-    };
-    const pendingComboId = localStorage.getItem(techSelectedComboStorageKey);
-    if (pendingComboId) {
-      selectCombo(pendingComboId);
-      localStorage.removeItem(techSelectedComboStorageKey);
-    }
-    window.addEventListener(techSelectComboEvent, handleComboSelection);
-    return () => window.removeEventListener(techSelectComboEvent, handleComboSelection);
+    localStorage.setItem(techCatalogStorageKey, JSON.stringify(catalog));
+    window.dispatchEvent(new Event(techCatalogUpdatedEvent));
   }, [catalog]);
 
-  const selectLinkedRecording = (recordingId: string) => {
-    localStorage.setItem(techSelectedRecordingStorageKey, recordingId);
-    window.dispatchEvent(new CustomEvent(techSelectRecordingEvent, { detail: recordingId }));
-  };
-
-  const startComboRecording = async () => {
-    if (!selectedCombo || !window.electronAPI?.obs || pendingComboRecordingRef.current) return;
-    if (
-      obsState.status !== "connected" ||
-      obsState.recording.active ||
-      obsState.automation.enabled ||
-      !obsSettings.recordDirectory.trim()
-    ) {
-      setComboRecordingStatus({
-        severity: "error",
-        message:
-          "Connect OBS, configure its recording folder, and stop any active or automatic recording first.",
-      });
-      return;
-    }
-    if (moveCapture.armed) {
-      setComboRecordingStatus({
-        severity: "error",
-        message: "Disarm the move take before recording a combo.",
-      });
-      return;
-    }
-    setComboRecordingBusy(true);
-    setComboRecordingStatus(null);
-    try {
-      const started = await window.electronAPI.obs.startManualRecording({
-        setup: {
-          profileName: obsSettings.profileName,
-          recordDirectory: obsSettings.recordDirectory,
-        },
-        fileNameBase: comboRecordingBaseName(
-          selectedCombo,
-          catalog[selectedCombo.character]?.moves ?? [],
-        ),
-      });
-      updatePendingComboRecording({
-        character: selectedCombo.character,
-        comboId: selectedCombo.id,
-        sessionId: started.sessionId,
-      });
-      void refreshRecordings();
-    } catch (error) {
-      setComboRecordingStatus({
-        severity: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setComboRecordingBusy(false);
-    }
-  };
-
-  const stopComboRecording = async () => {
-    if (!window.electronAPI?.obs || !ownComboRecordingActive) return;
-    setComboRecordingBusy(true);
-    setComboRecordingStatus(null);
-    try {
-      const result = await window.electronAPI.obs.stopRecording();
-      if (!result.outputPath) {
-        setComboRecordingStatus({
-          severity: "error",
-          message:
-            "OBS stopped without a saved video. You can find a finished recording again or forget this link.",
-        });
-      }
-      await refreshRecordings();
-    } catch (error) {
-      setComboRecordingStatus({
-        severity: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setComboRecordingBusy(false);
-    }
-  };
+  useEffect(() => {
+    const syncCatalog = () => {
+      const stored = localStorage.getItem(techCatalogStorageKey);
+      if (stored && stored !== JSON.stringify(catalog)) setCatalog(loadTechCatalog());
+    };
+    window.addEventListener(techCatalogUpdatedEvent, syncCatalog);
+    window.addEventListener("storage", syncCatalog);
+    return () => {
+      window.removeEventListener(techCatalogUpdatedEvent, syncCatalog);
+      window.removeEventListener("storage", syncCatalog);
+    };
+  }, [catalog]);
 
   const changeCharacter = (nextCharacter: string) => {
     setCharacter(nextCharacter);
     setSupport(supportsByCharacter[nextCharacter]?.[0] ?? "");
-    setComboInlineFilters(emptyComboInlineFilters());
-    setSelectedComboId(null);
     setMoveDraft(emptyMoveDraft);
     setEditingMoveId(null);
     setMoveInputError(null);
-    setComboDraft(emptyComboDraft);
-    setRouteSelection(null);
-    setEditingComboId(null);
-    setPublishStatus(null);
+  };
+
+  const selectLinkedRecording = (recordingId: string) => {
+    localStorage.setItem(techSelectedRecordingStorageKey, recordingId);
+    window.dispatchEvent(new CustomEvent(techSelectRecordingEvent, { detail: recordingId }));
   };
 
   const editMove = (move: TechMove) => {
@@ -1380,10 +712,6 @@ export function TechSection({
               chargedMoveId: removedIds.has(move.chargedMoveId ?? "") ? null : move.chargedMoveId,
             })),
           supportMoves: data.supportMoves?.filter((move) => !removedIds.has(move.baseMoveId)),
-          combos: data.combos.map((combo) => ({
-            ...combo,
-            moveIds: combo.moveIds.map((id) => (id && removedIds.has(id) ? null : id)),
-          })),
         },
       };
     });
@@ -1392,167 +720,13 @@ export function TechSection({
     setMoveInputError(null);
   };
 
-  const editCombo = (combo: TechCombo) => {
-    setPublishStatus(null);
-    setSelectedComboId(combo.id);
-    setEditingComboId(combo.id);
-    setComboDraft({
-      route: combo.route,
-      routingMode: combo.routingMode === "unique" ? "unique" : "autopilot",
-      screenPosition: comboScreenPositionOrEmpty(combo.screenPosition),
-      damage: combo.damage,
-      notes: [...(combo.notes ?? [])],
-      requiresCounterhit: combo.requiresCounterhit === true,
-      initialConversionHitconfirmable: combo.initialConversionHitconfirmable === true,
-      initialConversionSafeOnBlock: combo.initialConversionSafeOnBlock === true,
-      pips: String(combo.resourceCosts.pips ?? 0),
-      flow: String(combo.resourceCosts.flow ?? 0),
-      recordingId: combo.recordingId,
-    });
-    setRouteSelection(null);
-  };
-
-  const saveCombo = () => {
-    if (!comboDraft.route.trim() || !isComboScreenPosition(comboDraft.screenPosition)) return;
-    const comboValues = {
-      character,
-      support,
-      moveIds: resolveComboRoute(comboDraft.route, moves),
-      route: comboDraft.route.trim(),
-      routingMode: comboDraft.routingMode,
-      screenPosition: comboDraft.screenPosition.trim(),
-      damage: comboDraft.damage.trim(),
-      notes: comboDraft.notes
-        .map((note) => ({ ...note, text: note.text.trim() }))
-        .filter((note) => note.text),
-      requiresCounterhit: comboDraft.requiresCounterhit,
-      initialConversionHitconfirmable: comboDraft.initialConversionHitconfirmable,
-      initialConversionSafeOnBlock: comboDraft.initialConversionSafeOnBlock,
-      resourceCosts: {
-        pips: parseMoveNumber(comboDraft.pips) ?? 0,
-        flow: parseMoveNumber(comboDraft.flow) ?? 0,
-      },
-      recordingId: comboDraft.recordingId,
-    };
-    const comboId = editingComboId ?? `${character}-${support}-${Date.now()}`;
-    setCatalog((current) => ({
-      ...current,
-      [character]: {
-        ...(current[character] ?? { moves: [] }),
-        combos: editingComboId
-          ? (current[character]?.combos ?? []).map((combo) =>
-              combo.id === editingComboId ? { ...combo, ...comboValues } : combo,
-            )
-          : [...(current[character]?.combos ?? []), { id: comboId, ...comboValues }],
-      },
-    }));
-    setSelectedComboId(comboId);
-    setComboDraft(emptyComboDraft);
-    setRouteSelection(null);
-    setEditingComboId(null);
-  };
-
-  const publishSelectedCombo = async () => {
-    if (!selectedCombo) return;
-    if (
-      selectedCombo.notes?.some(
-        (note) => note.range && !comboNoteRangeOffsets(selectedCombo.route, note.range),
-      )
-    ) {
-      setPublishStatus({
-        severity: "error",
-        message:
-          "Review segment notes whose move ranges no longer match the route before publishing.",
-      });
-      return;
-    }
-    if (catalogApiUrl !== "https://labatar-catalog.landenhanni.workers.dev") {
-      setPublishStatus({
-        severity: "error",
-        message: "Direct publishing is available only for the hosted catalog.",
-      });
-      return;
-    }
-    const latestRecordings =
-      (await window.electronAPI?.recordings.list().then(
-        (result) => result.recordings,
-        () => recordings,
-      )) ?? recordings;
-    setRecordings(latestRecordings);
-    const recording =
-      latestRecordings.find((item) => item.id === selectedCombo.recordingId) ?? null;
-    const draft = makePublishComboDraft(selectedCombo, recording, moves);
-    if (!draft.combo.youtubeUrl.trim()) {
-      setPublishStatus({ severity: "error", message: "Link a YouTube video before publishing." });
-      return;
-    }
-    const publisher = window.electronAPI?.catalogPublisher;
-    if (!publisher) {
-      setPublishStatus({ severity: "error", message: "Publishing requires the desktop app." });
-      return;
-    }
-    setPublishingCombo(true);
-    setPublishStatus(null);
-    try {
-      ++publishedRequestId.current;
-      setCheckingPublishedCombos(false);
-      try {
-        const latestPublished = await fetchPublishedCombos();
-        setPublishedCombos(latestPublished);
-        if (
-          matchesPublishedCombo(
-            draft,
-            latestPublished.find((item) => item.id === draft.combo.id),
-          )
-        ) {
-          setPublishStatus({
-            severity: "success",
-            message: "This combo already matches the published version.",
-          });
-          return;
-        }
-      } catch {
-        // Publishing still uses the editor's current revision when the public read is unavailable.
-      }
-      const result = await publisher.publishCombo(draft);
-      if (!result.cancelled) {
-        const published = publishedComboFromDraft(draft);
-        if (published) {
-          setPublishedCombos((current) => [
-            ...(current ?? []).filter((item) => item.id !== published.id),
-            published,
-          ]);
-        }
-        setPublishStatus({
-          severity: "success",
-          message: `Published revision ${result.revision}. The public catalog may take up to 60 seconds to refresh.`,
-        });
-      }
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, "")
-          : "Could not publish the combo.";
-      setPublishStatus({
-        severity: "error",
-        message,
-      });
-    } finally {
-      setPublishingCombo(false);
-    }
-  };
-
   return (
     <Stack spacing={2} sx={{ textAlign: "left" }}>
       <Paper variant="outlined" sx={{ p: 2 }}>
-        {!combosOnly && (
-          <>
-            <Typography variant="h6">Tech editor</Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Explore character and support-specific moves, pressure, and other notes.
-            </Typography>
-          </>
-        )}
+        <Typography variant="h6">Tech editor</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Explore character and support-specific moves, pressure, and other notes.
+        </Typography>
         <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2, alignItems: "center" }}>
           <FormControl size="small" sx={{ minWidth: 220 }}>
             <InputLabel id="tech-character-label">Character</InputLabel>
@@ -1577,8 +751,6 @@ export function TechSection({
               label="Support"
               onChange={(event) => {
                 setSupport(event.target.value);
-                setSelectedComboId(null);
-                setComboInlineFilters(emptyComboInlineFilters());
               }}
             >
               {supports.map((option) => (
@@ -1588,27 +760,18 @@ export function TechSection({
               ))}
             </Select>
           </FormControl>
-          {combosOnly && (
-            <ComboInlineFilters
-              starters={comboStarterOptions}
-              filters={comboInlineFilters}
-              onChange={setComboInlineFilters}
-            />
-          )}
         </Box>
       </Paper>
 
       <Paper variant="outlined">
-        {!combosOnly && (
-          <Tabs value={section} onChange={(_, nextSection: number) => setSection(nextSection)}>
-            <Tab label="Moves" />
-            <Tab label="Pressure" />
-            <Tab label="Neutral" />
-            <Tab label="Misc" />
-          </Tabs>
-        )}
+        <Tabs value={section} onChange={(_, nextSection: number) => setSection(nextSection)}>
+          <Tab label="Moves" />
+          <Tab label="Pressure" />
+          <Tab label="Neutral" />
+          <Tab label="Misc" />
+        </Tabs>
         <Box sx={{ p: 2 }}>
-          {!combosOnly && section === 0 && (
+          {section === 0 && (
             <Stack spacing={2}>
               <Typography variant="subtitle1">
                 Moves for {characters.find((option) => option.value === character)?.label}
@@ -2045,541 +1208,17 @@ export function TechSection({
               </Box>
             </Stack>
           )}
-          {combosOnly && (
-            <Stack spacing={2}>
-              <ComboWorkspace>
-                <Stack spacing={2} sx={{ minWidth: 0 }}>
-                  <ComboSelector
-                    combos={combos}
-                    moves={moves}
-                    recordings={recordings}
-                    publishedCombos={publishedCombos}
-                    inlineFilters={comboInlineFilters}
-                    selectedId={selectedComboId}
-                    onEdit={editCombo}
-                  />
-                  <Paper variant="outlined" sx={{ p: 2 }}>
-                    <Stack spacing={1.5}>
-                      <Typography variant="subtitle2">
-                        {editingComboId ? "Edit combo" : "Add combo"}
-                      </Typography>
-                      <TextField
-                        label="Move string"
-                        placeholder="2B > 5C > 236F~1-9X"
-                        helperText="Select moves in this field, then choose Note for selection. Use ~ before a stance followup and ! after a move to mark a crit."
-                        multiline
-                        minRows={2}
-                        size="small"
-                        inputRef={comboRouteInputRef}
-                        value={comboDraft.route}
-                        onChange={(event) => {
-                          setComboDraft((current) => ({ ...current, route: event.target.value }));
-                          setRouteSelection(null);
-                        }}
-                        onSelect={(event) => {
-                          const input =
-                            event.target instanceof HTMLTextAreaElement
-                              ? event.target
-                              : comboRouteInputRef.current;
-                          if (input) {
-                            setRouteSelection(
-                              comboNoteRangeFromSelection(
-                                comboDraft.route,
-                                input.selectionStart,
-                                input.selectionEnd,
-                              ),
-                            );
-                          }
-                        }}
-                        required
-                      />
-                      <Stack
-                        direction="row"
-                        spacing={1.5}
-                        sx={{ alignItems: "center", flexWrap: "wrap" }}
-                      >
-                        <Typography variant="body2">Routing</Typography>
-                        <ToggleButtonGroup
-                          size="small"
-                          exclusive
-                          aria-label="Routing mode"
-                          value={comboDraft.routingMode}
-                          onChange={(_, value: "autopilot" | "unique" | null) => {
-                            if (value)
-                              setComboDraft((current) => ({ ...current, routingMode: value }));
-                          }}
-                        >
-                          <ToggleButton value="autopilot">Autopilot</ToggleButton>
-                          <ToggleButton value="unique">Unique routing</ToggleButton>
-                        </ToggleButtonGroup>
-                      </Stack>
-                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                        <FormControl size="small" sx={{ flex: 1 }}>
-                          <InputLabel id="tech-combo-position-label">Screen position</InputLabel>
-                          <Select
-                            labelId="tech-combo-position-label"
-                            value={comboDraft.screenPosition}
-                            label="Screen position"
-                            onChange={(event) =>
-                              setComboDraft((current) => ({
-                                ...current,
-                                screenPosition: event.target.value,
-                              }))
-                            }
-                          >
-                            <MenuItem value="" disabled>
-                              Choose a position
-                            </MenuItem>
-                            {comboScreenPositions.map((position) => (
-                              <MenuItem key={position} value={position}>
-                                {position}
-                              </MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                        <TextField
-                          label="Damage"
-                          size="small"
-                          value={comboDraft.damage}
-                          onChange={(event) =>
-                            setComboDraft((current) => ({ ...current, damage: event.target.value }))
-                          }
-                          sx={{ flex: 1 }}
-                        />
-                        <TextField
-                          label="Pips"
-                          type="number"
-                          size="small"
-                          value={comboDraft.pips}
-                          onChange={(event) =>
-                            setComboDraft((current) => ({ ...current, pips: event.target.value }))
-                          }
-                          sx={{ width: 100 }}
-                        />
-                        <TextField
-                          label="Flow"
-                          type="number"
-                          size="small"
-                          value={comboDraft.flow}
-                          onChange={(event) =>
-                            setComboDraft((current) => ({ ...current, flow: event.target.value }))
-                          }
-                          sx={{ width: 100 }}
-                        />
-                      </Stack>
-                      <FormControlLabel
-                        control={
-                          <Checkbox
-                            checked={comboDraft.requiresCounterhit}
-                            onChange={(event) =>
-                              setComboDraft((current) => ({
-                                ...current,
-                                requiresCounterhit: event.target.checked,
-                              }))
-                            }
-                          />
-                        }
-                        label="Requires counterhit"
-                      />
-                      <FormControlLabel
-                        control={
-                          <Checkbox
-                            checked={comboDraft.initialConversionHitconfirmable}
-                            onChange={(event) =>
-                              setComboDraft((current) => ({
-                                ...current,
-                                initialConversionHitconfirmable: event.target.checked,
-                              }))
-                            }
-                          />
-                        }
-                        label="Initial conversion hitconfirmable"
-                      />
-                      <FormControlLabel
-                        control={
-                          <Checkbox
-                            checked={comboDraft.initialConversionSafeOnBlock}
-                            onChange={(event) =>
-                              setComboDraft((current) => ({
-                                ...current,
-                                initialConversionSafeOnBlock: event.target.checked,
-                              }))
-                            }
-                          />
-                        }
-                        label="Initial conversion safe on block"
-                      />
-                      <Box>
-                        <Stack
-                          direction="row"
-                          sx={{
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            flexWrap: "wrap",
-                            gap: 1,
-                            mb: 1,
-                          }}
-                        >
-                          <Typography variant="subtitle2">Notes</Typography>
-                          <Stack direction="row" spacing={1}>
-                            <Button
-                              size="small"
-                              disabled={
-                                !routeSelection ||
-                                selectionOverlapsNote ||
-                                comboDraft.notes.length >= 20
-                              }
-                              onClick={() => {
-                                if (!routeSelection) return;
-                                setComboDraft((current) => ({
-                                  ...current,
-                                  notes: [
-                                    ...current.notes,
-                                    {
-                                      id: newComboNoteId(),
-                                      text: "",
-                                      category: "execution",
-                                      range: routeSelection,
-                                    },
-                                  ],
-                                }));
-                                setRouteSelection(null);
-                              }}
-                            >
-                              + Note for selection
-                            </Button>
-                            <Button
-                              size="small"
-                              onClick={() =>
-                                setComboDraft((current) => ({
-                                  ...current,
-                                  notes: [
-                                    ...current.notes,
-                                    { id: newComboNoteId(), text: "", category: "general" },
-                                  ],
-                                }))
-                              }
-                              disabled={comboDraft.notes.length >= 20}
-                            >
-                              + General note
-                            </Button>
-                          </Stack>
-                        </Stack>
-                        {routeSelection && (
-                          <Typography
-                            variant="caption"
-                            color={selectionOverlapsNote ? "error" : "text.secondary"}
-                            sx={{ display: "block", mb: 1 }}
-                          >
-                            {selectionOverlapsNote
-                              ? "This selection overlaps another segment note."
-                              : `Selected: ${routeSelection.excerpt}`}
-                          </Typography>
-                        )}
-                        <Stack spacing={1}>
-                          {comboDraft.notes.map((note, index) => (
-                            <Box
-                              key={note.id}
-                              sx={{ p: 1.5, border: 1, borderColor: "divider", borderRadius: 1 }}
-                            >
-                              <Stack
-                                direction="row"
-                                sx={{
-                                  alignItems: "center",
-                                  justifyContent: "space-between",
-                                  gap: 1,
-                                  mb: 1,
-                                }}
-                              >
-                                <Typography
-                                  variant="caption"
-                                  color={
-                                    note.range &&
-                                    !comboNoteRangeOffsets(comboDraft.route, note.range)
-                                      ? "error"
-                                      : "text.secondary"
-                                  }
-                                  sx={{ overflowWrap: "anywhere" }}
-                                >
-                                  {note.range
-                                    ? `${note.range.excerpt}${comboNoteRangeOffsets(comboDraft.route, note.range) ? "" : " · Range needs review"}`
-                                    : `General note ${index + 1}`}
-                                </Typography>
-                                <Button
-                                  size="small"
-                                  color="error"
-                                  onClick={() =>
-                                    setComboDraft((current) => ({
-                                      ...current,
-                                      notes: current.notes.filter((item) => item.id !== note.id),
-                                    }))
-                                  }
-                                >
-                                  Remove
-                                </Button>
-                              </Stack>
-                              <Stack
-                                direction={{ xs: "column", sm: "row" }}
-                                spacing={1}
-                                sx={{ alignItems: "flex-start" }}
-                              >
-                                <TextField
-                                  select
-                                  size="small"
-                                  label="Type"
-                                  value={note.category}
-                                  sx={{ minWidth: 145 }}
-                                  onChange={(event) =>
-                                    setComboDraft((current) => ({
-                                      ...current,
-                                      notes: current.notes.map((item) =>
-                                        item.id === note.id
-                                          ? {
-                                              ...item,
-                                              category: event.target.value as ComboNote["category"],
-                                            }
-                                          : item,
-                                      ),
-                                    }))
-                                  }
-                                >
-                                  {(["general", "execution", "situational"] as const).map(
-                                    (category) => (
-                                      <MenuItem key={category} value={category}>
-                                        {comboNoteCategoryLabel(category)}
-                                      </MenuItem>
-                                    ),
-                                  )}
-                                </TextField>
-                                <TextField
-                                  label={`Note ${index + 1}`}
-                                  multiline
-                                  minRows={2}
-                                  size="small"
-                                  fullWidth
-                                  value={note.text}
-                                  slotProps={{ htmlInput: { maxLength: 1000 } }}
-                                  onChange={(event) =>
-                                    setComboDraft((current) => ({
-                                      ...current,
-                                      notes: current.notes.map((item) =>
-                                        item.id === note.id
-                                          ? { ...item, text: event.target.value }
-                                          : item,
-                                      ),
-                                    }))
-                                  }
-                                />
-                              </Stack>
-                              {note.range && routeSelection && (
-                                <Button
-                                  size="small"
-                                  disabled={comboDraft.notes.some(
-                                    (item) =>
-                                      item.id !== note.id &&
-                                      item.range &&
-                                      comboNoteRangeOffsets(comboDraft.route, item.range) &&
-                                      comboNotesOverlap(routeSelection, item.range),
-                                  )}
-                                  onClick={() => {
-                                    setComboDraft((current) => ({
-                                      ...current,
-                                      notes: current.notes.map((item) =>
-                                        item.id === note.id
-                                          ? { ...item, range: routeSelection }
-                                          : item,
-                                      ),
-                                    }));
-                                    setRouteSelection(null);
-                                  }}
-                                >
-                                  Use current selection
-                                </Button>
-                              )}
-                            </Box>
-                          ))}
-                        </Stack>
-                      </Box>
-                      <Autocomplete
-                        options={recordings}
-                        onOpen={() => void refreshRecordings()}
-                        value={
-                          recordings.find((recording) => recording.id === comboDraft.recordingId) ??
-                          null
-                        }
-                        onChange={(_, recording) =>
-                          setComboDraft((current) => ({
-                            ...current,
-                            recordingId: recording?.id ?? null,
-                          }))
-                        }
-                        getOptionLabel={(recording) => recording.name}
-                        isOptionEqualToValue={(option, value) => option.id === value.id}
-                        renderInput={(params) => (
-                          <TextField {...params} label="Linked recording" size="small" />
-                        )}
-                        clearOnEscape
-                      />
-                      <Stack direction="row" spacing={1}>
-                        <Button
-                          variant="contained"
-                          onClick={saveCombo}
-                          disabled={
-                            !comboDraft.route.trim() ||
-                            !isComboScreenPosition(comboDraft.screenPosition)
-                          }
-                        >
-                          {editingComboId ? "Save changes" : "Add combo"}
-                        </Button>
-                        {editingComboId && (
-                          <Button
-                            onClick={() => {
-                              setComboDraft(emptyComboDraft);
-                              setRouteSelection(null);
-                              setEditingComboId(null);
-                            }}
-                          >
-                            Cancel
-                          </Button>
-                        )}
-                      </Stack>
-                    </Stack>
-                  </Paper>
-                </Stack>
-                <ComboRecordingViewer
-                  combo={selectedCombo}
-                  recordings={recordings}
-                  onSelectRecording={selectLinkedRecording}
-                />
-              </ComboWorkspace>
-              {(selectedCombo || pendingComboRecording || comboRecordingStatus) && (
-                <Stack spacing={1} sx={{ alignItems: "flex-start" }}>
-                  {pendingComboRecording ? (
-                    <>
-                      <Typography variant="body2">
-                        Recording for{" "}
-                        {catalog[pendingComboRecording.character]?.combos.find(
-                          (combo) => combo.id === pendingComboRecording.comboId,
-                        )?.route ?? pendingComboRecording.comboId}
-                      </Typography>
-                      {ownComboRecordingActive ? (
-                        <Button
-                          variant="outlined"
-                          color="error"
-                          onClick={() => void stopComboRecording()}
-                          disabled={comboRecordingBusy || obsBusy}
-                        >
-                          Stop combo recording
-                        </Button>
-                      ) : (
-                        <Stack direction="row" spacing={1}>
-                          <Button
-                            onClick={() => void refreshRecordings()}
-                            disabled={comboRecordingBusy}
-                          >
-                            Find finished recording
-                          </Button>
-                          <Button
-                            onClick={() => {
-                              updatePendingComboRecording(null);
-                              setComboRecordingStatus(null);
-                            }}
-                            disabled={comboRecordingBusy}
-                          >
-                            Forget pending link
-                          </Button>
-                        </Stack>
-                      )}
-                      {ownComboRecordingActive && (
-                        <Typography variant="caption" color="text.secondary">
-                          Stop here, with F9, or in OBS. The saved recording will link
-                          automatically.
-                        </Typography>
-                      )}
-                    </>
-                  ) : selectedCombo ? (
-                    <Tooltip
-                      title={
-                        obsState.status !== "connected"
-                          ? "Connect OBS first."
-                          : !obsSettings.recordDirectory.trim()
-                            ? "Configure the OBS recording folder first."
-                            : obsState.recording.active || obsState.automation.enabled
-                              ? "Stop active and automatic recording first."
-                              : moveCapture.armed
-                                ? "Disarm the move take first."
-                                : selectedCombo.recordingId
-                                  ? "The finished recording will replace this combo's current recording link."
-                                  : ""
-                      }
-                    >
-                      <span>
-                        <Button
-                          variant="outlined"
-                          onClick={() => void startComboRecording()}
-                          disabled={
-                            comboRecordingBusy ||
-                            obsBusy ||
-                            obsState.status !== "connected" ||
-                            !obsSettings.recordDirectory.trim() ||
-                            obsState.recording.active ||
-                            obsState.automation.enabled ||
-                            Boolean(moveCapture.armed)
-                          }
-                        >
-                          Record for this combo
-                        </Button>
-                      </span>
-                    </Tooltip>
-                  ) : null}
-                  {selectedCombo && (
-                    <>
-                      <Tooltip
-                        title={
-                          selectedAlreadyPublished
-                            ? "This combo already matches the published version."
-                            : checkingPublishedCombos
-                              ? "Checking the published catalog."
-                              : ""
-                        }
-                      >
-                        <span>
-                          <Button
-                            variant="outlined"
-                            onClick={() => void publishSelectedCombo()}
-                            disabled={
-                              publishingCombo || checkingPublishedCombos || selectedAlreadyPublished
-                            }
-                          >
-                            {publishingCombo ? "Publishing…" : "Publish combo"}
-                          </Button>
-                        </span>
-                      </Tooltip>
-                      {publishStatus && (
-                        <Alert severity={publishStatus.severity}>{publishStatus.message}</Alert>
-                      )}
-                    </>
-                  )}
-                  {comboRecordingStatus && (
-                    <Alert severity={comboRecordingStatus.severity}>
-                      {comboRecordingStatus.message}
-                    </Alert>
-                  )}
-                </Stack>
-              )}
-            </Stack>
-          )}
-          {!combosOnly && section === 1 && (
+          {section === 1 && (
             <Typography color="text.secondary">
               Pressure strings for this character and support will appear here.
             </Typography>
           )}
-          {!combosOnly && section === 2 && (
+          {section === 2 && (
             <Typography color="text.secondary">
               Neutral tools and game plans for this character and support will appear here.
             </Typography>
           )}
-          {!combosOnly && section === 3 && (
+          {section === 3 && (
             <Typography color="text.secondary">
               Miscellaneous tech for this character and support will appear here.
             </Typography>

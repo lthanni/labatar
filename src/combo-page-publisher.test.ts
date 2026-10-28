@@ -2,7 +2,6 @@ import { describe, expect, it } from "vite-plus/test";
 import { initialPublisherForm, publisherDraft } from "./CombosPage";
 import { comboItems, localRevisionDraft } from "./combo-gameplan";
 import { publishedComboFromDraft } from "./publish-combo-draft";
-import type { TechCombo } from "./tech-types";
 import type { PublishedCombo } from "./published-catalog";
 
 const published: PublishedCombo = {
@@ -52,7 +51,7 @@ describe("local catalog revision publishing", () => {
       sourceCandidateId,
     );
   });
-  it("recovers imported public fields and a linked candidate video without inventing stale move links", () => {
+  it("uses the local draft's YouTube link before a linked recording's link", () => {
     const local = {
       id: "local-import",
       characterId: "aang",
@@ -69,20 +68,6 @@ describe("local catalog revision publishing", () => {
       counterhit: false,
       youtubeUrl: "",
     };
-    const legacy: TechCombo = {
-      id: "dev-import",
-      character: "aang",
-      support: "gyatso",
-      name: "EXScooter optimal?",
-      difficulty: 3,
-      editorPickContext: "Universal off 2B",
-      moveIds: ["aang-2b", null, "aang-236a"],
-      route: local.route,
-      screenPosition: local.screenPosition,
-      damage: local.damage,
-      resourceCosts: { pips: 1, flow: 0 },
-      recordingId: null,
-    };
     const item = comboItems([], [], [local])[0];
     const candidateUrl = "https://youtu.be/M7lc1UVf-VE";
     expect(
@@ -91,44 +76,6 @@ describe("local catalog revision publishing", () => {
         "https://youtu.be/aaaaaaaaaaa",
       ).youtubeUrl,
     ).toBe(candidateUrl);
-    const form = initialPublisherForm(
-      {
-        ...item,
-        candidate: {
-          id: "queue-1",
-          combo: {
-            id: "dev-import",
-            characterId: "aang",
-            supportId: "gyatso",
-            route: local.route,
-            moveIds: [],
-            screenPosition: local.screenPosition,
-            damage: local.damage,
-            notes: [],
-            resourceCosts: { pips: 1, flow: 0 },
-            mechanics: [],
-          },
-          fileName: "combo.mp4",
-          fileSize: 1,
-          status: "uploaded",
-          rejectionReason: "",
-          youtubeUrl: candidateUrl,
-          createdAt: "2026-01-01",
-          updatedAt: "2026-01-01",
-        },
-      },
-      "https://youtu.be/aaaaaaaaaaa",
-      legacy,
-    );
-    expect(form).toMatchObject({
-      name: "EXScooter optimal?",
-      difficulty: "3",
-      editorPickContext: "Universal off 2B",
-      youtubeUrl: candidateUrl,
-      moveIds: "aang-2b\naang-236a",
-    });
-    expect(form.backendId).toContain("exscooter-optimal");
-    expect(initialPublisherForm({ ...item, route: "2B > 236B" }, "", legacy).moveIds).toBe("");
   });
   it("keeps public fields that the local route editor did not change", () => {
     const source = comboItems([published], [], [])[0];

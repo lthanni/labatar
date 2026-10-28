@@ -2,15 +2,28 @@
 
 This folder is a Cloudflare Worker backed by D1 and an R2 bucket for combo candidate MP4s. Published moves and combos are publicly readable. Upload and editor routes require a valid Cloudflare Access JWT and an approved email in D1 or the private `EDITOR_EMAILS` Worker secret. Editors can also publish and review candidates.
 
-The desktop app has a public Combos page that fetches published records from this Worker and saves an offline snapshot in IndexedDB. Players can also keep local combos and personal tracking on their device. The development-only Tech editor and recording workflow still use the local draft catalog. Existing drafts are not published automatically; select a combo and choose **Publish combo** to publish it.
+The desktop app has a public Combos page that fetches published records from this Worker and saves an offline snapshot in IndexedDB. Players can also keep local combos and personal tracking on their device. Existing drafts are not published automatically; select a combo and choose **Publish combo** to publish it.
 
 The desktop reader uses `https://labatar-catalog.landenhanni.workers.dev` by default. Set `VITE_CATALOG_API_URL` before starting the app to point it at a local Worker, for example `http://localhost:8787`. The override is a public build-time setting, not a credential. Direct publishing is enabled only when the reader targets the hosted catalog; the app sends editor writes to that same hosted Worker.
+
+## Discord candidate alerts
+
+The Worker can post to a private Discord channel when a combo MP4 finishes uploading and enters the pending review queue. It sends the character, support, route, and candidate ID. It does not send the MP4, submitter identity, local file path, or upload token. A retry of an already completed upload does not send another alert. Discord delivery is best effort: a failed alert is logged and does not fail the candidate upload.
+
+1. In the Discord server, create a private text channel for alerts. Under **Server Settings → Integrations → Webhooks**, create a webhook for that channel and copy its URL. No Discord bot application is needed for these one-way alerts.
+2. In **Cloudflare → Workers & Pages → labatar-catalog → Settings → Variables and Secrets**, add the URL as a **Secret** named `DISCORD_ALERT_WEBHOOK_URL`. Do not put the URL in `wrangler.toml`, the desktop app, or this repository. This secret is optional so the catalog remains available before Discord is configured. The existing `[secrets].required` list is for mandatory Access secrets.
+3. Deploy the Worker code. Open `https://labatar-catalog.landenhanni.workers.dev/v1/editor/access` as an owner listed in `EDITOR_EMAILS`, then select **Send test alert**. The page reports delivery success or a configuration error. Check the private channel for the test message.
+4. Submit a small combo candidate through Labatar and confirm that one new alert appears after the upload finishes. Editors can then review it under **Combos → Candidates**.
+
+The test button calls the owner-only `POST /v1/editor/discord-alert-test` route. The webhook URL stays on the Worker. If the webhook is changed or revoked, update the Cloudflare secret and send another test alert.
 
 ## Combo upload access
 
 The Combos page opens for everyone and reads published records from public `/v1/combos`. When a user submits a local MP4, the app signs in through Cloudflare Access and calls `POST /v1/editor/candidates/upload`. The Worker verifies the signed Access JWT and checks for a `viewer` or `editor` role in D1. The existing `viewer` role now means combo uploader; editors and owner emails in `EDITOR_EMAILS` can also upload. The older preview check remains for installed clients that still use it, but current clients do not gate page access on it.
 
 The owner manages people at `https://labatar-catalog.landenhanni.workers.dev/v1/editor/access`. Add one email as **Combo uploader** or **Editor and combo uploader**, change its role, or remove it. Changes take effect on the next upload permission check. This page and its API require the signed owner identity from `EDITOR_EMAILS`; the secret is a fixed bootstrap owner list, not the place to add ordinary users. The old `COMBO_PREVIEW_ACCESS_MODE` setting is ignored and can be deleted. No Worker deployment or new installer is needed for each person.
+
+If an authenticated person lacks an uploader role, the desktop app shows **Request upload access**. Clicking it sends the email from their verified Cloudflare Access token to the configured private Discord alert channel. The request cannot supply a different email. Repeat clicks for the same email return a confirmation without another alert for 24 hours; a failed Discord delivery can be retried. The owner grants access through the access page above. Apply `schema.sql` to D1 before deploying this Worker change so `catalog_upload_access_requests` exists. The button only appears when the Worker returns a role denial; someone blocked by Cloudflare Access before the Worker needs an Access policy change or a separate denial page.
 
 The Access application must cover only `/v1/editor/*`. To make the D1 roles the sole member list, enable One-time PIN for that application and add a dedicated **Allow** policy with **Include → Login Methods → One-time PIN**. Keep the existing owner policy if it uses another login method; do not broaden a reusable policy shared by other applications. Never use **Bypass**. Access then verifies each email and forwards a signed JWT; the Worker rejects anyone absent from the D1 role table and owner secret. This deliberately makes the Access login available to more people, while the Worker remains the authorization gate. Keep the public API paths outside the Access application. Do not delete the owner secret: it is needed to manage roles.
 
@@ -60,6 +73,7 @@ For local database work, run `vp dlx wrangler d1 execute labatar-catalog --local
 | PUT            | `/v1/editor/moves/:id` or `/v1/editor/combos/:id` | Editor       | Create or replace a record                                        |
 | DELETE         | `/v1/editor/moves/:id` or `/v1/editor/combos/:id` | Editor       | Unpublish a record; older revisions remain in D1                  |
 | GET/POST       | `/v1/editor/candidates/upload`                    | Uploader     | Check upload access or create an MP4 upload and receive its token |
+| POST           | `/v1/editor/upload-access-request`                | Signed-in    | Request uploader access by private Discord alert                  |
 | PUT            | `/v1/candidates/:id/parts/:number`                | Upload token | Upload an 8 MiB part (last part may be smaller)                   |
 | POST           | `/v1/candidates/:id/complete`                     | Upload token | Complete the MP4 and place the combo in review                    |
 | POST           | `/v1/candidates/:id/abort`                        | Upload token | Abort an unfinished upload                                        |

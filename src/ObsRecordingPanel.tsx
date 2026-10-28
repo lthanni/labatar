@@ -46,6 +46,7 @@ export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) 
     disconnect,
     setupScenes,
     setScene,
+    setSourceToggle,
   } = useObsRecording();
   const connected = state.status === "connected";
   const recording = state.recording.active;
@@ -582,7 +583,7 @@ export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) 
                   sx={{ alignItems: "center" }}
                 >
                   <Typography variant="caption" color="text.secondary">
-                    Scenes:
+                    Scene:
                   </Typography>
                   {labatarSceneNames.map((sceneName) => (
                     <Button
@@ -596,6 +597,50 @@ export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) 
                     </Button>
                   ))}
                 </Stack>
+              )}
+              {state.currentSceneName === "Labatar - Game" && state.sourceToggles && (
+                <Box>
+                  <Typography variant="caption" color="text.secondary">
+                    Scene sources
+                  </Typography>
+                  <Stack direction={{ xs: "column", md: "row" }} spacing={{ xs: 0, md: 1 }}>
+                    {(
+                      [
+                        ["pressureFramebar", "P2 bar below P1"],
+                        ["gameAudio", "Game audio"],
+                        ["desktopAudio", "Desktop audio"],
+                        ["microphone", "Microphone"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <FormControlLabel
+                        key={key}
+                        control={
+                          <Checkbox
+                            checked={state.sourceToggles?.[key] ?? false}
+                            disabled={
+                              busy ||
+                              recording ||
+                              (key === "pressureFramebar" &&
+                                !state.sourceToggles?.pressureFramebarReady) ||
+                              (key === "gameAudio" && !state.sourceToggles?.gameAudioAvailable)
+                            }
+                            onChange={(_, checked) => void setSourceToggle(key, checked)}
+                          />
+                        }
+                        label={label}
+                      />
+                    ))}
+                  </Stack>
+                  <Typography variant="caption" color="text.secondary">
+                    Game and desktop audio are mutually exclusive. Turning off desktop audio
+                    restores game audio when a separate game-audio source is available. Switches
+                    affect manual and automatic recordings and can be changed before recording.
+                    {!state.sourceToggles.pressureFramebarReady &&
+                      " Open the game and apply setup again to place the P2 crop."}
+                    {!state.sourceToggles.gameAudioAvailable &&
+                      " This OBS version includes game audio in the capture source."}
+                  </Typography>
+                </Box>
               )}
             </>
           )}

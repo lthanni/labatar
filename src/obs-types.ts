@@ -38,6 +38,13 @@ export type ObsVideoSettings = {
   outputHeight: number | null;
 };
 
+export type ObsSourceToggleKey = "pressureFramebar" | "gameAudio" | "desktopAudio" | "microphone";
+
+export type ObsSourceToggles = Record<ObsSourceToggleKey, boolean> & {
+  pressureFramebarReady: boolean;
+  gameAudioAvailable: boolean;
+};
+
 export type ObsState = {
   status: ObsConnectionStatus;
   host: string;
@@ -49,6 +56,7 @@ export type ObsState = {
   profiles: string[];
   currentSceneCollectionName: string | null;
   currentSceneName: string | null;
+  sourceToggles: ObsSourceToggles | null;
   recordDirectory: string | null;
   videoSettings: ObsVideoSettings | null;
   automation: ObsAutomationState;

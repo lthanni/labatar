@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
 const {
+  requestComboUploadAccess,
   submitComboCandidate,
   previewComboCandidate,
   requestCandidateEditor,
@@ -13,6 +14,24 @@ const {
   listComboCandidates,
   downloadComboCandidate,
 } = require("./combo-candidates.cjs");
+
+void test("upload access request uses the signed-in catalog session", async () => {
+  const requests = [];
+  const ses = {
+    async fetch(url, options) {
+      requests.push({ url, options });
+      return Response.json({ sent: true, alreadyRequested: false });
+    },
+  };
+  assert.deepEqual(await requestComboUploadAccess(ses), {
+    sent: true,
+    alreadyRequested: false,
+  });
+  assert.equal(new URL(requests[0].url).pathname, "/v1/editor/upload-access-request");
+  assert.equal(requests[0].options.method, "POST");
+  assert.equal(requests[0].options.credentials, "include");
+  assert.equal(requests[0].options.headers["X-Labatar-Access-Request"], "1");
+});
 
 void test("candidate list closes stalled session connections and retries its read once", async () => {
   let requests = 0;

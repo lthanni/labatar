@@ -69,6 +69,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     prepareProfile: (request) => ipcRenderer.invoke("obs:prepare-profile", request),
     setupScenes: (request) => ipcRenderer.invoke("obs:setup-scenes", request),
     setScene: (sceneName) => ipcRenderer.invoke("obs:set-scene", sceneName),
+    setSourceToggle: (key, enabled) =>
+      ipcRenderer.invoke("obs:set-source-toggle", { key, enabled }),
     startRecording: (request) => ipcRenderer.invoke("obs:start-recording", request),
     startManualRecording: (request) => ipcRenderer.invoke("obs:start-manual-recording", request),
     stopRecording: () => ipcRenderer.invoke("obs:stop-recording"),
@@ -147,6 +149,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("recordings:youtube-upload-cancel", request),
     dismissYouTubeUploadError: (request) =>
       ipcRenderer.invoke("recordings:youtube-upload-dismiss-error", request),
+    acknowledgeYouTubeUpload: (request) =>
+      ipcRenderer.invoke("recordings:youtube-upload-acknowledge", request),
     openYouTubeTerms: () => ipcRenderer.invoke("recordings:open-youtube-terms"),
     openYouTubeUrl: (request) => ipcRenderer.invoke("recordings:open-youtube-url", request),
     getYouTubeReplacementInfo: (request) =>
@@ -174,11 +178,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   catalogPublisher: {
     publishCombo: (request) => ipcRenderer.invoke("catalog:publish-combo", request),
   },
-  comboPreview: {
-    checkAccess: (request) => ipcRenderer.invoke("catalog:combo-preview-access", request),
-  },
   comboCandidates: {
     status: () => ipcRenderer.invoke("combo-candidates:status"),
+    requestUploadAccess: () => ipcRenderer.invoke("combo-candidates:request-upload-access"),
     submit: (request) => ipcRenderer.invoke("combo-candidates:submit", request),
     onUploadProgress: (listener) => {
       const handler = (_, progress) => listener(progress);

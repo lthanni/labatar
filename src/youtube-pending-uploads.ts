@@ -4,6 +4,28 @@ export type PendingYouTubeUpload = {
   url: string;
 };
 
+export type YouTubeUploadWork = {
+  kind?: string;
+  phase?: string;
+  recordingId?: string;
+  fileName?: string;
+  url?: string;
+};
+
+export function pendingYouTubeUploadsFromWork(
+  workItems: readonly YouTubeUploadWork[],
+): PendingYouTubeUpload[] {
+  return workItems.flatMap((work) =>
+    work.kind === "youtube-upload" &&
+    work.phase === "ready" &&
+    work.recordingId &&
+    work.fileName &&
+    work.url?.startsWith("https://www.youtube.com/watch?v=")
+      ? [{ recordingId: work.recordingId, fileName: work.fileName, url: work.url }]
+      : [],
+  );
+}
+
 const storageKey = "labatar.youtube-pending-uploads";
 const legacyPrefix = "labatar.youtube-pending-upload.";
 export const pendingYouTubeUploadsChangedEvent = "labatar:youtube-pending-uploads-changed";

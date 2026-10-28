@@ -6,18 +6,22 @@ const people = document.querySelector("#people");
 const owner = document.querySelector("#owner");
 const message = document.querySelector("#message");
 const refresh = document.querySelector("#refresh");
+const testDiscordAlert = document.querySelector("#test-discord-alert");
 
 function showMessage(value, error = false) {
   message.textContent = value;
   message.classList.toggle("error", error);
 }
 
-async function api(method, body) {
-  const response = await fetch(endpoint, {
+async function api(method, body, path = endpoint) {
+  const response = await fetch(path, {
     method,
     credentials: "same-origin",
     cache: "no-store",
-    headers: body ? { "Content-Type": "application/json", "X-Labatar-Admin": "1" } : {},
+    headers: {
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(method !== "GET" ? { "X-Labatar-Admin": "1" } : {}),
+    },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   const result = await response.json();
@@ -100,6 +104,18 @@ refresh.addEventListener("click", async () => {
     showMessage("Access list refreshed.");
   } catch (error) {
     showMessage(error.message, true);
+  }
+});
+
+testDiscordAlert.addEventListener("click", async () => {
+  testDiscordAlert.disabled = true;
+  try {
+    await api("POST", undefined, "/v1/editor/discord-alert-test");
+    showMessage("Test alert sent. Check your private Discord channel.");
+  } catch (error) {
+    showMessage(error.message, true);
+  } finally {
+    testDiscordAlert.disabled = false;
   }
 });
 

@@ -74,26 +74,15 @@ import {
   type PublishedCatalog,
 } from "./published-catalog";
 import { publishedComboFromDraft, type PublishComboDraft } from "./publish-combo-draft";
-import {
-  comboMediaGap,
-  comboYouTubeVideo,
-  isLocalMp4,
-  mediaGap,
-  type ComboMediaGap,
-} from "./combo-media";
+import { comboMediaGap, comboYouTubeVideo, isLocalMp4, type ComboMediaGap } from "./combo-media";
 import type { RecordedVideo } from "./recording-types";
 import {
+  forgetPendingYouTubeUpload,
   pendingYouTubeUploadUrl,
   pendingYouTubeUploadsChangedEvent,
   savePendingYouTubeUpload,
 } from "./youtube-pending-uploads";
-import { youtubeVideoId } from "./YouTubeRecordingPlayer";
-import {
-  techCatalogStorageKey,
-  techSelectedRecordingStorageKey,
-  techSelectRecordingEvent,
-  type TechCombo,
-} from "./tech-types";
+import { techSelectedRecordingStorageKey, techSelectRecordingEvent } from "./tech-types";
 
 const names: Record<string, string> = {
   "avatar-aang": "Avatar Aang",
@@ -128,72 +117,6 @@ function readPendingPageComboRecording(): PendingPageComboRecording | null {
   } catch {
     return null;
   }
-}
-
-type LegacyComboRow = { key: string; combo: TechCombo };
-
-function readLegacyCombos(): LegacyComboRow[] {
-  try {
-    const catalog = JSON.parse(localStorage.getItem(techCatalogStorageKey) ?? "null");
-    if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) return [];
-    return Object.entries(catalog).flatMap(([character, data]) => {
-      const combos = (data as { combos?: unknown })?.combos;
-      if (!Array.isArray(combos)) return [];
-      return combos.flatMap((value): LegacyComboRow[] => {
-        if (!value || typeof value !== "object") return [];
-        const combo = value as Partial<TechCombo>;
-        if (
-          typeof combo.id !== "string" ||
-          typeof combo.route !== "string" ||
-          !combo.route.trim() ||
-          typeof combo.support !== "string"
-        )
-          return [];
-        return [
-          {
-            key: `${character}:${combo.id}`,
-            combo: {
-              ...combo,
-              id: combo.id,
-              character: typeof combo.character === "string" ? combo.character : character,
-              support: combo.support,
-              route: combo.route,
-              name: typeof combo.name === "string" ? combo.name : "",
-              moveIds: Array.isArray(combo.moveIds) ? combo.moveIds : [],
-              screenPosition: typeof combo.screenPosition === "string" ? combo.screenPosition : "",
-              damage: typeof combo.damage === "string" ? combo.damage : "",
-              resourceCosts: {
-                pips: Number(combo.resourceCosts?.pips) || 0,
-                flow: Number(combo.resourceCosts?.flow) || 0,
-              },
-              recordingId:
-                typeof combo.recordingId === "string"
-                  ? combo.recordingId
-                  : Array.isArray((combo as TechCombo & { recordingIds?: unknown }).recordingIds) &&
-                      typeof (combo as TechCombo & { recordingIds: unknown[] }).recordingIds[0] ===
-                        "string"
-                    ? (combo as TechCombo & { recordingIds: string[] }).recordingIds[0]
-                    : null,
-            },
-          },
-        ];
-      });
-    });
-  } catch {
-    return [];
-  }
-}
-
-function legacyComboMediaGap(
-  combo: TechCombo,
-  recording: RecordedVideo | null,
-  recordingsLoaded: boolean,
-): ComboMediaGap {
-  const hasLocalMp4 =
-    Boolean(recording && isLocalMp4(recording)) ||
-    Boolean(!recordingsLoaded && combo.recordingId && /\.mp4$/i.test(combo.recordingId));
-  const hasYouTubeVideo = Boolean(youtubeVideoId(recording?.youtubeUrl ?? recording?.url));
-  return mediaGap(hasLocalMp4, hasYouTubeVideo);
 }
 
 type RawFilters = {
@@ -1044,23 +967,11 @@ type PublishForm = {
   note: string;
   routingMode: "autopilot" | "unique";
 };
-export function initialPublisherForm(
-  item: ComboItem,
-  linkedYouTubeUrl = "",
-  legacyCombo?: TechCombo | null,
-): PublishForm {
+export function initialPublisherForm(item: ComboItem, linkedYouTubeUrl = ""): PublishForm {
   if (!item.local) throw new Error("Only local combos can be submitted.");
   const local = item.local;
   const base = local.publishedBase;
-  const legacy =
-    legacyCombo &&
-    legacyCombo.route.trim() === item.route.trim() &&
-    legacyCombo.damage.trim() === item.damage.trim() &&
-    slugComboText(legacyCombo.character) === item.characterId &&
-    slugComboText(legacyCombo.support) === item.supportId
-      ? legacyCombo
-      : null;
-  const name = local.editorName ?? base?.name ?? legacy?.name ?? "";
+  const name = local.editorName ?? base?.name ?? "";
   return {
     backendId:
       local.publishedId ??
@@ -1070,20 +981,13 @@ export function initialPublisherForm(
         .slice(0, 100)
         .replace(/-+$/, ""),
     name,
-    difficulty: String(local.editorDifficulty ?? base?.difficulty ?? legacy?.difficulty ?? ""),
-    editorPickReason:
-      local.editorPickReason ?? base?.editorPickReason ?? legacy?.editorPickReason ?? "",
-    editorPickContext:
-      local.editorPickContext ?? base?.editorPickContext ?? legacy?.editorPickContext ?? "",
+    difficulty: String(local.editorDifficulty ?? base?.difficulty ?? ""),
+    editorPickReason: local.editorPickReason ?? base?.editorPickReason ?? "",
+    editorPickContext: local.editorPickContext ?? base?.editorPickContext ?? "",
     youtubeUrl: comboYouTubeVideo(item, linkedYouTubeUrl)?.url ?? "",
-    moveIds: (
-      local.moveIds ??
-      base?.moveIds ??
-      legacy?.moveIds.filter((moveId): moveId is string => Boolean(moveId?.trim())) ??
-      []
-    ).join("\n"),
+    moveIds: (local.moveIds ?? base?.moveIds ?? []).join("\n"),
     note: "",
-    routingMode: local.routingMode ?? base?.routingMode ?? legacy?.routingMode ?? "autopilot",
+    routingMode: local.routingMode ?? base?.routingMode ?? "autopilot",
   };
 }
 export function publisherDraft(
@@ -1188,10 +1092,7 @@ function PublishDialog({
     setYoutubeTitle(item ? candidateRecordingTitle(item) : "");
     setYoutubeDescription(item ? `${item.characterId} / ${item.supportId}\n${item.route}` : "");
     setMadeForKids(false);
-    const legacy = item?.local?.legacyTechComboId
-      ? readLegacyCombos().find((row) => row.key === item.local?.legacyTechComboId)?.combo
-      : null;
-    setForm(item?.local ? initialPublisherForm(item, linkedYouTubeUrl, legacy) : null);
+    setForm(item?.local ? initialPublisherForm(item, linkedYouTubeUrl) : null);
   }, [item?.id]);
   useEffect(() => {
     const fallback = item?.candidate?.youtubeUrl || linkedYouTubeUrl;
@@ -1268,6 +1169,11 @@ function PublishDialog({
           url: result.url,
           keepLocalVideo: true,
         });
+        try {
+          forgetPendingYouTubeUpload(linkedRecording.id);
+        } catch {
+          // The recording link was saved even if browser storage is unavailable.
+        }
         await onVideoLinked();
       } catch (reason) {
         setUploadError(
@@ -1557,6 +1463,8 @@ export function CombosPage({ active }: { active: boolean }) {
   const [candidatesLoading, setCandidatesLoading] = useState(false);
   const [candidateAvailable, setCandidateAvailable] = useState(false);
   const [candidateSubmitting, setCandidateSubmitting] = useState(false);
+  const [candidateRequestingAccess, setCandidateRequestingAccess] = useState(false);
+  const [candidateAccessDenied, setCandidateAccessDenied] = useState(false);
   const [candidateProgress, setCandidateProgress] = useState<number | null>(null);
   const [candidateError, setCandidateError] = useState("");
   const candidateRefreshIdRef = useRef(0);
@@ -1599,10 +1507,6 @@ export function CombosPage({ active }: { active: boolean }) {
   const [recordingPickerId, setRecordingPickerId] = useState<string | null>(null);
   const [recordingSearch, setRecordingSearch] = useState("");
   const [importingMp4, setImportingMp4] = useState(false);
-  const [legacyImportOpen, setLegacyImportOpen] = useState(false);
-  const [legacyCombos, setLegacyCombos] = useState<LegacyComboRow[]>([]);
-  const [legacySelection, setLegacySelection] = useState("");
-  const [legacyTargetId, setLegacyTargetId] = useState("");
   const refreshCandidates = useCallback(async (interactive = false) => {
     const api = window.electronAPI?.comboCandidates;
     if (!api) return;
@@ -2233,16 +2137,12 @@ export function CombosPage({ active }: { active: boolean }) {
       delete recordingLinks[id];
       const candidateSubmissions = { ...old.candidateSubmissions };
       delete candidateSubmissions[id];
-      const legacyImports = Object.fromEntries(
-        Object.entries(old.legacyImports).filter(([, comboId]) => comboId !== id),
-      );
       return {
         ...old,
         localCombos: old.localCombos.filter((item) => item.id !== id),
         entries,
         recordingLinks,
         candidateSubmissions,
-        legacyImports,
       };
     });
     setSelectedId(null);
@@ -2355,18 +2255,12 @@ export function CombosPage({ active }: { active: boolean }) {
       delete recordingLinks[id];
       const candidateSubmissions = { ...old.candidateSubmissions };
       delete candidateSubmissions[id];
-      const legacyImports = Object.fromEntries(
-        Object.entries(old.legacyImports)
-          .filter(([, comboId]) => !(local.originCatalog && comboId === id))
-          .map(([legacyId, comboId]) => [legacyId, comboId === id ? targetId : comboId]),
-      );
       return {
         ...old,
         localCombos: old.localCombos.filter((combo) => combo.id !== id),
         entries,
         recordingLinks,
         candidateSubmissions,
-        legacyImports,
         snapshots: { ...old.snapshots, [targetId]: catalogSnapshot(itemById.get(targetId)!) },
       };
     });
@@ -2491,6 +2385,7 @@ export function CombosPage({ active }: { active: boolean }) {
     setCandidateSubmitting(true);
     setCandidateProgress(0);
     setCandidateError("");
+    setCandidateAccessDenied(false);
     try {
       const submissionCombo = candidateComboFromItem(item);
       const previousSubmission = workspace.candidateSubmissions[item.id];
@@ -2518,10 +2413,38 @@ export function CombosPage({ active }: { active: boolean }) {
       setMessage(`Candidate ${result.id} submitted with its MP4 for review.`);
       if (candidatesLoaded) void refreshCandidates();
     } catch (reason) {
-      setCandidateError(reason instanceof Error ? reason.message : "Could not submit candidate.");
+      const error = reason instanceof Error ? reason.message : "Could not submit candidate.";
+      const denied = error.includes("Combo upload permission required.");
+      setCandidateAccessDenied(denied);
+      setCandidateError(
+        denied
+          ? "You need combo upload access. Request it to send your signed-in email to the catalog owner."
+          : error,
+      );
     } finally {
       setCandidateSubmitting(false);
       setCandidateProgress(null);
+    }
+  };
+  const requestCandidateUploadAccess = async () => {
+    const api = window.electronAPI?.comboCandidates;
+    if (!api) return;
+    setCandidateRequestingAccess(true);
+    try {
+      const result = await api.requestUploadAccess();
+      setCandidateAccessDenied(false);
+      setCandidateError("");
+      setMessage(
+        result.sent
+          ? "Upload access request sent. Try submitting again after the owner grants access."
+          : "Your upload access request was already sent. Try submitting again after the owner grants access.",
+      );
+    } catch (reason) {
+      setCandidateError(
+        reason instanceof Error ? reason.message : "Could not request upload access.",
+      );
+    } finally {
+      setCandidateRequestingAccess(false);
     }
   };
   const importMp4 = async () => {
@@ -2546,96 +2469,11 @@ export function CombosPage({ active }: { active: boolean }) {
     localStorage.setItem(techSelectedRecordingStorageKey, recordingId);
     window.dispatchEvent(new CustomEvent(techSelectRecordingEvent, { detail: recordingId }));
   };
-  const openLegacyImport = () => {
-    setLegacyCombos(readLegacyCombos());
-    setLegacySelection("");
-    setLegacyTargetId("");
-    setLegacyImportOpen(true);
-  };
-  const selectedLegacy = legacyCombos.find((row) => row.key === legacySelection);
   const pickerRecordings = recordings
     .filter(isLocalMp4)
     .filter((recording) =>
       `${recording.name} ${recording.id}`.toLowerCase().includes(recordingSearch.toLowerCase()),
     );
-  const importLegacy = () => {
-    if (!selectedLegacy || workspace.legacyImports[selectedLegacy.key]) return;
-    const combo = selectedLegacy.combo;
-    const legacyRecordingId =
-      combo.recordingId && /\.mp4$/i.test(combo.recordingId) ? combo.recordingId : null;
-    const target = itemById.get(legacyTargetId);
-    if (
-      target &&
-      (!legacyRecordingId ||
-        !window.confirm(
-          `Link the Dev editor recording to ${comboDisplayName(target, entry(target.id))}?`,
-        ))
-    )
-      return;
-    if (
-      target &&
-      workspace.recordingLinks[target.id] &&
-      !window.confirm("Replace this combo's existing local video link?")
-    )
-      return;
-    const id = target?.id ?? `local-${crypto.randomUUID()}`;
-    const recording = recordingsById.get(legacyRecordingId ?? "");
-    const localCombo: LocalCombo | null = target
-      ? null
-      : {
-          id,
-          characterId: slugComboText(combo.character),
-          supportId: slugComboText(combo.support),
-          starter: comboStarterFromRoute(combo.route),
-          name: combo.name?.trim() || "Imported combo",
-          route: combo.route.trim(),
-          screenPosition: combo.screenPosition,
-          damage: combo.damage,
-          pips: Math.max(0, combo.resourceCosts.pips),
-          flow: Math.max(0, combo.resourceCosts.flow),
-          difficulty: null,
-          hitconfirm: combo.initialConversionHitconfirmable ? "yes" : "unknown",
-          counterhit: combo.requiresCounterhit === true,
-          youtubeUrl: "",
-          ...(combo.name?.trim() ? { editorName: combo.name.trim() } : {}),
-          ...(combo.difficulty != null ? { editorDifficulty: combo.difficulty } : {}),
-          ...(combo.editorPickReason?.trim()
-            ? { editorPickReason: combo.editorPickReason.trim() }
-            : {}),
-          ...(combo.editorPickContext?.trim()
-            ? { editorPickContext: combo.editorPickContext.trim() }
-            : {}),
-          moveIds: combo.moveIds.filter((moveId): moveId is string => Boolean(moveId?.trim())),
-          routingMode: combo.routingMode ?? "autopilot",
-          legacyTechComboId: selectedLegacy.key,
-          editorNotes: normalizeComboNotes(combo.notes),
-        };
-    setWorkspace((old) => ({
-      ...old,
-      localCombos: localCombo ? [...old.localCombos, localCombo] : old.localCombos,
-      entries: localCombo
-        ? { ...old.entries, [id]: { ...emptyPersonalEntry(), status: "Considering" } }
-        : old.entries,
-      recordingLinks: legacyRecordingId
-        ? {
-            ...old.recordingLinks,
-            [id]: { recordingId: legacyRecordingId, name: recording?.name ?? legacyRecordingId },
-          }
-        : old.recordingLinks,
-      legacyImports: { ...old.legacyImports, [selectedLegacy.key]: id },
-      snapshots:
-        target?.source === "Catalog"
-          ? { ...old.snapshots, [id]: catalogSnapshot(target) }
-          : old.snapshots,
-      characterId: localCombo?.characterId ?? old.characterId,
-      supportId: localCombo?.supportId ?? old.supportId,
-      starter: localCombo?.starter ?? old.starter,
-    }));
-    setSelectedId(id);
-    setLegacySelection("");
-    setLegacyTargetId("");
-    setMessage(target ? "Dev editor recording linked." : "Dev editor combo imported.");
-  };
   const imageOptions = picker === "character" ? characters : supports;
 
   return (
@@ -2653,9 +2491,6 @@ export function CombosPage({ active }: { active: boolean }) {
           <Tab value="raw" label="Raw" />
         </Tabs>
         <Stack direction="row" spacing={1}>
-          <Button size="small" onClick={openLegacyImport}>
-            Import Dev combos
-          </Button>
           {window.electronAPI?.comboCandidates && (
             <Button
               size="small"
@@ -2734,7 +2569,25 @@ export function CombosPage({ active }: { active: boolean }) {
         </Alert>
       )}
       {candidateError && (
-        <Alert severity="error" onClose={() => setCandidateError("")}>
+        <Alert
+          severity="error"
+          onClose={() => {
+            setCandidateError("");
+            setCandidateAccessDenied(false);
+          }}
+          action={
+            candidateAccessDenied ? (
+              <Button
+                color="inherit"
+                size="small"
+                disabled={candidateRequestingAccess}
+                onClick={requestCandidateUploadAccess}
+              >
+                {candidateRequestingAccess ? "Sending…" : "Request upload access"}
+              </Button>
+            ) : undefined
+          }
+        >
           {candidateError}
         </Alert>
       )}
@@ -4010,109 +3863,6 @@ export function CombosPage({ active }: { active: boolean }) {
           </Button>
         </DialogActions>
       </Dialog>
-      <Dialog
-        open={legacyImportOpen}
-        onClose={() => setLegacyImportOpen(false)}
-        maxWidth="md"
-        fullWidth
-      >
-        <DialogTitle>Import from Dev combo editor</DialogTitle>
-        <DialogContent dividers>
-          <Stack spacing={2}>
-            <Typography variant="body2" color="text.secondary">
-              Choose a Dev combo to copy locally, or attach its recording to a combo already on this
-              page. Dev editor data stays untouched.
-            </Typography>
-            {legacyCombos.length === 0 && (
-              <Typography>No Dev editor combos found on this device.</Typography>
-            )}
-            <Box sx={{ maxHeight: 300, overflowY: "auto" }}>
-              {legacyCombos.map(({ key, combo }) => (
-                <Button
-                  key={key}
-                  fullWidth
-                  disabled={Boolean(workspace.legacyImports[key])}
-                  variant={legacySelection === key ? "contained" : "text"}
-                  onClick={() => {
-                    setLegacySelection(key);
-                    setLegacyTargetId("");
-                  }}
-                  sx={{ display: "block", textAlign: "left", overflowWrap: "anywhere" }}
-                >
-                  {combo.name || "Unnamed Dev combo"} · {combo.character} / {combo.support}
-                  {legacyComboMediaGap(
-                    combo,
-                    recordingsById.get(combo.recordingId ?? "") ?? null,
-                    recordingsLoaded,
-                  ) && (
-                    <Chip
-                      size="small"
-                      label={legacyComboMediaGap(
-                        combo,
-                        recordingsById.get(combo.recordingId ?? "") ?? null,
-                        recordingsLoaded,
-                      )}
-                      color="warning"
-                      variant="outlined"
-                      sx={{ ml: 1 }}
-                    />
-                  )}
-                  <Typography variant="caption" sx={{ display: "block" }}>
-                    {combo.route} ·{" "}
-                    {workspace.legacyImports[key]
-                      ? "Already imported"
-                      : combo.recordingId && /\.mp4$/i.test(combo.recordingId)
-                        ? `Recording: ${combo.recordingId}`
-                        : "No linked MP4"}
-                  </Typography>
-                </Button>
-              ))}
-            </Box>
-            {selectedLegacy && (
-              <>
-                <SelectField
-                  label="Destination"
-                  value={legacyTargetId}
-                  width={0}
-                  options={[
-                    ["", "Create a local combo"],
-                    ...items
-                      .filter(
-                        (item) =>
-                          item.characterId === slugComboText(selectedLegacy.combo.character) &&
-                          item.supportId === slugComboText(selectedLegacy.combo.support),
-                      )
-                      .map((item): [string, string] => [
-                        item.id,
-                        `${comboDisplayName(item, entry(item.id))} · ${item.route}`,
-                      ]),
-                  ]}
-                  onChange={setLegacyTargetId}
-                />
-                {legacyTargetId && !selectedLegacy.combo.recordingId?.match(/\.mp4$/i) && (
-                  <Alert severity="info">
-                    This Dev combo has no recording to attach. Choose “Create a local combo” to
-                    import its route.
-                  </Alert>
-                )}
-              </>
-            )}
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setLegacyImportOpen(false)}>Close</Button>
-          <Button
-            variant="contained"
-            onClick={importLegacy}
-            disabled={
-              !selectedLegacy ||
-              Boolean(legacyTargetId && !selectedLegacy.combo.recordingId?.match(/\.mp4$/i))
-            }
-          >
-            {legacyTargetId ? "Link recording" : "Create local combo"}
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Stack>
   );
 }
@@ -4228,6 +3978,78 @@ function ComboDetail({
   const candidateVideoShownAbove = Boolean(
     candidateRecording && displayedRecording?.id === candidateRecording.id,
   );
+  const controlsNearLocalPlayer = Boolean(
+    item.local && displayedRecording && !youtubeVideo?.videoId,
+  );
+  const localVideoControls = (
+    <Stack spacing={1.5}>
+      <Typography variant="subtitle2">Local video controls</Typography>
+      <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
+        <Tooltip
+          title={
+            recordingDisabledReason ||
+            (recordingLink
+              ? "The finished recording will replace this combo's current local video link."
+              : "")
+          }
+        >
+          <span>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={onRecord}
+              disabled={Boolean(recordingDisabledReason)}
+            >
+              Record for this combo
+            </Button>
+          </span>
+        </Tooltip>
+        <Button
+          size="small"
+          variant="outlined"
+          onClick={onChooseRecording}
+          disabled={!recordingApiAvailable}
+        >
+          {recordingLink ? "Replace local video" : "Link local MP4"}
+        </Button>
+        {displayedRecording && (
+          <Button size="small" onClick={() => onOpenRecording(displayedRecording.id)}>
+            Open in recording library
+          </Button>
+        )}
+        {recordingLink && !candidateVideoShownAbove && (
+          <Button size="small" onClick={onUnlinkRecording}>
+            Unlink
+          </Button>
+        )}
+      </Stack>
+      {!recordingApiAvailable && (
+        <Typography variant="caption" color="text.secondary">
+          Local video links require the desktop app.
+        </Typography>
+      )}
+      {candidateSubmission && (
+        <Typography variant="caption" color="text.secondary">
+          Submitted as candidate on {new Date(candidateSubmission.submittedAt).toLocaleString()}.
+        </Typography>
+      )}
+      {recording && recordingApiAvailable && window.electronAPI?.comboCandidates && (
+        <Button
+          size="small"
+          variant="outlined"
+          onClick={onSubmitCandidate}
+          disabled={candidateSubmitting || !candidateAvailable}
+          sx={{ alignSelf: "flex-start" }}
+        >
+          {candidateSubmitting
+            ? `Submitting${candidateProgress === null ? "…" : ` ${candidateProgress}%`}`
+            : candidateSubmission
+              ? "Submit another candidate with MP4"
+              : "Submit as candidate with MP4"}
+        </Button>
+      )}
+    </Stack>
+  );
   return (
     <Paper variant="outlined" sx={{ p: 2, minWidth: 0 }}>
       <Stack spacing={2}>
@@ -4322,6 +4144,7 @@ function ComboDetail({
                   {recordingsError && recordingLink && (
                     <Alert severity="error">{recordingsError}</Alert>
                   )}
+                  {controlsNearLocalPlayer && localVideoControls}
                 </Stack>
               </Paper>
             )}
@@ -4544,76 +4367,11 @@ function ComboDetail({
             </Box>
           </Stack>
         </Paper>
-        <Paper variant="outlined" sx={{ p: 1.5 }}>
-          <Stack spacing={1.5}>
-            <Typography variant="subtitle2">Local video controls</Typography>
-            <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
-              <Tooltip
-                title={
-                  recordingDisabledReason ||
-                  (recordingLink
-                    ? "The finished recording will replace this combo's current local video link."
-                    : "")
-                }
-              >
-                <span>
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    onClick={onRecord}
-                    disabled={Boolean(recordingDisabledReason)}
-                  >
-                    Record for this combo
-                  </Button>
-                </span>
-              </Tooltip>
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={onChooseRecording}
-                disabled={!recordingApiAvailable}
-              >
-                {recordingLink ? "Replace local video" : "Link local MP4"}
-              </Button>
-              {displayedRecording && (
-                <Button size="small" onClick={() => onOpenRecording(displayedRecording.id)}>
-                  Open in recording library
-                </Button>
-              )}
-              {recordingLink && !candidateVideoShownAbove && (
-                <Button size="small" onClick={onUnlinkRecording}>
-                  Unlink
-                </Button>
-              )}
-            </Stack>
-            {!recordingApiAvailable && (
-              <Typography variant="caption" color="text.secondary">
-                Local video links require the desktop app.
-              </Typography>
-            )}
-            {candidateSubmission && (
-              <Typography variant="caption" color="text.secondary">
-                Submitted as candidate on{" "}
-                {new Date(candidateSubmission.submittedAt).toLocaleString()}.
-              </Typography>
-            )}
-            {recording && recordingApiAvailable && window.electronAPI?.comboCandidates && (
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={onSubmitCandidate}
-                disabled={candidateSubmitting || !candidateAvailable}
-                sx={{ alignSelf: "flex-start" }}
-              >
-                {candidateSubmitting
-                  ? `Submitting${candidateProgress === null ? "…" : ` ${candidateProgress}%`}`
-                  : candidateSubmission
-                    ? "Submit another candidate with MP4"
-                    : "Submit as candidate with MP4"}
-              </Button>
-            )}
-          </Stack>
-        </Paper>
+        {!controlsNearLocalPlayer && (
+          <Paper variant="outlined" sx={{ p: 1.5 }}>
+            {localVideoControls}
+          </Paper>
+        )}
         <Paper variant="outlined" sx={{ p: 1.5 }}>
           <Stack spacing={1.5}>
             <Typography variant="subtitle2">Editor / catalog data</Typography>

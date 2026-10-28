@@ -1,7 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Button, Chip, Stack, Tooltip, Typography } from "@mui/material";
-import type { ObsSettings, ObsState } from "./obs-types";
+import { Button, Chip, IconButton, Stack, Tooltip, Typography } from "@mui/material";
+import DesktopWindowsIcon from "@mui/icons-material/DesktopWindows";
+import MicIcon from "@mui/icons-material/Mic";
+import ViewStreamIcon from "@mui/icons-material/ViewStream";
+import type { ObsSettings, ObsSourceToggleKey, ObsState } from "./obs-types";
 import type { MoveCaptureState, MoveTakeOutcome } from "./move-capture-types";
 
 const defaultSettings: ObsSettings = {
@@ -25,6 +28,7 @@ const disconnectedState: ObsState = {
   profiles: [],
   currentSceneCollectionName: null,
   currentSceneName: null,
+  sourceToggles: null,
   recordDirectory: null,
   videoSettings: null,
   automation: {
@@ -50,11 +54,7 @@ const disconnectedState: ObsState = {
   },
 };
 
-const labatarSceneNames = [
-  "Labatar - Game Only",
-  "Labatar - Game + Desktop + Mic",
-  "Labatar - Game + Mic",
-];
+const labatarSceneNames = ["Labatar - Game"];
 
 const automationStatusLabels: Record<string, string> = {
   starting: "starting",
@@ -106,6 +106,7 @@ type ObsRecordingContextValue = {
   toggleAutomaticRecording: (enabled: boolean) => Promise<void>;
   setupScenes: () => Promise<void>;
   setScene: (sceneName: string) => Promise<void>;
+  setSourceToggle: (key: ObsSourceToggleKey, enabled: boolean) => Promise<void>;
 };
 
 const ObsRecordingContext = createContext<ObsRecordingContextValue | null>(null);
@@ -360,7 +361,7 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
         recordDirectory: settings.recordDirectory,
       });
       setNotice(
-        `Labatar profile and ${result.scenes.length} scenes are ready in the ${result.sceneCollectionName} scene collection. Game audio uses ${result.gameAudioMode === "separate" ? "a separate application audio source" : "the window capture source"}. ${result.outputResolution ? `Output resized to ${result.outputResolution.width}×${result.outputResolution.height}.` : "Open the game and run setup again to resize output to the game source."}`,
+        `The Labatar game scene is ready in the ${result.sceneCollectionName} scene collection. Game audio uses ${result.gameAudioMode === "separate" ? "a separate application audio source" : "the window capture source"}. ${result.outputResolution ? `Output resized to ${result.outputResolution.width}×${result.outputResolution.height}.` : "Open the game and run setup again to resize output to the game source."} ${result.pressureFramebarReady ? "The P2 crop can be switched on." : "Open the game and run setup again to place the P2 crop."}`,
       );
     } catch (setupError) {
       setError(displayError(setupError));
@@ -378,6 +379,20 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
       setState(nextState);
     } catch (sceneError) {
       setError(displayError(sceneError));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const setSourceToggle = useCallback(async (key: ObsSourceToggleKey, enabled: boolean) => {
+    if (!window.electronAPI?.obs) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const nextState = await window.electronAPI.obs.setSourceToggle(key, enabled);
+      setState(nextState);
+    } catch (toggleError) {
+      setError(displayError(toggleError));
     } finally {
       setBusy(false);
     }
@@ -412,6 +427,7 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
       toggleAutomaticRecording,
       setupScenes,
       setScene,
+      setSourceToggle,
     }),
     [
       busy,
@@ -427,6 +443,7 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
       passwordFocused,
       rememberPassword,
       setScene,
+      setSourceToggle,
       settings,
       setupScenes,
       startManualRecording,
@@ -458,6 +475,7 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
     stopManualRecording,
     moveCapture,
     disarmMoveCapture,
+    setSourceToggle,
     toggleAutomaticRecording,
   } = useObsRecording();
   const [automaticMoveRunOpen, setAutomaticMoveRunOpen] = useState(false);
@@ -480,6 +498,8 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
   }, []);
   const connected = state.status === "connected";
   const recording = state.recording.active;
+  const sceneReady =
+    connected && state.currentSceneName === "Labatar - Game" && Boolean(state.sourceToggles);
   const manualRecording = recording && state.recording.source === "manual";
   const automaticallyRecording = recording && state.recording.source === "automatic";
   const automationStatus = state.automation.status;
@@ -496,28 +516,86 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
 
   return (
     <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: "stretch" }}>
-      <Button
-        size="small"
-        variant={connected ? "outlined" : "contained"}
-        onClick={() => {
-          if (connected) {
-            void disconnect();
-          } else {
-            void connect().then((succeeded) => {
-              if (!succeeded) onOpenSettings();
-            });
+      <Stack spacing={0.25} sx={{ alignItems: "center" }}>
+        <Button
+          size="small"
+          variant={connected ? "outlined" : "contained"}
+          onClick={() => {
+            if (connected) {
+              void disconnect();
+            } else {
+              void connect().then((succeeded) => {
+                if (!succeeded) onOpenSettings();
+              });
+            }
+          }}
+          disabled={
+            busy ||
+            recording ||
+            state.status === "connecting" ||
+            (connected && automaticMoveRunOpen)
           }
-        }}
-        disabled={
-          busy || recording || state.status === "connecting" || (connected && automaticMoveRunOpen)
-        }
-      >
-        {state.status === "connecting"
-          ? "Connecting..."
-          : connected
-            ? "Disconnect OBS"
-            : "Connect to OBS"}
-      </Button>
+        >
+          {state.status === "connecting"
+            ? "Connecting..."
+            : connected
+              ? "Disconnect OBS"
+              : "Connect to OBS"}
+        </Button>
+        <Stack direction="row" spacing={0.5}>
+          {(
+            [
+              { key: "microphone", label: "Microphone", icon: <MicIcon fontSize="small" /> },
+              {
+                key: "desktopAudio",
+                label: "Desktop audio",
+                icon: <DesktopWindowsIcon fontSize="small" />,
+              },
+              {
+                key: "pressureFramebar",
+                label: "P2 framebar",
+                icon: <ViewStreamIcon fontSize="small" />,
+              },
+            ] as const
+          ).map(({ key, label, icon }) => {
+            const enabled = state.sourceToggles?.[key] ?? false;
+            const unavailable =
+              key === "pressureFramebar" && !state.sourceToggles?.pressureFramebarReady;
+            const disabled = busy || recording || !sceneReady || unavailable;
+            const tooltip = !connected
+              ? "Connect to OBS to change scene sources."
+              : !sceneReady
+                ? "Select the Labatar - Game scene to change its sources."
+                : recording
+                  ? "Stop recording before changing scene sources."
+                  : unavailable
+                    ? "Open the game and apply OBS setup again to place the P2 crop."
+                    : `${label}: ${enabled ? "on" : "off"}`;
+            return (
+              <Tooltip key={key} title={tooltip} arrow>
+                <span>
+                  <IconButton
+                    size="small"
+                    aria-label={label}
+                    aria-pressed={enabled}
+                    disabled={disabled}
+                    onClick={() => void setSourceToggle(key, !enabled)}
+                    sx={{
+                      color: enabled ? "primary.main" : "text.disabled",
+                      "&.Mui-disabled": {
+                        color: enabled ? "primary.main" : "text.disabled",
+                        opacity: 0.6,
+                      },
+                    }}
+                  >
+                    {icon}
+                  </IconButton>
+                </span>
+              </Tooltip>
+            );
+          })}
+        </Stack>
+      </Stack>
       {state.automation.enabled ? (
         <Stack
           direction="row"

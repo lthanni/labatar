@@ -1,3 +1,5 @@
+import { candidateAlert, sendDiscordAlert } from "./discord-alerts.mjs";
+
 const privateHeaders = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
 const partSize = 8 * 1024 * 1024;
 const maxFileSize = 2 * 1024 * 1024 * 1024;
@@ -253,7 +255,7 @@ async function uploadPart(request, env, id, number) {
   return json({ partNumber: part.partNumber, etag: part.etag });
 }
 
-async function completeCandidate(request, env, id) {
+async function completeCandidate(request, env, id, context, fetchDiscord) {
   const row = await authorizedSubmission(request, env, id);
   if (!row) return fail("Candidate upload not found.", 404);
   if (row.status === "pending") return json(candidateView(row));
@@ -293,13 +295,21 @@ async function completeCandidate(request, env, id) {
     return fail("Uploaded MP4 size does not match the submission.", 409);
   }
   const now = new Date().toISOString();
-  await env.DB.prepare(`
+  const result = await env.DB.prepare(`
     UPDATE combo_candidates SET status = 'pending', updated_at = ?
     WHERE id = ? AND status = 'uploading'
   `)
     .bind(now, id)
     .run();
-  return json({ ...candidateView(row), status: "pending", updatedAt: now });
+  const completed = { ...candidateView(row), status: "pending", updatedAt: now };
+  if (result.meta?.changes === 1 && env.DISCORD_ALERT_WEBHOOK_URL) {
+    const alert = sendDiscordAlert(env, candidateAlert(completed), fetchDiscord).catch((error) => {
+      console.error("Could not send Discord candidate alert:", error.message);
+    });
+    if (context?.waitUntil) context.waitUntil(alert);
+    else await alert;
+  }
+  return json(completed);
 }
 
 async function abortCandidate(request, env, id) {
@@ -516,6 +526,8 @@ export async function handleCandidateRequest(
   getComboUpload,
   validateRecord,
   youtubeVideoId,
+  context,
+  fetchDiscord,
 ) {
   const path = new URL(request.url).pathname;
   const publicRoot = path === "/v1/candidates";
@@ -555,7 +567,7 @@ export async function handleCandidateRequest(
       return createCandidate(request, env, validateRecord);
     if (part && request.method === "PUT") return uploadPart(request, env, part[1], part[2]);
     if (finish?.[2] === "complete" && request.method === "POST")
-      return completeCandidate(request, env, finish[1]);
+      return completeCandidate(request, env, finish[1], context, fetchDiscord);
     if (finish?.[2] === "abort" && request.method === "POST")
       return abortCandidate(request, env, finish[1]);
     if (editorRoot && request.method === "GET") return listCandidates(env);

@@ -1,4 +1,5 @@
 import { handleCandidateRequest, removeCandidatesForPublishedCombo } from "./candidates.mjs";
+import { sendDiscordAlert } from "./discord-alerts.mjs";
 
 const idPattern = /^[a-z0-9][a-z0-9-]{0,99}$/;
 const videoIdPattern = /^[A-Za-z0-9_-]{11}$/;
@@ -715,11 +716,14 @@ async function unpublishRecord(env, kind, pathId, expected, email) {
 export async function handleRequest(
   request,
   env,
-  _context,
+  context,
   getEditor = authorizeEditor,
   getComboPreview = authorizeComboPreview,
   getAccessAdmin = authorizeAccessAdmin,
   getComboUpload = authorizeComboUpload,
+  fetchDiscord = fetch,
+  getAccessIdentity = (request, env) =>
+    verifyAccessJwt(request.headers.get("Cf-Access-Jwt-Assertion"), env),
 ) {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -740,8 +744,62 @@ export async function handleRequest(
     getComboUpload,
     validateRecord,
     youtubeVideoId,
+    context,
+    fetchDiscord,
   );
   if (candidateResponse) return candidateResponse;
+  if (path === "/v1/editor/upload-access-request") {
+    if (request.method !== "POST") return fail("Method not allowed.", 405, true);
+    if (request.headers.get("X-Labatar-Access-Request") !== "1")
+      return fail("Access request header is required.", 400, true);
+    const origin = request.headers.get("Origin");
+    if (origin && origin !== url.origin)
+      return fail("Access request origin is invalid.", 400, true);
+    let email;
+    try {
+      email = accessEmail(await getAccessIdentity(request, env));
+    } catch {
+      return fail("Sign in to request combo upload access.", 401, true);
+    }
+    try {
+      if (ownerEmails(env).includes(email) || (await accessRole(env.DB, email)))
+        return fail("This account already has combo upload access.", 409, true);
+      if (!env.DISCORD_ALERT_WEBHOOK_URL)
+        return fail("Upload access requests are unavailable right now.", 503, true);
+      const now = new Date().toISOString();
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const requestId = crypto.randomUUID();
+      const claimed = await env.DB.prepare(`
+        INSERT INTO catalog_upload_access_requests (email, request_id, requested_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(email) DO UPDATE SET
+          request_id = excluded.request_id,
+          requested_at = excluded.requested_at
+        WHERE catalog_upload_access_requests.requested_at <= ?
+      `)
+        .bind(email, requestId, now, cutoff)
+        .run();
+      if (claimed.meta?.changes !== 1)
+        return json({ sent: false, alreadyRequested: true }, 200, privateHeaders);
+      try {
+        await sendDiscordAlert(
+          env,
+          `Labatar combo upload access requested\nEmail: ${email}\nAdd this email as a Combo uploader at /v1/editor/access.`,
+          fetchDiscord,
+        );
+      } catch (error) {
+        await env.DB.prepare(
+          "DELETE FROM catalog_upload_access_requests WHERE email = ? AND request_id = ?",
+        )
+          .bind(email, requestId)
+          .run();
+        return fail(error.message, 502, true);
+      }
+      return json({ sent: true, alreadyRequested: false }, 200, privateHeaders);
+    } catch {
+      return fail("Upload access requests are unavailable right now.", 503, true);
+    }
+  }
   if (request.method === "GET" && path === "/health") {
     return json({
       ok: true,
@@ -770,6 +828,29 @@ export async function handleRequest(
       return await handleAccessRoles(request, env, adminEmail);
     } catch {
       return fail("Access roles are unavailable.", 503, true);
+    }
+  }
+  if (path === "/v1/editor/discord-alert-test") {
+    try {
+      await getAccessAdmin(request, env);
+    } catch (error) {
+      return accessAdminFailure(error);
+    }
+    if (request.method !== "POST") return fail("Method not allowed.", 405, true);
+    try {
+      checkAdminMutation(request);
+    } catch (error) {
+      return fail(error.message, 400, true);
+    }
+    try {
+      await sendDiscordAlert(
+        env,
+        "Labatar test alert: Discord notifications are working.",
+        fetchDiscord,
+      );
+      return json({ sent: true }, 200, privateHeaders);
+    } catch (error) {
+      return fail(error.message, env.DISCORD_ALERT_WEBHOOK_URL ? 502 : 503, true);
     }
   }
   if (request.method === "GET" && /^\/v1\/editor\/access(?:\.(?:js|css))?$/.test(path)) {

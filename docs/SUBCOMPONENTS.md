@@ -48,12 +48,11 @@ This is not the low-level parsing logic; it is the front-end summary layer.
 
 ### `src/TechSection.tsx`
 
-This module handles the “tech” and combo/reference workflow. It likely deals with:
+This module contains the development move editor. It handles:
 
-- cataloged techs
-- selected combo usage
-- reference lookup for a recording or match
-- user interaction around training and technical analysis
+- cataloged moves and support-specific measurements
+- links from move measurements to source recordings
+- move data entry and technical analysis
 
 If the project adds or revises command/tech analysis, this is likely the right place.
 

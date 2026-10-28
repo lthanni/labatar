@@ -125,6 +125,4 @@ export type TechCatalog = Record<string, CharacterTechData>;
 export const techCatalogStorageKey = "labatar-tech-catalog";
 export const techCatalogUpdatedEvent = "labatar-tech-catalog-updated";
 export const techSelectRecordingEvent = "labatar-select-recording";
-export const techSelectComboEvent = "labatar-select-combo";
 export const techSelectedRecordingStorageKey = "labatar-selected-recording";
-export const techSelectedComboStorageKey = "labatar-selected-combo";

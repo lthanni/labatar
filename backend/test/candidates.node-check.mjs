@@ -138,10 +138,94 @@ async function submit(env, options = {}) {
       },
     ),
     env,
+    options.context ?? {},
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    options.fetchDiscord,
   );
   assert.equal(completed.status, 200);
   return created;
 }
+
+void test("a completed candidate sends one Discord alert after entering the review queue", async () => {
+  const db = database();
+  const videos = bucket();
+  const tasks = [];
+  const sent = [];
+  const env = {
+    DB: db,
+    CANDIDATE_VIDEOS: videos,
+    DISCORD_ALERT_WEBHOOK_URL: "https://discord.com/api/webhooks/123/token",
+  };
+  const context = { waitUntil: (promise) => tasks.push(promise) };
+  const fetchDiscord = async (url, options) => {
+    sent.push({ url: String(url), body: JSON.parse(options.body) });
+    return new Response(null, { status: 204 });
+  };
+  try {
+    const created = await submit(env, { context, fetchDiscord });
+    await Promise.all(tasks);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].url, env.DISCORD_ALERT_WEBHOOK_URL);
+    assert.match(sent[0].body.content, /New Labatar combo candidate ready for review/);
+    assert.match(sent[0].body.content, new RegExp(created.id));
+    assert.match(sent[0].body.content, /aang \/ katara: 5B > 236A/);
+    assert.deepEqual(sent[0].body.allowed_mentions, { parse: [] });
+    const repeated = await handleRequest(
+      request(
+        `/v1/candidates/${created.id}/complete`,
+        "POST",
+        { parts: [] },
+        {
+          "X-Candidate-Token": created.token,
+        },
+      ),
+      env,
+      context,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fetchDiscord,
+    );
+    assert.equal(repeated.status, 200);
+    assert.equal(sent.length, 1);
+  } finally {
+    db.close();
+  }
+});
+
+void test("a Discord delivery failure does not fail a completed candidate", async () => {
+  const db = database();
+  const videos = bucket();
+  const tasks = [];
+  const env = {
+    DB: db,
+    CANDIDATE_VIDEOS: videos,
+    DISCORD_ALERT_WEBHOOK_URL: "https://discord.com/api/webhooks/123/token",
+  };
+  const originalError = console.error;
+  const errors = [];
+  console.error = (...args) => errors.push(args);
+  try {
+    const created = await submit(env, {
+      context: { waitUntil: (promise) => tasks.push(promise) },
+      fetchDiscord: async () => new Response(null, { status: 500 }),
+    });
+    await Promise.all(tasks);
+    const row = await db
+      .prepare("SELECT status FROM combo_candidates WHERE id = ?")
+      .bind(created.id)
+      .all();
+    assert.equal(row.results[0].status, "pending");
+    assert.match(errors[0][1], /Discord rejected the alert/);
+  } finally {
+    console.error = originalError;
+    db.close();
+  }
+});
 
 void test("candidate MP4 enters an editor-only queue and can be rejected with its video removed", async () => {
   const db = database();

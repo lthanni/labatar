@@ -16,6 +16,7 @@ const {
 const api = `${catalogOrigin}/v1/candidates`;
 const editorApi = `${catalogOrigin}/v1/editor/candidates`;
 const uploadApi = `${editorApi}/upload`;
+const accessRequestApi = `${catalogOrigin}/v1/editor/upload-access-request`;
 const candidateIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const maxFileSize = 2 * 1024 * 1024 * 1024;
 
@@ -62,6 +63,23 @@ async function candidateServiceStatus() {
   if (!response.ok) return { available: false };
   const health = await response.json();
   return { available: health?.features?.comboCandidates === true };
+}
+
+async function requestComboUploadAccess(ses = publisherSession()) {
+  const result = await publisherRequestWithTimeout("Combo upload access request", (signal) =>
+    fetchEditorResponse(ses, accessRequestApi, {
+      method: "POST",
+      credentials: "include",
+      redirect: "manual",
+      cache: "no-store",
+      headers: { Accept: "application/json", "X-Labatar-Access-Request": "1" },
+      signal,
+    }),
+  );
+  if (result.authenticationRequired) throw new Error("Sign in to request combo upload access.");
+  if (typeof result.body?.sent !== "boolean" || typeof result.body?.alreadyRequested !== "boolean")
+    throw new Error("Invalid combo upload access request response.");
+  return result.body;
 }
 
 function candidateId(value) {
@@ -412,6 +430,7 @@ module.exports = {
   checkCandidateAccess,
   checkCandidateUploadAccess,
   candidateServiceStatus,
+  requestComboUploadAccess,
   submitComboCandidate,
   listComboCandidates,
   approveComboCandidate,

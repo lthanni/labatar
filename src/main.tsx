@@ -24,7 +24,6 @@ import {
   Paper,
   Slider,
   Stack,
-  Switch,
   Tab,
   Tabs,
   TextField,
@@ -54,7 +53,7 @@ import {
   type GuideEntryId,
   type GuideSection,
 } from "./GuidesDialog";
-import type { ObsSettings, ObsState, RecordingMetadata } from "./obs-types";
+import type { ObsSettings, ObsSourceToggleKey, ObsState, RecordingMetadata } from "./obs-types";
 import type { RecordedVideo, RecordingTags } from "./recording-types";
 import type { DevBlackoutStatus } from "./dev-blackout-types";
 import type { RecordingAnalysis } from "./recording-analysis-types";
@@ -69,11 +68,14 @@ import type {
   ProcessingConfiguration,
   ProcessingConfigurationResult,
 } from "./processing-config-types";
-import { techSelectComboEvent, techSelectRecordingEvent } from "./tech-types";
+import { techSelectRecordingEvent } from "./tech-types";
 import {
   forgetPendingYouTubeUpload,
   pendingYouTubeUploadsChangedEvent,
+  pendingYouTubeUploadsFromWork,
+  pendingYouTubeUploadUrl,
   readPendingYouTubeUploads,
+  savePendingYouTubeUpload,
 } from "./youtube-pending-uploads";
 
 type AutomaticMoveRunState = {
@@ -137,9 +139,11 @@ declare global {
           scenes: string[];
           gameAudioMode: "separate" | "window-capture";
           outputResolution: { width: number; height: number } | null;
+          pressureFramebarReady: boolean;
           profileCreated: boolean;
         }>;
         setScene: (sceneName: string) => Promise<ObsState>;
+        setSourceToggle: (key: ObsSourceToggleKey, enabled: boolean) => Promise<ObsState>;
         startRecording: (request: {
           setup: { profileName: string; recordDirectory: string };
           metadata: RecordingMetadata;
@@ -289,6 +293,7 @@ declare global {
         }) => Promise<{ videoId: string; url: string }>;
         cancelYouTubeUpload: (request: { recordingId: string }) => Promise<void>;
         dismissYouTubeUploadError: (request: { recordingId: string }) => Promise<void>;
+        acknowledgeYouTubeUpload: (request: { recordingId: string; url: string }) => Promise<void>;
         openYouTubeTerms: () => Promise<void>;
         openYouTubeUrl: (request: { url: string }) => Promise<void>;
         getYouTubeReplacementInfo: (request: {
@@ -335,11 +340,9 @@ declare global {
           request: import("./publish-combo-draft").PublishComboDraft,
         ) => Promise<{ cancelled: true } | { cancelled: false; id: string; revision: number }>;
       };
-      comboPreview: {
-        checkAccess: (request?: { interactive?: boolean }) => Promise<boolean>;
-      };
       comboCandidates: {
         status: () => Promise<{ available: boolean }>;
+        requestUploadAccess: () => Promise<{ sent: boolean; alreadyRequested: boolean }>;
         submit: (request: {
           recordingId: string;
           combo: import("./combo-candidates").CandidateCombo;
@@ -455,8 +458,9 @@ type RecordingWorkItem = {
   completed?: number;
   total?: number;
   kind?: "youtube-upload";
-  phase?: "queued" | "uploading" | "failed";
+  phase?: "queued" | "uploading" | "failed" | "ready";
   recordingId?: string;
+  url?: string;
 };
 
 type UpdateStatus = {
@@ -1090,12 +1094,10 @@ function App() {
   const captureTabIndex = 2;
   const nerdProcessingTabIndex = 3;
   const techTabIndex = 4;
-  const legacyPublishedTechTabIndex = 5;
   const combosTabIndex = 6;
   const recordingTabAvailable = Boolean(window.electronAPI?.recordings);
   const artworkTabAvailable = Boolean(window.electronAPI?.artwork);
   const tabStorageKey = "avatar-app-last-tab-v2";
-  const comboEditorModeStorageKey = "labatar-combos-editor-mode";
   const { state: obsState } = useObsRecording();
   const availableTabIndices = [
     0,
@@ -1107,14 +1109,6 @@ function App() {
     const storedTab = localStorage.getItem(tabStorageKey);
     const legacyTab = Number(localStorage.getItem("avatar-app-last-tab"));
     const savedTab = Number(storedTab ?? (legacyTab === 2 ? techTabIndex : legacyTab));
-    if (
-      developerTabsAvailable &&
-      savedTab === techTabIndex &&
-      localStorage.getItem("labatar-tech-editor-section") === "combos"
-    ) {
-      return combosTabIndex;
-    }
-    if (savedTab === legacyPublishedTechTabIndex) return combosTabIndex;
     return availableTabIndices.includes(savedTab) ? savedTab : 0;
   });
   const [mountedTabs, setMountedTabs] = useState(() => ({
@@ -1125,18 +1119,6 @@ function App() {
     tech: tab === techTabIndex,
     combos: tab === combosTabIndex,
   }));
-  const [comboEditorMode, setComboEditorMode] = useState(() => {
-    if (!developerTabsAvailable) return false;
-    const savedMode = localStorage.getItem(comboEditorModeStorageKey);
-    return savedMode === null
-      ? localStorage.getItem("labatar-tech-editor-section") === "combos"
-      : savedMode === "true";
-  });
-  useEffect(() => {
-    if (developerTabsAvailable) {
-      localStorage.setItem(comboEditorModeStorageKey, String(comboEditorMode));
-    }
-  }, [comboEditorMode, comboEditorModeStorageKey]);
   const [blackoutStatus, setBlackoutStatus] = useState<DevBlackoutStatus>({
     available: false,
     gameRunning: false,
@@ -1494,6 +1476,32 @@ function App() {
     };
   }, []);
 
+  const readyYouTubeUploads = pendingYouTubeUploadsFromWork(recordingWork);
+  useEffect(() => {
+    for (const upload of pendingYouTubeUploadsFromWork(recordingWork)) {
+      try {
+        if (pendingYouTubeUploadUrl(upload.recordingId) !== upload.url) {
+          savePendingYouTubeUpload(upload);
+        }
+        void window.electronAPI?.recordings
+          .acknowledgeYouTubeUpload({
+            recordingId: upload.recordingId,
+            url: upload.url,
+          })
+          .catch(() => undefined);
+      } catch {
+        // Keep the completed work card until browser storage can save the link.
+      }
+    }
+  }, [recordingWork]);
+  const reviewableYouTubeUploadsById = new Map(
+    pendingYouTubeUploads.map((upload) => [upload.recordingId, upload] as const),
+  );
+  for (const upload of readyYouTubeUploads) {
+    reviewableYouTubeUploadsById.set(upload.recordingId, upload);
+  }
+  const reviewableYouTubeUploads = [...reviewableYouTubeUploadsById.values()];
+
   const youtubeUploadJobs = recordingWork.flatMap((work) =>
     work.kind === "youtube-upload" &&
     work.recordingId &&
@@ -1506,17 +1514,11 @@ function App() {
     const showRecordings = () => {
       if (recordingTabAvailable) changeTab(recordingsTabIndex);
     };
-    const showTech = () => {
-      if (developerTabsAvailable) setComboEditorMode(true);
-      changeTab(combosTabIndex);
-    };
     window.addEventListener(techSelectRecordingEvent, showRecordings);
-    window.addEventListener(techSelectComboEvent, showTech);
     return () => {
       window.removeEventListener(techSelectRecordingEvent, showRecordings);
-      window.removeEventListener(techSelectComboEvent, showTech);
     };
-  }, [recordingTabAvailable, recordingsTabIndex, combosTabIndex]);
+  }, [recordingTabAvailable, recordingsTabIndex]);
 
   useEffect(() => window.electronAPI?.updates.onStatus(setUpdateStatus), []);
   useEffect(() => {
@@ -1684,7 +1686,8 @@ function App() {
         onConfirmRead={confirmGuideRead}
         onClose={() => setGuidesOpen(false)}
       />
-      {(recordingWork.length > 0 || pendingYouTubeUploads.length > 0) && (
+      {(recordingWork.some((work) => work.phase !== "ready") ||
+        reviewableYouTubeUploads.length > 0) && (
         <Stack
           spacing={1}
           aria-live="polite"
@@ -1698,55 +1701,57 @@ function App() {
             zIndex: (theme) => theme.zIndex.modal - 1,
           }}
         >
-          {recordingWork.map((work) => (
-            <Alert
-              key={work.id}
-              severity={work.phase === "failed" ? "error" : "info"}
-              icon={false}
-              sx={{ py: 0.5 }}
-            >
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {work.title}: {work.fileName}
-              </Typography>
-              <Typography variant="caption" component="div">
-                {work.detail}
-              </Typography>
-              {work.phase !== "failed" && (
-                <LinearProgress
-                  variant={work.total ? "determinate" : "indeterminate"}
-                  value={work.total ? (100 * (work.completed ?? 0)) / work.total : undefined}
-                  sx={{ mt: 0.75 }}
-                />
-              )}
-              {work.kind === "youtube-upload" &&
-                (work.phase === "queued" || work.phase === "uploading") &&
-                work.recordingId && (
+          {recordingWork
+            .filter((work) => work.phase !== "ready")
+            .map((work) => (
+              <Alert
+                key={work.id}
+                severity={work.phase === "failed" ? "error" : "info"}
+                icon={false}
+                sx={{ py: 0.5 }}
+              >
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {work.title}: {work.fileName}
+                </Typography>
+                <Typography variant="caption" component="div">
+                  {work.detail}
+                </Typography>
+                {work.phase !== "failed" && (
+                  <LinearProgress
+                    variant={work.total ? "determinate" : "indeterminate"}
+                    value={work.total ? (100 * (work.completed ?? 0)) / work.total : undefined}
+                    sx={{ mt: 0.75 }}
+                  />
+                )}
+                {work.kind === "youtube-upload" &&
+                  (work.phase === "queued" || work.phase === "uploading") &&
+                  work.recordingId && (
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        void window.electronAPI?.recordings.cancelYouTubeUpload({
+                          recordingId: work.recordingId!,
+                        })
+                      }
+                    >
+                      Cancel upload
+                    </Button>
+                  )}
+                {work.kind === "youtube-upload" && work.phase === "failed" && work.recordingId && (
                   <Button
                     size="small"
                     onClick={() =>
-                      void window.electronAPI?.recordings.cancelYouTubeUpload({
+                      void window.electronAPI?.recordings.dismissYouTubeUploadError({
                         recordingId: work.recordingId!,
                       })
                     }
                   >
-                    Cancel upload
+                    Dismiss
                   </Button>
                 )}
-              {work.kind === "youtube-upload" && work.phase === "failed" && work.recordingId && (
-                <Button
-                  size="small"
-                  onClick={() =>
-                    void window.electronAPI?.recordings.dismissYouTubeUploadError({
-                      recordingId: work.recordingId!,
-                    })
-                  }
-                >
-                  Dismiss
-                </Button>
-              )}
-            </Alert>
-          ))}
-          {pendingYouTubeUploads.map((upload) => (
+              </Alert>
+            ))}
+          {reviewableYouTubeUploads.map((upload) => (
             <Alert
               key={`youtube-pending:${upload.recordingId}`}
               severity="success"
@@ -1793,7 +1798,19 @@ function App() {
                   </Button>
                   <Button
                     size="small"
-                    onClick={() => forgetPendingYouTubeUpload(upload.recordingId)}
+                    onClick={() => {
+                      try {
+                        forgetPendingYouTubeUpload(upload.recordingId);
+                      } catch {
+                        // The Electron work card can still be dismissed without browser storage.
+                      }
+                      void window.electronAPI?.recordings
+                        .acknowledgeYouTubeUpload({
+                          recordingId: upload.recordingId,
+                          url: upload.url,
+                        })
+                        .catch(() => undefined);
+                    }}
                   >
                     Forget
                   </Button>
@@ -1973,36 +1990,12 @@ function App() {
       )}
       {mountedTabs.combos && (
         <Box sx={{ display: tab === combosTabIndex ? "block" : "none" }}>
-          {developerTabsAvailable && (
-            <Box sx={{ display: "flex", justifyContent: "flex-end", mb: 1 }}>
-              <FormControlLabel
-                label="Dev combo editor"
-                control={
-                  <Switch
-                    checked={comboEditorMode}
-                    onChange={(event) => setComboEditorMode(event.target.checked)}
-                  />
-                }
-              />
-            </Box>
-          )}
-          {!comboEditorMode && <CombosPage active={tab === combosTabIndex} />}
+          <CombosPage active={tab === combosTabIndex} />
         </Box>
       )}
-      {developerTabsAvailable && (mountedTabs.tech || mountedTabs.combos) && (
-        <Box
-          sx={{
-            display:
-              tab === techTabIndex || (tab === combosTabIndex && comboEditorMode)
-                ? "block"
-                : "none",
-          }}
-        >
-          <TechSection
-            active={tab === techTabIndex || (tab === combosTabIndex && comboEditorMode)}
-            recordingsRefreshToken={recordingsRefreshToken}
-            combosOnly={tab === combosTabIndex && comboEditorMode}
-          />
+      {developerTabsAvailable && mountedTabs.tech && (
+        <Box sx={{ display: tab === techTabIndex ? "block" : "none" }}>
+          <TechSection />
         </Box>
       )}
     </Box>
