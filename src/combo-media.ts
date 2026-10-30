@@ -14,6 +14,7 @@ export type ComboYouTubeVideo = {
 export function comboYouTubeVideo(
   item: ComboItem,
   linkedYouTubeUrl: string | null | undefined = "",
+  removedVideoIds: readonly string[] = [],
 ): ComboYouTubeVideo | null {
   const sources = [
     { url: item.local?.youtubeUrl, source: "Local combo" as const, startSeconds: 0 },
@@ -34,7 +35,9 @@ export function comboYouTubeVideo(
       startSeconds: item.published?.startSeconds ?? 0,
     },
   ];
-  const chosen = sources.find((source) => source.url?.trim());
+  const chosen = sources.find(
+    (source) => source.url?.trim() && !removedVideoIds.includes(youtubeVideoId(source.url) ?? ""),
+  );
   if (!chosen) return null;
   const url = chosen.url!.trim();
   return {
@@ -61,16 +64,20 @@ export function comboMediaGap(
   recording: RecordedVideo | null,
   recordingsLoaded: boolean,
   pendingYouTubeUrl = "",
+  removedVideoIds: readonly string[] = [],
 ): ComboMediaGap {
   if (item.candidate)
     return mediaGap(
       item.candidate.status !== "rejected" && item.candidate.status !== "uploaded",
-      Boolean(comboYouTubeVideo(item, recording?.youtubeUrl || pendingYouTubeUrl)?.videoId),
+      Boolean(
+        comboYouTubeVideo(item, recording?.youtubeUrl || pendingYouTubeUrl, removedVideoIds)
+          ?.videoId,
+      ),
     );
   const hasLocalMp4 =
     Boolean(recording && isLocalMp4(recording)) || Boolean(link && !recordingsLoaded);
   const hasYouTubeVideo = Boolean(
-    comboYouTubeVideo(item, recording?.youtubeUrl || pendingYouTubeUrl)?.videoId,
+    comboYouTubeVideo(item, recording?.youtubeUrl || pendingYouTubeUrl, removedVideoIds)?.videoId,
   );
   return mediaGap(hasLocalMp4, hasYouTubeVideo);
 }

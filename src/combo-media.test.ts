@@ -69,6 +69,12 @@ describe("combo media gaps", () => {
       videoId: "M7lc1UVf-VE",
       source: "Local combo",
     });
+    expect(
+      comboYouTubeVideo(localWithYouTube, "https://youtu.be/aaaaaaaaaaa", ["M7lc1UVf-VE"]),
+    ).toMatchObject({ videoId: "aaaaaaaaaaa", source: "Linked recording" });
+    expect(comboMediaGap(localWithYouTube, undefined, null, true, "", ["M7lc1UVf-VE"])).toBe(
+      "No video",
+    );
     expect(comboYouTubeVideo(local, "https://youtu.be/M7lc1UVf-VE")).toMatchObject({
       videoId: "M7lc1UVf-VE",
       source: "Linked recording",

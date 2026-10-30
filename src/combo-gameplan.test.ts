@@ -232,6 +232,14 @@ describe("personal combo workspace", () => {
     });
     expect(comboItems([], [], data.localCombos)[0]).not.toHaveProperty("recordingId");
     expect(parseComboWorkspace({ version: 1 }).recordingLinks).toEqual({});
+    expect(
+      parseComboWorkspace({
+        version: 1,
+        removedYouTubeVideoIds: {
+          "catalog-one": ["M7lc1UVf-VE", "invalid", "M7lc1UVf-VE"],
+        },
+      }).removedYouTubeVideoIds,
+    ).toEqual({ "catalog-one": ["M7lc1UVf-VE"] });
   });
 
   it("replaces a Using route while preserving both routes' private notes", () => {

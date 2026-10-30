@@ -86,13 +86,26 @@ export const YouTubeRecordingPlayer = forwardRef<
   {
     videoId: string;
     title: string;
+    startSeconds?: number;
+    privacyEnhanced?: boolean;
+    sandbox?: string;
     onDuration?: (seconds: number) => void;
     onTime?: (seconds: number) => void;
     onPlayingChange?: (playing: boolean) => void;
     onError?: (message: string) => void;
   }
 >(function YouTubeRecordingPlayer(
-  { videoId, title, onDuration, onTime, onPlayingChange, onError },
+  {
+    videoId,
+    title,
+    startSeconds = 0,
+    privacyEnhanced = false,
+    sandbox,
+    onDuration,
+    onTime,
+    onPlayingChange,
+    onError,
+  },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -116,13 +129,17 @@ export const YouTubeRecordingPlayer = forwardRef<
     if (!host) return;
     const frame = document.createElement("iframe");
     const origin = window.location.origin;
-    const playerUrl = new URL(`https://www.youtube.com/embed/${videoId}`);
+    const playerUrl = new URL(
+      `https://${privacyEnhanced ? "www.youtube-nocookie.com" : "www.youtube.com"}/embed/${videoId}`,
+    );
     playerUrl.searchParams.set("enablejsapi", "1");
     playerUrl.searchParams.set("controls", "1");
     playerUrl.searchParams.set("playsinline", "1");
+    if (startSeconds > 0) playerUrl.searchParams.set("start", String(startSeconds));
     if (origin.startsWith("http")) playerUrl.searchParams.set("origin", origin);
     frame.title = title;
     frame.allow = "autoplay; clipboard-write; encrypted-media; picture-in-picture; fullscreen";
+    if (sandbox) frame.setAttribute("sandbox", sandbox);
     frame.allowFullscreen = true;
     frame.style.width = "100%";
     frame.style.height = "100%";
@@ -183,7 +200,7 @@ export const YouTubeRecordingPlayer = forwardRef<
       playerRef.current = null;
       host.replaceChildren();
     };
-  }, [videoId]);
+  }, [videoId, startSeconds, privacyEnhanced, sandbox]);
 
   return <div ref={hostRef} title={title} style={{ width: "100%", height: "100%" }} />;
 });

@@ -68,6 +68,7 @@ export type ComboWorkspaceData = {
   localCombos: LocalCombo[];
   entries: Record<string, PersonalComboEntry>;
   recordingLinks: Record<string, ComboRecordingLink>;
+  removedYouTubeVideoIds: Record<string, string[]>;
   candidateSubmissions: Record<
     string,
     { id: string; originCandidateId?: string; submittedAt: string; draftSignature?: string }
@@ -154,6 +155,7 @@ export function emptyComboWorkspace(): ComboWorkspaceData {
     localCombos: [],
     entries: {},
     recordingLinks: {},
+    removedYouTubeVideoIds: {},
     candidateSubmissions: {},
     snapshots: {},
     characterId: "",
@@ -264,11 +266,25 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
     : [];
   const snapshots: Record<string, CatalogComboSnapshot> = {};
   const recordingLinks: Record<string, ComboRecordingLink> = {};
+  const removedYouTubeVideoIds: Record<string, string[]> = {};
   const candidateSubmissions: ComboWorkspaceData["candidateSubmissions"] = {};
   if (record(value.recordingLinks)) {
     for (const [id, link] of Object.entries(value.recordingLinks)) {
       if (!id || !record(link) || !text(link.recordingId)) continue;
       recordingLinks[id] = { recordingId: text(link.recordingId), name: text(link.name) };
+    }
+  }
+  if (record(value.removedYouTubeVideoIds)) {
+    for (const [comboId, ids] of Object.entries(value.removedYouTubeVideoIds)) {
+      if (!comboId || !Array.isArray(ids)) continue;
+      const validIds = [
+        ...new Set(
+          ids.filter(
+            (id): id is string => typeof id === "string" && /^[A-Za-z0-9_-]{11}$/.test(id),
+          ),
+        ),
+      ];
+      if (validIds.length) removedYouTubeVideoIds[comboId] = validIds;
     }
   }
   if (record(value.candidateSubmissions)) {
@@ -319,6 +335,7 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
     localCombos,
     entries,
     recordingLinks,
+    removedYouTubeVideoIds,
     candidateSubmissions,
     snapshots,
     characterId: text(value.characterId),
