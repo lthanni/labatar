@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./style.css";
 import NewReleasesIcon from "@mui/icons-material/NewReleases";
 import SettingsIcon from "@mui/icons-material/Settings";
+import discordSymbol from "./discord-symbol.svg";
 import {
   Accordion,
   AccordionDetails,
@@ -94,6 +95,7 @@ declare global {
     electronAPI?: {
       app: {
         getVersion: () => Promise<string>;
+        openDiscord: () => Promise<void>;
       };
       processingConfiguration: {
         load: () => Promise<ProcessingConfigurationResult>;
@@ -254,30 +256,17 @@ declare global {
         }) => Promise<{ added: number; skipped: string[]; backupPath: string | null }>;
         openYouTubeStudio: (request: { recordingId: string; title?: string }) => Promise<void>;
         getYouTubeUploadStatus: (request: { destination: "sets" | "combos" }) => Promise<{
-          clientId: string;
-          hasClientSecret: boolean;
-          connected: boolean;
-          uploading: boolean;
-        }>;
-        configureYouTube: (request: {
-          clientId: string;
-          clientSecret: string;
-          destination: "sets" | "combos";
-        }) => Promise<{
-          clientId: string;
-          hasClientSecret: boolean;
+          configured: boolean;
           connected: boolean;
           uploading: boolean;
         }>;
         connectYouTube: (request: { destination: "sets" | "combos" }) => Promise<{
-          clientId: string;
-          hasClientSecret: boolean;
+          configured: boolean;
           connected: boolean;
           uploading: boolean;
         }>;
         disconnectYouTube: (request: { destination: "sets" | "combos" }) => Promise<{
-          clientId: string;
-          hasClientSecret: boolean;
+          configured: boolean;
           connected: boolean;
           uploading: boolean;
         }>;
@@ -1039,7 +1028,6 @@ function ReplayAnalysis({
 }
 
 function App() {
-  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [recordingsRefreshToken, setRecordingsRefreshToken] = useState(0);
   const [recordingWork, setRecordingWork] = useState<RecordingWorkItem[]>([]);
@@ -1521,9 +1509,6 @@ function App() {
   }, [recordingTabAvailable, recordingsTabIndex]);
 
   useEffect(() => window.electronAPI?.updates.onStatus(setUpdateStatus), []);
-  useEffect(() => {
-    void window.electronAPI?.app.getVersion().then(setAppVersion);
-  }, []);
 
   return (
     <Box
@@ -1671,11 +1656,6 @@ function App() {
           sx={{ alignItems: "center", justifySelf: { xs: "center", lg: "end" }, minWidth: 0 }}
         >
           <ObsRecordingControls onOpenSettings={() => openSettings("obs")} />
-          {appVersion && (
-            <Typography variant="caption" color="text.secondary">
-              v{appVersion}
-            </Typography>
-          )}
         </Stack>
       </Box>
       <GuidesDialog
@@ -1694,7 +1674,7 @@ function App() {
           sx={{
             position: "fixed",
             right: 16,
-            bottom: 16,
+            bottom: 56,
             width: "min(480px, calc(100vw - 32px))",
             maxHeight: "45vh",
             overflowY: "auto",
@@ -1948,8 +1928,9 @@ function App() {
         <Box
           sx={{
             display: tab === recordingsTabIndex ? "block" : "none",
-            height: "calc(100vh - 96px)",
+            flex: "1 1 auto",
             minHeight: 0,
+            minWidth: 0,
             overflow: "hidden",
           }}
         >
@@ -1975,8 +1956,9 @@ function App() {
         <Box
           sx={{
             display: tab === nerdProcessingTabIndex ? "block" : "none",
-            height: "calc(100vh - 96px)",
+            flex: "1 1 auto",
             minHeight: 0,
+            minWidth: 0,
             overflow: "hidden",
           }}
         >
@@ -2002,6 +1984,59 @@ function App() {
   );
 }
 
+function AppFooter() {
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void window.electronAPI?.app
+      .getVersion()
+      .then((version) => {
+        if (active) setAppVersion(version);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return (
+    <Box
+      component="footer"
+      sx={{
+        minHeight: 40,
+        flexShrink: 0,
+        px: 2,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        borderTop: 1,
+        borderColor: "divider",
+        bgcolor: "background.paper",
+      }}
+    >
+      <Typography variant="caption" color="text.secondary">
+        {appVersion ? `v${appVersion}` : ""}
+      </Typography>
+      <Tooltip title="Join Discord server">
+        <IconButton
+          size="small"
+          aria-label="Join Discord server"
+          onClick={() => void window.electronAPI?.app.openDiscord()}
+          sx={{
+            width: 30,
+            height: 30,
+            bgcolor: "#5865F2",
+            "&:hover": { bgcolor: "#4752C4" },
+          }}
+        >
+          <Box component="img" src={discordSymbol} alt="" sx={{ width: 20, height: 16 }} />
+        </IconButton>
+      </Tooltip>
+    </Box>
+  );
+}
+
 if (!root) {
   throw new Error("Root element not found");
 }
@@ -2018,17 +2053,18 @@ createRoot(root).render(
           boxSizing: "border-box",
           display: "flex",
           flexDirection: "column",
-          overflowX: "hidden",
-          overflowY: "auto",
-          p: 2,
+          overflow: "hidden",
           backgroundColor: "background.default",
         }}
       >
-        <AgGridProvider modules={agGridModules}>
-          <ObsRecordingProvider>
-            <App />
-          </ObsRecordingProvider>
-        </AgGridProvider>
+        <Box sx={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", p: 2 }}>
+          <AgGridProvider modules={agGridModules}>
+            <ObsRecordingProvider>
+              <App />
+            </ObsRecordingProvider>
+          </AgGridProvider>
+        </Box>
+        <AppFooter />
       </Box>
     </ThemeProvider>
   </StrictMode>,
