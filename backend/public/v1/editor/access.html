@@ -12,7 +12,9 @@
       <header>
         <p class="eyebrow">Labatar catalog</p>
         <h1>Manage access</h1>
-        <p>Add someone once. Editors can publish and automatically get Combos preview access.</p>
+        <p>
+          Grant combo and YouTube upload access separately. Editors can publish catalog records.
+        </p>
       </header>
 
       <section aria-labelledby="add-heading">
@@ -26,8 +28,10 @@
             <select id="role">
               <option value="viewer">Combo uploader</option>
               <option value="editor">Editor and combo uploader</option>
+              <option value="none">No combo access</option>
             </select>
           </label>
+          <label><input id="youtube-upload" type="checkbox" /> Upload to own YouTube channel</label>
           <button type="submit">Save access</button>
         </form>
       </section>
@@ -44,6 +48,7 @@
               <tr>
                 <th>Email</th>
                 <th>Access</th>
+                <th>YouTube upload</th>
                 <th></th>
               </tr>
             </thead>

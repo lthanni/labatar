@@ -519,6 +519,15 @@ async function accessRole(db, email) {
   return results[0]?.role ?? null;
 }
 
+async function hasYouTubeUploadAccess(db, email) {
+  if (!db) throw new Error("YouTube upload access is unavailable.");
+  const { results } = await db
+    .prepare("SELECT email FROM catalog_youtube_upload_access WHERE email = ?")
+    .bind(email)
+    .all();
+  return results.length > 0;
+}
+
 export async function authorizeAccessAdmin(request, env, fetcher = fetch) {
   const email = await verifyAccessJwt(request.headers.get("Cf-Access-Jwt-Assertion"), env, fetcher);
   if (!ownerEmails(env).includes(email)) throw new AccessAdminDenied(email);
@@ -559,36 +568,89 @@ function checkAdminMutation(request) {
 
 async function handleAccessRoles(request, env, adminEmail) {
   if (request.method === "GET") {
-    const { results } = await env.DB.prepare(
+    const { results: roles } = await env.DB.prepare(
       "SELECT email, role, updated_at AS updatedAt, updated_by AS updatedBy FROM catalog_access_roles ORDER BY email",
     ).all();
-    return json({ owner: adminEmail, items: results }, 200, privateHeaders);
+    const { results: youtube } = await env.DB.prepare(
+      "SELECT email FROM catalog_youtube_upload_access ORDER BY email",
+    ).all();
+    const items = new Map(roles.map((entry) => [entry.email, { ...entry, youtubeUpload: false }]));
+    for (const { email } of youtube) {
+      const entry = items.get(email);
+      if (entry) entry.youtubeUpload = true;
+      else items.set(email, { email, role: "none", youtubeUpload: true });
+    }
+    return json(
+      {
+        owner: adminEmail,
+        items: [...items.values()].sort((a, b) => a.email.localeCompare(b.email)),
+      },
+      200,
+      privateHeaders,
+    );
   }
   try {
     checkAdminMutation(request);
     const body = await readJsonBody(request);
     if (!isObject(body)) throw new Error("JSON body must be an object.");
-    exactFields(body, new Set(request.method === "PUT" ? ["email", "role"] : ["email"]));
+    exactFields(
+      body,
+      new Set(request.method === "PUT" ? ["email", "role", "youtubeUpload"] : ["email"]),
+    );
     const email = accessEmail(body.email);
     if (ownerEmails(env).includes(email)) throw new Error("Owner access is managed separately.");
     if (request.method === "PUT") {
-      if (body.role !== "viewer" && body.role !== "editor")
-        throw new Error("Role must be viewer or editor.");
+      if (!["none", "viewer", "editor"].includes(body.role))
+        throw new Error("Role must be none, viewer, or editor.");
+      if (body.youtubeUpload !== undefined && typeof body.youtubeUpload !== "boolean")
+        throw new Error("YouTube upload permission must be true or false.");
+      if (body.role === "none" && body.youtubeUpload !== true)
+        throw new Error("Choose at least one permission, or remove the person.");
       const now = new Date().toISOString();
-      await env.DB.prepare(`
+      const statements = [];
+      if (body.role === "none") {
+        statements.push(
+          env.DB.prepare("DELETE FROM catalog_access_roles WHERE email = ?").bind(email),
+        );
+      } else {
+        statements.push(
+          env.DB.prepare(`
         INSERT INTO catalog_access_roles (email, role, updated_at, updated_by)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(email) DO UPDATE SET
           role = excluded.role,
           updated_at = excluded.updated_at,
           updated_by = excluded.updated_by
-      `)
-        .bind(email, body.role, now, adminEmail)
-        .run();
-      return json({ email, role: body.role }, 200, privateHeaders);
+      `).bind(email, body.role, now, adminEmail),
+        );
+      }
+      if (body.youtubeUpload === true) {
+        statements.push(
+          env.DB.prepare(`
+          INSERT INTO catalog_youtube_upload_access (email, updated_at, updated_by)
+          VALUES (?, ?, ?)
+          ON CONFLICT(email) DO UPDATE SET
+            updated_at = excluded.updated_at,
+            updated_by = excluded.updated_by
+        `).bind(email, now, adminEmail),
+        );
+      } else if (body.youtubeUpload === false) {
+        statements.push(
+          env.DB.prepare("DELETE FROM catalog_youtube_upload_access WHERE email = ?").bind(email),
+        );
+      }
+      await env.DB.batch(statements);
+      return json(
+        { email, role: body.role, youtubeUpload: body.youtubeUpload },
+        200,
+        privateHeaders,
+      );
     }
     if (request.method === "DELETE") {
-      await env.DB.prepare("DELETE FROM catalog_access_roles WHERE email = ?").bind(email).run();
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM catalog_access_roles WHERE email = ?").bind(email),
+        env.DB.prepare("DELETE FROM catalog_youtube_upload_access WHERE email = ?").bind(email),
+      ]);
       return json({ removed: email }, 200, privateHeaders);
     }
   } catch (error) {
@@ -812,6 +874,22 @@ export async function handleRequest(
       await getComboPreview(request, env);
     } catch {
       return fail("Combos preview access required.", 403, true);
+    }
+    return json({ allowed: true }, 200, privateHeaders);
+  }
+  if (path === "/v1/editor/youtube-upload-access") {
+    if (request.method !== "GET") return fail("Method not allowed.", 405, true);
+    let email;
+    try {
+      email = accessEmail(await getAccessIdentity(request, env));
+    } catch {
+      return fail("Sign in to check YouTube upload access.", 401, true);
+    }
+    try {
+      if (!(ownerEmails(env).includes(email) || (await hasYouTubeUploadAccess(env.DB, email))))
+        return fail("This account does not have YouTube upload access.", 403, true);
+    } catch {
+      return fail("YouTube upload access is unavailable.", 503, true);
     }
     return json({ allowed: true }, 200, privateHeaders);
   }

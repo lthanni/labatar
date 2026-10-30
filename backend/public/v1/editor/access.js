@@ -2,6 +2,7 @@ const endpoint = "/v1/editor/access-roles";
 const form = document.querySelector("#access-form");
 const emailInput = document.querySelector("#email");
 const roleInput = document.querySelector("#role");
+const youtubeUploadInput = document.querySelector("#youtube-upload");
 const people = document.querySelector("#people");
 const owner = document.querySelector("#owner");
 const message = document.querySelector("#message");
@@ -38,7 +39,14 @@ async function loadPeople() {
     const address = document.createElement("td");
     address.textContent = entry.email;
     const role = document.createElement("td");
-    role.textContent = entry.role === "editor" ? "Editor + uploader" : "Uploader";
+    role.textContent =
+      entry.role === "editor"
+        ? "Editor + combo uploader"
+        : entry.role === "viewer"
+          ? "Combo uploader"
+          : "None";
+    const youtubeUpload = document.createElement("td");
+    youtubeUpload.textContent = entry.youtubeUpload ? "Allowed" : "No";
     const actions = document.createElement("td");
     const change = document.createElement("button");
     change.type = "button";
@@ -47,6 +55,7 @@ async function loadPeople() {
     change.addEventListener("click", () => {
       emailInput.value = entry.email;
       roleInput.value = entry.role;
+      youtubeUploadInput.checked = entry.youtubeUpload === true;
       emailInput.focus();
     });
     const remove = document.createElement("button");
@@ -67,13 +76,13 @@ async function loadPeople() {
       }
     });
     actions.append(change, remove);
-    row.append(address, role, actions);
+    row.append(address, role, youtubeUpload, actions);
     people.append(row);
   }
   if (!result.items.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 3;
+    cell.colSpan = 4;
     cell.textContent = "No additional people yet.";
     row.append(cell);
     people.append(row);
@@ -87,9 +96,10 @@ form.addEventListener("submit", async (event) => {
   try {
     const email = emailInput.value.trim();
     const role = roleInput.value;
-    await api("PUT", { email, role });
+    const youtubeUpload = youtubeUploadInput.checked;
+    await api("PUT", { email, role, youtubeUpload });
     await loadPeople();
-    showMessage(`Saved ${email} as ${role}.`);
+    showMessage(`Saved access for ${email}.`);
     form.reset();
   } catch (error) {
     showMessage(error.message, true);

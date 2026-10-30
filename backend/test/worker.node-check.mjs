@@ -22,6 +22,18 @@ function database() {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(schema);
   return {
+    async batch(statements) {
+      sqlite.exec("BEGIN");
+      try {
+        const results = [];
+        for (const statement of statements) results.push(await statement.run());
+        sqlite.exec("COMMIT");
+        return results;
+      } catch (error) {
+        sqlite.exec("ROLLBACK");
+        throw error;
+      }
+    },
     prepare(sql) {
       let statement = sqlite.prepare(sql);
       return {
@@ -433,6 +445,89 @@ test("only owner can manage individual viewer and editor roles", async () => {
       (await after.json()).items.map(({ email }) => email),
       ["editor@example.com"],
     );
+  } finally {
+    db.close();
+  }
+});
+
+void test("YouTube upload permission is independent of combo access", async () => {
+  const db = database();
+  const env = { DB: db, EDITOR_EMAILS: "owner@example.com" };
+  const denied = async () => {
+    throw new Error("Denied.");
+  };
+  const owner = async () => "owner@example.com";
+  const identity = async () => "youtube@example.com";
+  const check = (getIdentity = identity) =>
+    handleRequest(
+      request("/v1/editor/youtube-upload-access"),
+      env,
+      {},
+      denied,
+      denied,
+      owner,
+      denied,
+      async () => {},
+      getIdentity,
+    );
+  const put = (role, youtubeUpload) =>
+    handleRequest(
+      request(
+        "/v1/editor/access-roles",
+        "PUT",
+        {
+          email: "youtube@example.com",
+          role,
+          youtubeUpload,
+        },
+        { "X-Labatar-Admin": "1" },
+      ),
+      env,
+      {},
+      denied,
+      denied,
+      owner,
+    );
+  try {
+    assert.equal((await check()).status, 403);
+    assert.equal((await check(denied)).status, 401);
+    assert.equal((await put("viewer", false)).status, 200);
+    assert.equal((await check()).status, 403);
+    assert.equal((await put("none", true)).status, 200);
+    assert.deepEqual(await (await check()).json(), { allowed: true });
+    const list = await handleRequest(
+      request("/v1/editor/access-roles"),
+      env,
+      {},
+      denied,
+      denied,
+      owner,
+    );
+    assert.deepEqual((await list.json()).items, [
+      {
+        email: "youtube@example.com",
+        role: "none",
+        youtubeUpload: true,
+      },
+    ]);
+    assert.equal((await put("none", false)).status, 400);
+    assert.equal((await put("editor", true)).status, 200);
+    assert.equal((await check()).status, 200);
+    const removal = await handleRequest(
+      request(
+        "/v1/editor/access-roles",
+        "DELETE",
+        { email: "youtube@example.com" },
+        { "X-Labatar-Admin": "1" },
+      ),
+      env,
+      {},
+      denied,
+      denied,
+      owner,
+    );
+    assert.equal(removal.status, 200);
+    assert.equal((await check()).status, 403);
   } finally {
     db.close();
   }
