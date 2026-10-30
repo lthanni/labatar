@@ -89,9 +89,7 @@ function putUpload(url, filePath, start, end, total, token, signal, onBytes) {
 }
 
 function createYouTubeUploadService({ app, safeStorage, shell }) {
-  const settingsPath = path.join(app.getPath("userData"), "youtube-client.json");
   const bundledClientPath = path.join(__dirname, "youtube-client.json");
-  const secretPath = path.join(app.getPath("userData"), "youtube-client-secret.bin");
   const tokenPaths = {
     sets: path.join(app.getPath("userData"), "youtube-token.bin"),
     combos: path.join(app.getPath("userData"), "youtube-combos-token.bin"),
@@ -100,12 +98,6 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
 
   function clientId() {
     if (process.env.LABATAR_YOUTUBE_CLIENT_ID) return process.env.LABATAR_YOUTUBE_CLIENT_ID.trim();
-    try {
-      const value = JSON.parse(fs.readFileSync(settingsPath, "utf8")).clientId;
-      if (typeof value === "string" && value.trim()) return value.trim();
-    } catch {
-      // A packaged release can provide its public OAuth client ID below.
-    }
     try {
       const value = JSON.parse(fs.readFileSync(bundledClientPath, "utf8")).clientId;
       return typeof value === "string" ? value.trim() : "";
@@ -126,27 +118,8 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
     }
   }
 
-  function clientSecret() {
-    try {
-      if (safeStorage.isEncryptionAvailable()) {
-        const saved = JSON.parse(safeStorage.decryptString(fs.readFileSync(secretPath)));
-        if (saved.clientId === clientId() && typeof saved.clientSecret === "string") {
-          return saved.clientSecret;
-        }
-      }
-    } catch {
-      // The environment can supply credentials until they are set in the app.
-    }
-    return process.env.LABATAR_YOUTUBE_CLIENT_SECRET?.trim() || "";
-  }
-
   function tokenError(data, fallback) {
     const description = typeof data?.error_description === "string" ? data.error_description : "";
-    if (data?.error === "invalid_client" && /client secret/i.test(description)) {
-      return new Error(
-        "Google rejected the client secret. Use Change OAuth credentials to enter the client ID and secret from the same Desktop OAuth client's downloaded JSON.",
-      );
-    }
     return new Error(description || fallback);
   }
 
@@ -162,42 +135,10 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
   function status(destination = "sets") {
     validateDestination(destination);
     return {
-      clientId: clientId(),
-      hasClientSecret: Boolean(clientSecret()),
-      connected: Boolean(clientSecret() && readTokens(destination)?.refreshToken),
+      configured: clientIdPattern.test(clientId()),
+      connected: Boolean(readTokens(destination)?.refreshToken),
       uploading: Boolean(activeUpload),
     };
-  }
-
-  async function configure(request = {}) {
-    const next = String(request.clientId ?? "").trim();
-    const secret = String(request.clientSecret ?? "").trim();
-    if (!clientIdPattern.test(next)) throw new Error("Enter a Google Desktop OAuth client ID.");
-    if (!secret) throw new Error("Enter the client secret for the same Desktop OAuth client.");
-    if (
-      process.env.LABATAR_YOUTUBE_CLIENT_ID &&
-      next !== process.env.LABATAR_YOUTUBE_CLIENT_ID.trim()
-    ) {
-      throw new Error("The YouTube client ID is set by the app environment.");
-    }
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error("Secure Google account storage is unavailable on this system.");
-    }
-    if (activeUpload) throw new Error("Wait for the current upload to finish.");
-    if (next !== clientId() || secret !== clientSecret()) {
-      await Promise.all(
-        Object.values(tokenPaths).map((tokenPath) => fsp.rm(tokenPath, { force: true })),
-      );
-    }
-    await fsp.mkdir(path.dirname(settingsPath), { recursive: true });
-    if (!process.env.LABATAR_YOUTUBE_CLIENT_ID) {
-      await fsp.writeFile(settingsPath, JSON.stringify({ clientId: next }), "utf8");
-    }
-    await fsp.writeFile(
-      secretPath,
-      safeStorage.encryptString(JSON.stringify({ clientId: next, clientSecret: secret })),
-    );
-    return status(request.destination ?? "sets");
   }
 
   async function exchangeCode(destination, code, redirectUri, verifier) {
@@ -207,7 +148,6 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: clientId(),
-        client_secret: clientSecret(),
         code,
         code_verifier: verifier,
         grant_type: "authorization_code",
@@ -231,10 +171,7 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
     validateDestination(destination);
     const id = clientId();
     if (!clientIdPattern.test(id))
-      throw new Error("Configure a Google Desktop OAuth client ID first.");
-    if (!clientSecret()) {
-      throw new Error("Configure the Desktop OAuth client secret before connecting.");
-    }
+      throw new Error("YouTube uploads are not configured in this Labatar build.");
     if (!safeStorage.isEncryptionAvailable()) {
       throw new Error("Secure Google account storage is unavailable on this system.");
     }
@@ -310,7 +247,6 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: clientId(),
-        client_secret: clientSecret(),
         refresh_token: tokens.refreshToken,
         grant_type: "refresh_token",
       }),
@@ -515,7 +451,7 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
     if (activeUpload) activeUpload.abort();
   }
 
-  return { status, configure, connect, disconnect, upload, cancel };
+  return { status, connect, disconnect, upload, cancel };
 }
 
 module.exports = { createYouTubeUploadService };

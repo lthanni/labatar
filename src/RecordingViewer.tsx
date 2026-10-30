@@ -12,7 +12,6 @@ import {
   FormControl,
   FormControlLabel,
   IconButton,
-  InputAdornment,
   InputLabel,
   LinearProgress,
   List,
@@ -36,8 +35,6 @@ import {
 } from "@mui/material";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import VisibilityIcon from "@mui/icons-material/Visibility";
-import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import YouTubeIcon from "@mui/icons-material/YouTube";
 import type { RecordedVideo, RecordingTagCategory, RecordingTags } from "./recording-types";
 import { processMoveTake } from "./process-move-take";
@@ -618,15 +615,10 @@ export function RecordingViewer({
   const [youtubeDestination, setYoutubeDestination] = useState<"sets" | "combos">("sets");
   const youtubeStatusRequestId = useRef(0);
   const [youtubeUploadStatus, setYoutubeUploadStatus] = useState<{
-    clientId: string;
-    hasClientSecret: boolean;
+    configured: boolean;
     connected: boolean;
     uploading: boolean;
   } | null>(null);
-  const [youtubeClientIdDraft, setYoutubeClientIdDraft] = useState("");
-  const [youtubeClientSecretDraft, setYoutubeClientSecretDraft] = useState("");
-  const [youtubeShowClientSecret, setYoutubeShowClientSecret] = useState(false);
-  const [youtubeEditCredentials, setYoutubeEditCredentials] = useState(false);
   const [youtubeUploadTitle, setYoutubeUploadTitle] = useState("");
   const [youtubeUploadDescription, setYoutubeUploadDescription] = useState("");
   const [youtubeUploadTagsDraft, setYoutubeUploadTagsDraft] = useState("");
@@ -1502,9 +1494,6 @@ export function RecordingViewer({
       setYoutubeUploadTarget(recording);
       setYoutubeDestination(destination);
       setYoutubeUploadStatus(null);
-      setYoutubeClientSecretDraft("");
-      setYoutubeShowClientSecret(false);
-      setYoutubeEditCredentials(false);
       setYoutubeUploadTitle(formatYouTubeTitle(recording).slice(0, 100));
       setYoutubeUploadDescription(setHashtags.join(" "));
       setYoutubeUploadTagsDraft(setHashtags.map((hashtag) => hashtag.slice(1)).join(", "));
@@ -1519,7 +1508,6 @@ export function RecordingViewer({
         (status) => {
           if (requestId !== youtubeStatusRequestId.current) return;
           setYoutubeUploadStatus(status);
-          setYoutubeClientIdDraft(status.clientId);
         },
         (error: unknown) => {
           if (requestId === youtubeStatusRequestId.current) {
@@ -1558,7 +1546,6 @@ export function RecordingViewer({
         (status) => {
           if (requestId !== youtubeStatusRequestId.current) return;
           setYoutubeUploadStatus(status);
-          setYoutubeClientIdDraft(status.clientId);
         },
         (error: unknown) => {
           if (requestId === youtubeStatusRequestId.current) {
@@ -1569,26 +1556,6 @@ export function RecordingViewer({
     },
     [recordingById, youtubeUploadDescription, youtubeUploadTarget],
   );
-
-  const configureYouTube = useCallback(async () => {
-    try {
-      setYoutubeUploadBusy(true);
-      setYoutubeUploadError(null);
-      const status = await window.electronAPI!.recordings.configureYouTube({
-        clientId: youtubeClientIdDraft,
-        clientSecret: youtubeClientSecretDraft,
-        destination: youtubeDestination,
-      });
-      setYoutubeUploadStatus(status);
-      setYoutubeClientSecretDraft("");
-      setYoutubeShowClientSecret(false);
-      setYoutubeEditCredentials(false);
-    } catch (error) {
-      setYoutubeUploadError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setYoutubeUploadBusy(false);
-    }
-  }, [youtubeClientIdDraft, youtubeClientSecretDraft, youtubeDestination]);
 
   const connectYouTube = useCallback(async () => {
     try {
@@ -2618,16 +2585,24 @@ export function RecordingViewer({
       <Stack
         direction={{ xs: "column", md: "row" }}
         spacing={panelOnly ? 0 : 2}
-        sx={{ flex: 1, minHeight: 0, minWidth: 0, alignItems: "stretch", overflow: "hidden" }}
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          minWidth: 0,
+          alignItems: "stretch",
+          overflowX: "hidden",
+          overflowY: { xs: "auto", md: "hidden" },
+        }}
       >
         <Paper
           variant="outlined"
           sx={{
-            width: { xs: "100%", md: 660 },
+            width: { xs: "100%", md: "min(660px, 55%)" },
             flexShrink: 0,
-            display: panelOnly ? "none" : { xs: "block", md: "flex" },
+            display: panelOnly ? "none" : "flex",
             flexDirection: "column",
-            minHeight: 0,
+            height: { xs: "min(50vh, 440px)", md: "auto" },
+            minHeight: { xs: 260, md: 0 },
           }}
         >
           <Stack
@@ -3140,80 +3115,14 @@ export function RecordingViewer({
                 <MenuItem value="sets">Sets account</MenuItem>
                 <MenuItem value="combos">Labatar account (combos)</MenuItem>
               </TextField>
-              {youtubeUploadStatus &&
-                (!youtubeUploadStatus.clientId ||
-                  !youtubeUploadStatus.hasClientSecret ||
-                  youtubeEditCredentials) && (
-                  <>
-                    <TextField
-                      label="Google Desktop OAuth client ID"
-                      value={youtubeClientIdDraft}
-                      onChange={(event) => setYoutubeClientIdDraft(event.target.value)}
-                      disabled={youtubeUploadBusy}
-                      size="small"
-                      fullWidth
-                    />
-                    <TextField
-                      label="Google Desktop OAuth client secret"
-                      type={youtubeShowClientSecret ? "text" : "password"}
-                      value={youtubeClientSecretDraft}
-                      onChange={(event) => setYoutubeClientSecretDraft(event.target.value)}
-                      disabled={youtubeUploadBusy}
-                      helperText="Find client_secret in the downloaded JSON for this Desktop OAuth client."
-                      slotProps={{
-                        input: {
-                          endAdornment: (
-                            <InputAdornment position="end">
-                              <IconButton
-                                aria-label={
-                                  youtubeShowClientSecret
-                                    ? "Hide client secret"
-                                    : "Show client secret"
-                                }
-                                onClick={() => setYoutubeShowClientSecret((shown) => !shown)}
-                                disabled={youtubeUploadBusy}
-                                edge="end"
-                              >
-                                {youtubeShowClientSecret ? (
-                                  <VisibilityOffIcon />
-                                ) : (
-                                  <VisibilityIcon />
-                                )}
-                              </IconButton>
-                            </InputAdornment>
-                          ),
-                        },
-                      }}
-                      size="small"
-                      fullWidth
-                    />
-                    <Button
-                      onClick={() => void configureYouTube()}
-                      disabled={
-                        youtubeUploadBusy ||
-                        !youtubeClientIdDraft.trim() ||
-                        !youtubeClientSecretDraft.trim()
-                      }
-                    >
-                      Save OAuth credentials
-                    </Button>
-                  </>
-                )}
-              {youtubeUploadStatus?.clientId &&
-                youtubeUploadStatus.hasClientSecret &&
-                !youtubeUploadStatus.connected &&
-                !youtubeEditCredentials && (
-                  <Button onClick={() => void connectYouTube()} disabled={youtubeUploadBusy}>
-                    Connect {youtubeDestination === "sets" ? "sets" : "Labatar"} YouTube account
-                  </Button>
-                )}
-              {youtubeUploadStatus?.hasClientSecret && !youtubeEditCredentials && (
-                <Button
-                  size="small"
-                  onClick={() => setYoutubeEditCredentials(true)}
-                  disabled={youtubeUploadBusy}
-                >
-                  Change OAuth credentials
+              {youtubeUploadStatus && !youtubeUploadStatus.configured && (
+                <Alert severity="warning">
+                  YouTube uploads are not configured in this Labatar build.
+                </Alert>
+              )}
+              {youtubeUploadStatus?.configured && !youtubeUploadStatus.connected && (
+                <Button onClick={() => void connectYouTube()} disabled={youtubeUploadBusy}>
+                  Connect {youtubeDestination === "sets" ? "sets" : "Labatar"} YouTube account
                 </Button>
               )}
               {youtubeUploadStatus?.connected && !youtubeUploadBusy && (
@@ -3596,16 +3505,26 @@ export function RecordingViewer({
 
         <Paper
           variant="outlined"
-          sx={{ p: 2, flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", textAlign: "left" }}
+          sx={{
+            p: 2,
+            flex: { xs: "0 0 auto", md: 1 },
+            minWidth: 0,
+            minHeight: { xs: "auto", md: 0 },
+            overflow: { xs: "visible", md: "auto" },
+            textAlign: "left",
+            containerType: "inline-size",
+          }}
         >
           {selectedRecording ? (
             <Stack spacing={1.5}>
-              <Stack
-                direction={{ xs: "column", sm: "row" }}
-                spacing={1}
-                sx={{ alignItems: { sm: "center" } }}
-              >
-                <Stack sx={{ flex: 1, minWidth: 0 }}>
+              <Stack direction="row" sx={{ alignItems: "center", flexWrap: "wrap", gap: 1 }}>
+                <Stack
+                  sx={{
+                    flex: "1 1 160px",
+                    minWidth: 0,
+                    "@container (max-width: 760px)": { flexBasis: "100%" },
+                  }}
+                >
                   <Typography variant="subtitle1" sx={{ overflowWrap: "anywhere" }}>
                     {selectedRecording.name}
                   </Typography>

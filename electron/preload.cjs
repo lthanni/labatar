@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   platform: process.platform,
   app: {
     getVersion: () => ipcRenderer.invoke("app:get-version"),
+    openDiscord: () => ipcRenderer.invoke("app:open-discord"),
   },
   capture: {
     getState: () => ipcRenderer.invoke("capture:get-state"),
@@ -141,7 +142,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
     openYouTubeStudio: (request) => ipcRenderer.invoke("recordings:open-youtube-studio", request),
     getYouTubeUploadStatus: (request) =>
       ipcRenderer.invoke("recordings:youtube-upload-status", request),
-    configureYouTube: (request) => ipcRenderer.invoke("recordings:youtube-configure", request),
     connectYouTube: (request) => ipcRenderer.invoke("recordings:youtube-connect", request),
     disconnectYouTube: (request) => ipcRenderer.invoke("recordings:youtube-disconnect", request),
     uploadToYouTube: (request) => ipcRenderer.invoke("recordings:youtube-upload", request),

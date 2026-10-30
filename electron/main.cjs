@@ -44,6 +44,7 @@ const { noGameStartedRecordingBaseName } = require("./automatic-recording-outcom
 const { normalizeYouTubeVideoUrl, readYouTubeVideoUrl } = require("./recording-youtube.cjs");
 const { replaceLocalRecordingWithYouTube } = require("./youtube-recording-replacement.cjs");
 const { createYouTubeUploadService } = require("./youtube-upload.cjs");
+const { requireYouTubeUploadAccess } = require("./youtube-access.cjs");
 const { publishCombo } = require("./catalog-publisher.cjs");
 const {
   candidateServiceStatus,
@@ -3642,6 +3643,7 @@ function cleanReplayName(value) {
 }
 
 ipcMain.handle("app:get-version", () => app.getVersion());
+ipcMain.handle("app:open-discord", () => openDiscordServer());
 
 ipcMain.handle("capture:get-state", () => publicCaptureState());
 ipcMain.handle("capture:set-settings", (_, request) => {
@@ -7039,15 +7041,12 @@ function ensureYouTubeConnectionCanChange(destination = null) {
 ipcMain.handle("recordings:youtube-upload-status", (_, request) =>
   youtubeUploader.status(request?.destination ?? "sets"),
 );
-ipcMain.handle("recordings:youtube-configure", (_, request) => {
-  ensureYouTubeConnectionCanChange();
-  return youtubeUploader.configure(request);
-});
 ipcMain.handle("recordings:youtube-connect", async (_, request) => {
   const destination = request?.destination ?? "sets";
   ensureYouTubeConnectionCanChange(destination);
   youtubeConnectionsChanging.add(destination);
   try {
+    await requireYouTubeUploadAccess(mainWindow);
     return await youtubeUploader.connect(destination);
   } finally {
     youtubeConnectionsChanging.delete(destination);
@@ -7088,6 +7087,8 @@ function startNextYouTubeUpload() {
       if (current.size !== job.fileSize || current.mtimeMs !== job.modifiedAt) {
         throw new Error("The recording changed while waiting in the upload queue.");
       }
+      if (job.cancelRequested) throw new Error("Upload cancelled.");
+      await requireYouTubeUploadAccess(mainWindow);
       if (job.cancelRequested) throw new Error("Upload cancelled.");
       const result = await youtubeUploader.upload({
         destination: job.request.destination,
@@ -7743,6 +7744,16 @@ function createWindow() {
   }
 }
 
+const discordInviteUrl = "https://discord.gg/vsPFcvhVq9";
+
+async function openDiscordServer() {
+  try {
+    await shell.openExternal(discordInviteUrl);
+  } catch {
+    dialog.showErrorBox("Could not open Discord", `Open ${discordInviteUrl} in your browser.`);
+  }
+}
+
 function buildApplicationMenu() {
   const template = [
     {
@@ -7785,6 +7796,11 @@ function buildApplicationMenu() {
         {
           label: "Check for Updates...",
           click: handleUpdateMenuClick,
+        },
+        { type: "separator" },
+        {
+          label: "Join Discord Server",
+          click: () => void openDiscordServer(),
         },
       ],
     },
