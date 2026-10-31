@@ -114,6 +114,32 @@ export function collapseRecordingDisplayRows(
   return visible;
 }
 
+export function pageRecordingDisplayRows(
+  rows: RecordingDisplayRow[],
+  page: number,
+  pageSize: number,
+): RecordingDisplayRow[] {
+  const firstRoot = (page - 1) * pageSize;
+  let rootIndex = -1;
+  return rows.filter((row) => {
+    if (row.depth === 0) rootIndex += 1;
+    return rootIndex >= firstRoot && rootIndex < firstRoot + pageSize;
+  });
+}
+
+export function recordingPageForId(
+  rows: RecordingDisplayRow[],
+  recordingId: string,
+  pageSize: number,
+): number | null {
+  let rootIndex = -1;
+  for (const row of rows) {
+    if (row.depth === 0) rootIndex += 1;
+    if (row.recording.id === recordingId) return Math.floor(rootIndex / pageSize) + 1;
+  }
+  return null;
+}
+
 export function descendantClipRanges(
   recordings: RecordedVideo[],
   selectedRecordingId: string,

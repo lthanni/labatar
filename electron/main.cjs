@@ -278,6 +278,7 @@ const {
   legacySceneToggles,
   sceneTogglesFromItems,
   updateSceneToggles,
+  disableAutomaticPressureFramebar,
 } = require("./obs-scene-toggles.cjs");
 const {
   pressureBaseTransform,
@@ -1826,6 +1827,9 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
       durationMs: Date.now() - preparationStartedAt,
     });
   }
+  if (!options.manual && (await disableAutomaticPressureFramebar(client))) {
+    await refreshObsState(client);
+  }
   const normalizedMetadata = metadata ? normalizeRecordingMetadata(metadata) : null;
   const tags = normalizeRecordingTags(options.tags);
   const startedAt = new Date().toISOString();
@@ -2285,6 +2289,9 @@ async function setAutomaticRecordingEnabled(enabled) {
       throw new Error("Connect OBS before enabling automatic recording.");
     try {
       await prepareObsProfile();
+      if (await disableAutomaticPressureFramebar(getObsClient())) {
+        await refreshObsState(getObsClient());
+      }
       await opponentSetHistory.refresh().catch((error) => {
         logRecordingDiagnostic("opponent-set-history-failed", {
           error: obsErrorMessage(error),
@@ -2711,6 +2718,7 @@ async function setupLabatarObsScenes(request = {}) {
     }
     await client.call("CreateScene", { sceneName: gameScene });
   }
+  if (obsState.automation.enabled) desiredToggles.pressureFramebar = false;
   await client.call("SetCurrentProgramScene", { sceneName: gameScene });
   for (const scene of sceneList.scenes ?? []) {
     if (scene.sceneName !== gameScene) {
@@ -3759,6 +3767,9 @@ ipcMain.handle("obs:set-source-toggle", async (_, request) => {
   if (!labatarToggleKeys.includes(key) || typeof enabled !== "boolean") {
     throw new Error("Invalid OBS source toggle.");
   }
+  if (key === "pressureFramebar" && enabled && obsState.automation.enabled) {
+    throw new Error("Stop automatic recording before turning on the P2 framebar.");
+  }
   const client = getObsClient();
   const current = await refreshObsState(client);
   if (current.recordStatus.outputActive) {
@@ -4690,6 +4701,11 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
   const sourceStat = await fs.promises.stat(sourcePath).catch(() => null);
   if (!sourceStat?.isFile()) throw new Error("The source recording no longer exists.");
 
+  const fast = request.mode === "fast";
+  if (request.mode !== undefined && request.mode !== "fast" && request.mode !== "precise") {
+    throw new Error("Unknown export mode.");
+  }
+
   const startTime = Number(request.startTime);
   const endTime = Number(request.endTime);
   if (
@@ -4701,6 +4717,22 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
     throw new Error("The clip range is invalid.");
   }
 
+  let actualStart = startTime;
+  let creationTime = null;
+  if (fast) {
+    const executable = resolveFfmpegPath();
+    const sourceProbe = await probeChapters(executable, sourcePath);
+    if (endTime * 1000 > sourceProbe.durationMs + 150) {
+      throw new Error("The clip range is outside this recording.");
+    }
+    actualStart = await probeFastTrimStart(executable, sourcePath, startTime);
+    if (sourceProbe.creationTime && Number.isFinite(Date.parse(sourceProbe.creationTime))) {
+      creationTime = new Date(
+        Date.parse(sourceProbe.creationTime) + actualStart * 1000,
+      ).toISOString();
+    }
+  }
+
   const folder = path.resolve(getObsSettings().recordDirectory);
   await fs.promises.mkdir(folder, { recursive: true });
   const sourceRecordingName = path.basename(sourcePath);
@@ -4708,13 +4740,29 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
     path.basename(sourcePath, path.extname(sourcePath)),
     "recording",
   );
-  const rangeLabel = `${clipTimeForFilename(startTime)} to ${clipTimeForFilename(endTime)}`;
+  const rangeLabel = `${clipTimeForFilename(actualStart)} to ${clipTimeForFilename(endTime)}`;
   const baseName = `${sourceStem} - ${Number.isFinite(options.manualChapterStartMs) ? "F10 clip" : "clip"} ${rangeLabel}`;
   const outputPath = await availableRecordingPath(folder, baseName);
   const duration = endTime - startTime;
 
   try {
-    await runFfmpeg(buildClipExportFfmpegArgs({ sourcePath, startTime, duration, outputPath }));
+    await runFfmpeg(
+      fast
+        ? buildFastTrimFfmpegArgs({
+            sourcePath,
+            requestedStart: startTime,
+            requestedEnd: endTime,
+            creationTime,
+            outputPath,
+          })
+        : buildClipExportFfmpegArgs({ sourcePath, startTime, duration, outputPath }),
+    );
+    if (fast) {
+      const exportedProbe = await probeChapters(resolveFfmpegPath(), outputPath);
+      if (Math.abs(exportedProbe.durationMs - (endTime - actualStart) * 1000) > 500) {
+        throw new Error("The fast export did not match the selected range. Try Precise export.");
+      }
+    }
   } catch (error) {
     await fs.promises.rm(outputPath, { force: true }).catch(() => undefined);
     throw error;
@@ -4724,7 +4772,7 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
   const clip = {
     sourceRecordingId: path.relative(folder, sourcePath).split(path.sep).join("/"),
     sourceRecordingName,
-    startTime,
+    startTime: actualStart,
     endTime,
     createdAt: new Date().toISOString(),
     ...(Number.isFinite(options.manualChapterStartMs)
@@ -6960,7 +7008,7 @@ ipcMain.handle("artwork:cancel", (_, request) => {
   return { cancelled: true };
 });
 
-ipcMain.handle("recordings:export-clip", async (_, request) => {
+async function handleClipExport(request, mode) {
   const workId = `clip-export:${randomUUID()}`;
   let fileName = "Recording";
   try {
@@ -6969,16 +7017,18 @@ ipcMain.handle("recordings:export-clip", async (_, request) => {
     // The export call will report an invalid recording ID.
   }
   setRecordingWork(workId, {
-    title: "Creating clip",
+    title: mode === "fast" ? "Fast exporting clip" : "Precise exporting clip",
     fileName,
     detail: `${clipTimeForFilename(Number(request?.startTime) || 0)}–${clipTimeForFilename(Number(request?.endTime) || 0)}`,
   });
   try {
-    return await exportRecordingClip(request);
+    return await exportRecordingClip({ ...request, mode });
   } finally {
     clearRecordingWork(workId);
   }
-});
+}
+ipcMain.handle("recordings:export-clip", (_, request) => handleClipExport(request, "precise"));
+ipcMain.handle("recordings:export-clip-fast", (_, request) => handleClipExport(request, "fast"));
 ipcMain.handle("recordings:trim-clip", async (_, request) => {
   const workId = `clip-trim:${randomUUID()}`;
   let fileName = "Recording";

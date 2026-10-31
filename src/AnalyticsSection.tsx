@@ -1,14 +1,11 @@
 import { Fragment, type ReactNode, useEffect, useMemo, useState } from "react";
 import {
+  Autocomplete,
   Box,
   Card,
   CardContent,
   Checkbox,
-  FormControl,
-  InputLabel,
-  ListItemText,
-  MenuItem,
-  Select,
+  Pagination,
   Stack,
   Table,
   TableBody,
@@ -16,6 +13,7 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  TextField,
   Typography,
 } from "@mui/material";
 import {
@@ -36,6 +34,8 @@ import { summarizeOpponents } from "./opponent-summary";
 import supportMap from "../electron/support-map.json";
 
 const ENABLE_OPPONENT_WIN_RATE_CHART = false;
+const OPPONENTS_PER_PAGE = 20;
+const AUTOCOMPLETE_RESULT_LIMIT = 100;
 
 type AnalyticsSectionProps = {
   fillHeight?: boolean;
@@ -386,7 +386,7 @@ function EmptyChart() {
   );
 }
 
-function MultiSelectFilter({
+function OpponentAutocomplete({
   label,
   values,
   selected,
@@ -397,24 +397,89 @@ function MultiSelectFilter({
   selected: string[];
   onChange: (value: string[]) => void;
 }) {
+  const [inputValue, setInputValue] = useState("");
+  const options = useMemo(() => {
+    const selectedValues = new Set(selected);
+    const matches = [...selected];
+    const query = inputValue.trim().toLowerCase();
+    let resultCount = 0;
+    for (const value of values) {
+      if (selectedValues.has(value) || (query && !value.toLowerCase().includes(query))) continue;
+      matches.push(value);
+      resultCount += 1;
+      if (resultCount === AUTOCOMPLETE_RESULT_LIMIT) break;
+    }
+    return matches;
+  }, [inputValue, selected, values]);
   return (
-    <FormControl size="small" sx={{ minWidth: 190 }}>
-      <InputLabel>{label}</InputLabel>
-      <Select
-        multiple
-        value={selected}
-        label={label}
-        renderValue={(items) => items.join(", ")}
-        onChange={(event) => onChange(event.target.value as string[])}
-      >
-        {values.map((value) => (
-          <MenuItem key={value} value={value}>
-            <Checkbox checked={selected.includes(value)} />
-            <ListItemText primary={value} />
-          </MenuItem>
-        ))}
-      </Select>
-    </FormControl>
+    <Autocomplete
+      size="small"
+      sx={{ minWidth: 190, width: "100%" }}
+      options={options}
+      value={selected}
+      inputValue={inputValue}
+      onInputChange={(_, value) => setInputValue(value)}
+      onChange={(_, value) => onChange(value)}
+      filterOptions={(available) => available}
+      noOptionsText="No opponents found"
+      renderInput={(params) => <TextField {...params} label={label} />}
+      limitTags={2}
+      multiple
+    />
+  );
+}
+
+function PlayerAutocomplete({
+  playerCounts,
+  playerOfInterest,
+  playerOverride,
+  onChange,
+}: {
+  playerCounts: Record<string, number>;
+  playerOfInterest: string | null;
+  playerOverride: string | null;
+  onChange: (value: string | null) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const sortedPlayers = useMemo(
+    () => Object.entries(playerCounts).sort((a, b) => b[1] - a[1]),
+    [playerCounts],
+  );
+  const options = useMemo(() => {
+    const matches = [""];
+    if (playerOverride) matches.push(playerOverride);
+    const query = search.trim().toLowerCase();
+    let resultCount = 0;
+    for (const [name] of sortedPlayers) {
+      if (name === playerOverride || (query && !name.toLowerCase().includes(query))) continue;
+      matches.push(name);
+      resultCount += 1;
+      if (resultCount === AUTOCOMPLETE_RESULT_LIMIT) break;
+    }
+    return matches;
+  }, [playerOverride, search, sortedPlayers]);
+  return (
+    <Autocomplete
+      size="small"
+      sx={{ width: "100%", backgroundColor: "background.paper" }}
+      options={options}
+      value={playerOverride ?? ""}
+      onInputChange={(_, value, reason) => setSearch(reason === "input" ? value : "")}
+      onChange={(_, value) => {
+        setSearch("");
+        onChange(value || null);
+      }}
+      filterOptions={(available) => available}
+      getOptionLabel={(name) =>
+        name
+          ? `${name} (${playerCounts[name] ?? 0})`
+          : playerOfInterest
+            ? `${playerOfInterest} (auto)`
+            : "Auto-detected"
+      }
+      renderInput={(params) => <TextField {...params} label="Player" />}
+      noOptionsText="No players found"
+    />
   );
 }
 
@@ -810,36 +875,18 @@ function MatchupHeatmap({
         textAlign: "left",
       }}
     >
-      <MultiSelectFilter
+      <OpponentAutocomplete
         label="Opponent"
         values={opponentPlayers}
         selected={selectedOpponentPlayers}
         onChange={onOpponentPlayersChange}
       />
-      <FormControl size="small" sx={{ width: "100%", backgroundColor: "background.paper" }}>
-        <InputLabel id="matchup-player-label" shrink>
-          Player
-        </InputLabel>
-        <Select
-          labelId="matchup-player-label"
-          label="Player"
-          value={playerOverride ?? ""}
-          displayEmpty
-          renderValue={(selected) =>
-            selected || (playerOfInterest ? `${playerOfInterest} (auto)` : "Auto-detected")
-          }
-          onChange={(event) => onPlayerOverrideChange(event.target.value || null)}
-        >
-          <MenuItem value="">Auto-detected</MenuItem>
-          {Object.entries(playerCounts)
-            .sort((a, b) => b[1] - a[1])
-            .map(([name, count]) => (
-              <MenuItem key={name} value={name}>
-                {name} ({count})
-              </MenuItem>
-            ))}
-        </Select>
-      </FormControl>
+      <PlayerAutocomplete
+        playerCounts={playerCounts}
+        playerOfInterest={playerOfInterest}
+        playerOverride={playerOverride}
+        onChange={onPlayerOverrideChange}
+      />
       {rows.length > 1 && (
         <Box
           component="button"
@@ -1381,6 +1428,20 @@ export function AnalyticsSection({
   const selectedOpponentCount = opponentRows.filter(
     (row) => !disabledOpponents.has(row.name),
   ).length;
+  const [opponentPage, setOpponentPage] = useState(1);
+  const opponentPageCount = Math.max(1, Math.ceil(opponentRows.length / OPPONENTS_PER_PAGE));
+  const currentOpponentPage = Math.min(opponentPage, opponentPageCount);
+  useEffect(() => {
+    if (opponentPage > opponentPageCount) setOpponentPage(opponentPageCount);
+  }, [opponentPage, opponentPageCount]);
+  const pagedOpponentRows = useMemo(
+    () =>
+      opponentRows.slice(
+        (currentOpponentPage - 1) * OPPONENTS_PER_PAGE,
+        currentOpponentPage * OPPONENTS_PER_PAGE,
+      ),
+    [currentOpponentPage, opponentRows],
+  );
   const chartGames = useMemo(
     () =>
       playerOfInterest
@@ -1577,7 +1638,7 @@ export function AnalyticsSection({
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {opponentRows.map((row) => (
+                    {pagedOpponentRows.map((row) => (
                       <TableRow
                         key={row.name}
                         hover
@@ -1616,6 +1677,34 @@ export function AnalyticsSection({
                   </TableBody>
                 </Table>
               </TableContainer>
+              {opponentRows.length > OPPONENTS_PER_PAGE && (
+                <Stack
+                  direction="row"
+                  sx={{
+                    mt: 1,
+                    flexWrap: "wrap",
+                    gap: 1,
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <Typography variant="caption" color="text.secondary">
+                    {`${(currentOpponentPage - 1) * OPPONENTS_PER_PAGE + 1}-${Math.min(
+                      currentOpponentPage * OPPONENTS_PER_PAGE,
+                      opponentRows.length,
+                    )} of ${opponentRows.length} opponents`}
+                  </Typography>
+                  <Pagination
+                    aria-label="Opponent pages"
+                    count={opponentPageCount}
+                    page={currentOpponentPage}
+                    onChange={(_, nextPage) => setOpponentPage(nextPage)}
+                    size="small"
+                    showFirstButton
+                    showLastButton
+                  />
+                </Stack>
+              )}
             </CardContent>
           </Card>
           {ENABLE_OPPONENT_WIN_RATE_CHART && (

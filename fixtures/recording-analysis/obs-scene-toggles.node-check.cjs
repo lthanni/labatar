@@ -5,6 +5,7 @@ const {
   legacySceneToggles,
   sceneTogglesFromItems,
   updateSceneToggles,
+  disableAutomaticPressureFramebar,
 } = require("../../electron/obs-scene-toggles.cjs");
 
 void test("adopts each legacy scene's visible sources", () => {
@@ -69,4 +70,52 @@ void test("turning off desktop audio restores the separate game audio source", (
     updateSceneToggles(desktop, "desktopAudio", false, { gameAudioAvailable: false }),
     { ...desktop, desktopAudio: false },
   );
+});
+
+void test("automatic recording hides only the upper game crop in the managed OBS scene", async () => {
+  const calls = [];
+  const client = {
+    async call(method, request) {
+      calls.push({ method, request });
+      if (method === "GetSceneCollectionList") return { currentSceneCollectionName: "Labatar" };
+      if (method === "GetSceneList") return { scenes: [{ sceneName: "Labatar - Game" }] };
+      if (method === "GetSceneItemList") {
+        return {
+          sceneItems: [
+            {
+              sourceName: inputNames.game,
+              sceneItemIndex: 4,
+              sceneItemId: 20,
+              sceneItemEnabled: true,
+            },
+            {
+              sourceName: inputNames.game,
+              sceneItemIndex: 3,
+              sceneItemId: 10,
+              sceneItemEnabled: true,
+            },
+          ],
+        };
+      }
+      if (method === "SetSceneItemEnabled") return {};
+      throw new Error(`Unexpected OBS call: ${method}`);
+    },
+  };
+  assert.equal(await disableAutomaticPressureFramebar(client), true);
+  assert.deepEqual(calls.at(-1), {
+    method: "SetSceneItemEnabled",
+    request: { sceneName: "Labatar - Game", sceneItemId: 20, sceneItemEnabled: false },
+  });
+});
+
+void test("automatic framebar switch leaves other scene collections alone", async () => {
+  const calls = [];
+  const client = {
+    async call(method) {
+      calls.push(method);
+      return { currentSceneCollectionName: "Personal" };
+    },
+  };
+  assert.equal(await disableAutomaticPressureFramebar(client), false);
+  assert.deepEqual(calls, ["GetSceneCollectionList"]);
 });

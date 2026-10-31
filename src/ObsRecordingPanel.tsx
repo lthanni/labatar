@@ -620,6 +620,7 @@ export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) 
                             disabled={
                               busy ||
                               recording ||
+                              (key === "pressureFramebar" && state.automation.enabled) ||
                               (key === "pressureFramebar" &&
                                 !state.sourceToggles?.pressureFramebarReady) ||
                               (key === "gameAudio" && !state.sourceToggles?.gameAudioAvailable)
@@ -635,6 +636,7 @@ export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) 
                     Game and desktop audio are mutually exclusive. Turning off desktop audio
                     restores game audio when a separate game-audio source is available. Switches
                     affect manual and automatic recordings and can be changed before recording.
+                    Automatic recording turns off the P2 bar and keeps its switch off while enabled.
                     {!state.sourceToggles.pressureFramebarReady &&
                       " Open the game and apply setup again to place the P2 crop."}
                     {!state.sourceToggles.gameAudioAvailable &&

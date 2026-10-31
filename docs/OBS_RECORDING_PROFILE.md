@@ -32,7 +32,9 @@ audio restores the separate game-audio source when OBS provides one. Setup
 adopts the switch state of the selected legacy scene on first migration and
 preserves the current switches on later runs. Source switches are unavailable
 during an active recording. The selected switches affect both manual and
-automatic recordings.
+automatic recordings. Enabling automatic recording turns off the P2 crop in
+the managed game scene. Labatar keeps it off for automatic captures; the crop
+can be switched on again after automatic recording is stopped.
 
 The P2 item layers a tight crop from the same game-capture source directly
 below the P1 framebar. The measured 2560×1441 OBS scene used a

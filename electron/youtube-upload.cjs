@@ -90,21 +90,27 @@ function putUpload(url, filePath, start, end, total, token, signal, onBytes) {
 
 function createYouTubeUploadService({ app, safeStorage, shell }) {
   const bundledClientPath = path.join(__dirname, "youtube-client.json");
+  let bundledClient = {};
+  try {
+    bundledClient = JSON.parse(fs.readFileSync(bundledClientPath, "utf8"));
+  } catch {
+    // An unconfigured development build has no bundled OAuth client.
+  }
+  const bundledClientId =
+    typeof bundledClient?.clientId === "string" ? bundledClient.clientId.trim() : "";
+  const bundledClientSecret =
+    typeof bundledClient?.clientSecret === "string" ? bundledClient.clientSecret.trim() : "";
+  const clientId = (process.env.LABATAR_YOUTUBE_CLIENT_ID || bundledClientId).trim();
+  const clientSecret = (
+    process.env.LABATAR_YOUTUBE_CLIENT_SECRET ||
+    (clientId === bundledClientId ? bundledClientSecret : "") ||
+    ""
+  ).trim();
   const tokenPaths = {
     sets: path.join(app.getPath("userData"), "youtube-token.bin"),
     combos: path.join(app.getPath("userData"), "youtube-combos-token.bin"),
   };
   let activeUpload = null;
-
-  function clientId() {
-    if (process.env.LABATAR_YOUTUBE_CLIENT_ID) return process.env.LABATAR_YOUTUBE_CLIENT_ID.trim();
-    try {
-      const value = JSON.parse(fs.readFileSync(bundledClientPath, "utf8")).clientId;
-      return typeof value === "string" ? value.trim() : "";
-    } catch {
-      return "";
-    }
-  }
 
   function readTokens(destination) {
     try {
@@ -112,7 +118,7 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
       const value = JSON.parse(
         safeStorage.decryptString(fs.readFileSync(tokenPaths[validateDestination(destination)])),
       );
-      return value.clientId === clientId() ? value : null;
+      return value.clientId === clientId ? value : null;
     } catch {
       return null;
     }
@@ -135,7 +141,7 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
   function status(destination = "sets") {
     validateDestination(destination);
     return {
-      configured: clientIdPattern.test(clientId()),
+      configured: clientIdPattern.test(clientId) && Boolean(clientSecret),
       connected: Boolean(readTokens(destination)?.refreshToken),
       uploading: Boolean(activeUpload),
     };
@@ -147,7 +153,8 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
       signal: AbortSignal.timeout(15000),
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
-        client_id: clientId(),
+        client_id: clientId,
+        client_secret: clientSecret,
         code,
         code_verifier: verifier,
         grant_type: "authorization_code",
@@ -159,7 +166,7 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
       throw tokenError(data, "Google did not grant offline upload access.");
     }
     await saveTokens(destination, {
-      clientId: clientId(),
+      clientId,
       accessToken: data.access_token,
       refreshToken: data.refresh_token,
       expiresAt: Date.now() + data.expires_in * 1000,
@@ -169,9 +176,9 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
 
   async function connect(destination = "sets") {
     validateDestination(destination);
-    const id = clientId();
-    if (!clientIdPattern.test(id))
+    if (!clientIdPattern.test(clientId))
       throw new Error("YouTube uploads are not configured in this Labatar build.");
+    if (!clientSecret) throw new Error("YouTube OAuth client secret is missing from this build.");
     if (!safeStorage.isEncryptionAvailable()) {
       throw new Error("Secure Google account storage is unavailable on this system.");
     }
@@ -186,7 +193,7 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
     const redirectUri = `http://127.0.0.1:${server.address().port}/oauth2callback`;
     const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
     authorization.search = new URLSearchParams({
-      client_id: id,
+      client_id: clientId,
       redirect_uri: redirectUri,
       response_type: "code",
       scope: uploadScope,
@@ -246,7 +253,8 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
       signal: AbortSignal.timeout(15000),
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
-        client_id: clientId(),
+        client_id: clientId,
+        client_secret: clientSecret,
         refresh_token: tokens.refreshToken,
         grant_type: "refresh_token",
       }),

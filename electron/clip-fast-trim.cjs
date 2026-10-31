@@ -26,10 +26,10 @@ function parseFastTrimStart(output, requestedStart) {
   const firstFrame = output.match(
     /showinfo[^\n]*\bn:\s*0\b[^\n]*\bpts_time:\s*(-?\d+(?:\.\d+)?)[^\n]*\biskey:\s*1\b/,
   );
-  if (!firstFrame) throw new Error("Could not find a safe keyframe for fast trimming.");
+  if (!firstFrame) throw new Error("Could not find a safe keyframe for fast copying.");
   const actualStart = Math.round((requestedStart + Number(firstFrame[1])) * 1000) / 1000;
   if (!Number.isFinite(actualStart) || actualStart < -0.05 || actualStart > requestedStart + 0.05) {
-    throw new Error("The fast trim keyframe is outside the requested range.");
+    throw new Error("The fast copy keyframe is outside the requested range.");
   }
   return Math.max(0, actualStart);
 }

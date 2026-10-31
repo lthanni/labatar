@@ -134,6 +134,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     readFrame: (request) => ipcRenderer.invoke("recordings:frame-reader-read", request),
     closeFrameReader: (request) => ipcRenderer.invoke("recordings:frame-reader-close", request),
     exportClip: (request) => ipcRenderer.invoke("recordings:export-clip", request),
+    exportClipFast: (request) => ipcRenderer.invoke("recordings:export-clip-fast", request),
     trimClip: (request) => ipcRenderer.invoke("recordings:trim-clip", request),
     createF10Clips: (request) => ipcRenderer.invoke("recordings:create-f10-clips", request),
     renameRecording: (request) => ipcRenderer.invoke("recordings:rename", request),

@@ -13,8 +13,10 @@ import {
   collapseRecordingDisplayRows,
   countRecordingClips,
   descendantClipRanges,
+  pageRecordingDisplayRows,
   recordingInheritedTags,
   recordingLibraryTab,
+  recordingPageForId,
 } from "../../src/recording-hierarchy";
 import {
   defaultInputDisplayGeometry,
@@ -1054,6 +1056,17 @@ describe("recording-analysis fixture contract", () => {
         [parent.id, 1],
       ]),
     );
+    const pagedRows = buildRecordingDisplayRows([child, parent, root, otherRoot]);
+    expect(pageRecordingDisplayRows(pagedRows, 1, 1).map(({ recording }) => recording.id)).toEqual([
+      root.id,
+      parent.id,
+      child.id,
+    ]);
+    expect(pageRecordingDisplayRows(pagedRows, 2, 1).map(({ recording }) => recording.id)).toEqual([
+      otherRoot.id,
+    ]);
+    expect(recordingPageForId(pagedRows, child.id, 1)).toBe(1);
+    expect(recordingPageForId(pagedRows, otherRoot.id, 1)).toBe(2);
     expect(descendantClipRanges([root, parent, child], parent.id, 25)).toEqual([[3.69, 4.91]]);
   });
 

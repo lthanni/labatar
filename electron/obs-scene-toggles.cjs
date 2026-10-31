@@ -1,6 +1,7 @@
 const { pressureGameItems } = require("./pressure-framebar.cjs");
 
 const sceneName = "Labatar - Game";
+const sceneCollectionName = "Labatar";
 const inputNames = {
   game: "Labatar - Atla.exe Game Capture",
   gameAudio: "Labatar - Atla.exe Audio",
@@ -41,6 +42,22 @@ function updateSceneToggles(current, key, enabled, { gameAudioAvailable = true }
   return next;
 }
 
+async function disableAutomaticPressureFramebar(client) {
+  const collection = await client.call("GetSceneCollectionList");
+  if (collection.currentSceneCollectionName !== sceneCollectionName) return false;
+  const { scenes = [] } = await client.call("GetSceneList");
+  if (!scenes.some((scene) => scene.sceneName === sceneName)) return false;
+  const { sceneItems = [] } = await client.call("GetSceneItemList", { sceneName });
+  const overlayItem = pressureGameItems(sceneItems, inputNames.game)[1];
+  if (!overlayItem?.sceneItemEnabled) return false;
+  await client.call("SetSceneItemEnabled", {
+    sceneName,
+    sceneItemId: overlayItem.sceneItemId,
+    sceneItemEnabled: false,
+  });
+  return true;
+}
+
 module.exports = {
   sceneName,
   inputNames,
@@ -48,4 +65,5 @@ module.exports = {
   legacySceneToggles,
   sceneTogglesFromItems,
   updateSceneToggles,
+  disableAutomaticPressureFramebar,
 };

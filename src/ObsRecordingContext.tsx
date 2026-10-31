@@ -561,16 +561,19 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
             const enabled = state.sourceToggles?.[key] ?? false;
             const unavailable =
               key === "pressureFramebar" && !state.sourceToggles?.pressureFramebarReady;
-            const disabled = busy || recording || !sceneReady || unavailable;
+            const automaticFramebar = key === "pressureFramebar" && state.automation.enabled;
+            const disabled = busy || recording || !sceneReady || unavailable || automaticFramebar;
             const tooltip = !connected
               ? "Connect to OBS to change scene sources."
               : !sceneReady
                 ? "Select the Labatar - Game scene to change its sources."
                 : recording
                   ? "Stop recording before changing scene sources."
-                  : unavailable
-                    ? "Open the game and apply OBS setup again to place the P2 crop."
-                    : `${label}: ${enabled ? "on" : "off"}`;
+                  : automaticFramebar
+                    ? "Stop automatic recording before turning on the P2 framebar."
+                    : unavailable
+                      ? "Open the game and apply OBS setup again to place the P2 crop."
+                      : `${label}: ${enabled ? "on" : "off"}`;
             return (
               <Tooltip key={key} title={tooltip} arrow>
                 <span>

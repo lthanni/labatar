@@ -8,6 +8,10 @@ import { describe, expect, it } from "vite-plus/test";
 const require = createRequire(import.meta.url);
 const ffmpeg = require("ffmpeg-static") as string;
 const { buildClipExportFfmpegArgs } = require("../../electron/clip-export.cjs");
+const {
+  buildFastTrimFfmpegArgs,
+  probeFastTrimStart,
+} = require("../../electron/clip-fast-trim.cjs");
 const { probeChapters } = require("../../electron/game-chapters.cjs");
 
 function runFfmpeg(args: string[]) {
@@ -16,7 +20,7 @@ function runFfmpeg(args: string[]) {
 }
 
 describe("recording clip export", () => {
-  it("does not carry source MP4 chapters into the clip", async () => {
+  it("exports precise and fast clips without source chapters", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "labatar-clip-export-test-"));
     try {
       const base = path.join(directory, "base.mp4");
@@ -69,6 +73,26 @@ describe("recording clip export", () => {
       );
 
       expect((await probeChapters(ffmpeg, output)).chapters).toHaveLength(0);
+
+      const fastOutput = path.join(directory, "fast-clip.mp4");
+      const actualStart = await probeFastTrimStart(ffmpeg, source, 0.5);
+      expect(actualStart).toBeGreaterThanOrEqual(0);
+      expect(actualStart).toBeLessThan(0.5);
+      runFfmpeg(
+        buildFastTrimFfmpegArgs({
+          sourcePath: source,
+          requestedStart: 0.5,
+          requestedEnd: 2,
+          outputPath: fastOutput,
+        }),
+      );
+      const fastProbe = await probeChapters(ffmpeg, fastOutput);
+      expect(fastProbe.chapters).toHaveLength(0);
+      expect(Math.abs(fastProbe.durationMs - (2 - actualStart) * 1000)).toBeLessThan(200);
+      const fastStreams = spawnSync(ffmpeg, ["-hide_banner", "-i", fastOutput], {
+        encoding: "utf8",
+      }).stderr;
+      expect(fastStreams).toContain("Video: mpeg4");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

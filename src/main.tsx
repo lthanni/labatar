@@ -237,6 +237,11 @@ declare global {
           startTime: number;
           endTime: number;
         }) => Promise<RecordedVideo>;
+        exportClipFast: (request: {
+          recordingId: string;
+          startTime: number;
+          endTime: number;
+        }) => Promise<RecordedVideo>;
         trimClip: (request: {
           recordingId: string;
           startTime: number;
@@ -670,6 +675,8 @@ function affectsRank(game: ReplayRow) {
   return game.ratings?.affectsRank !== false;
 }
 
+const REPLAY_AUTO_SCAN_INTERVAL_MS = 10 * 60 * 1000;
+
 function getPlayerCounts(games: ReplayRow[]) {
   const counts: Record<string, number> = {};
   for (const game of games) {
@@ -764,6 +771,7 @@ function ReplayAnalysis({
   );
   const [scanLoading, setScanLoading] = useState(false);
   const [focusRefreshToken, setFocusRefreshToken] = useState(0);
+  const lastScanRequest = useRef<{ folder: string; refreshToken: number; at: number } | null>(null);
   const [scanProgress, setScanProgress] = useState<{
     completed: number;
     total: number;
@@ -779,10 +787,19 @@ function ReplayAnalysis({
   });
   useEffect(() => {
     if (!active) return;
-    const refreshOnFocus = () => setFocusRefreshToken((current) => current + 1);
+    const refreshOnFocus = () => {
+      const lastScan = lastScanRequest.current;
+      if (
+        !gameFolder ||
+        (lastScan?.folder === gameFolder && Date.now() - lastScan.at < REPLAY_AUTO_SCAN_INTERVAL_MS)
+      ) {
+        return;
+      }
+      setFocusRefreshToken((current) => current + 1);
+    };
     window.addEventListener("focus", refreshOnFocus);
     return () => window.removeEventListener("focus", refreshOnFocus);
-  }, [active]);
+  }, [active, gameFolder]);
   const [isGridPending, startGridTransition] = useTransition();
   const lastLoadedFolder = useRef<string | null>(null);
   const onData = useCallback(
@@ -831,6 +848,20 @@ function ReplayAnalysis({
       onScanError(null);
       return;
     }
+    const previousScan = lastScanRequest.current;
+    if (
+      previousScan?.folder === gameFolder &&
+      previousScan.refreshToken === gameFolderRefreshToken &&
+      Date.now() - previousScan.at < REPLAY_AUTO_SCAN_INTERVAL_MS
+    ) {
+      return;
+    }
+    const scanRequest = {
+      folder: gameFolder,
+      refreshToken: gameFolderRefreshToken,
+      at: Date.now(),
+    };
+    lastScanRequest.current = scanRequest;
     const showFullLoadProgress = lastLoadedFolder.current !== gameFolder;
     let scanFinished = false;
     let progressTimer: number | null = null;
@@ -858,6 +889,7 @@ function ReplayAnalysis({
       .then((result) => {
         if (!current) return;
         scanFinished = true;
+        scanRequest.at = Date.now();
         if (progressTimer !== null) window.clearTimeout(progressTimer);
         setScanLoading(false);
         onScanError(null);
@@ -868,6 +900,7 @@ function ReplayAnalysis({
       .catch((error) => {
         if (!current) return;
         scanFinished = true;
+        scanRequest.at = Date.now();
         if (progressTimer !== null) window.clearTimeout(progressTimer);
         setScanLoading(false);
         if (showFullLoadProgress && lastLoadedFolder.current !== gameFolder) onData([], {}, "");
@@ -877,6 +910,7 @@ function ReplayAnalysis({
       current = false;
       if (progressTimer !== null) window.clearTimeout(progressTimer);
       unsubscribe();
+      if (!scanFinished && lastScanRequest.current === scanRequest) lastScanRequest.current = null;
     };
   }, [active, gameFolder, gameFolderRefreshToken, focusRefreshToken, onData, onScanError]);
   const deferredGames = useDeferredValue(games);
