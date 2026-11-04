@@ -59,6 +59,11 @@ describe("combo candidate snapshot", () => {
     ).toEqual(renamed);
     expect(savedCandidateRecording(candidate, [{ ...downloaded, size: 99 }], {})).toBeNull();
     expect(
+      savedCandidateRecording(candidate, [{ ...downloaded, size: 99 }], {
+        "candidate:queue-1": { recordingId: downloaded.id, name: downloaded.name },
+      })?.size,
+    ).toBe(99);
+    expect(
       savedCandidateRecording(candidate, [{ ...downloaded, mediaKind: "youtube" }], {}),
     ).toBeNull();
   });
@@ -368,6 +373,14 @@ describe("combo candidate snapshot", () => {
     expect(saved.localCombos[0].candidateOriginId).toBe(originCandidateId);
     expect(saved.localCombos[0].id).toBe(`local-candidate-${originCandidateId}`);
     expect(candidatePublicationMatches(saved, [])).toEqual([]);
+    const revised = finishUploadedCandidate(
+      saved,
+      { ...candidate, combo: { ...candidate.combo, route: "5B > 236B > 5B", damage: "410" } },
+      [],
+    );
+    expect(revised.workspace.localCombos).toMatchObject([
+      { id: `local-candidate-${originCandidateId}`, route: "5B > 236B > 5B", damage: "410" },
+    ]);
   });
   it("updates a matching local combo and clears only its candidate receipt", () => {
     const workspace = emptyComboWorkspace();
@@ -388,6 +401,11 @@ describe("combo candidate snapshot", () => {
       youtubeUrl: "",
     };
     workspace.localCombos = [local];
+    workspace.recordingLinks[local.id] = { recordingId: "original.mp4", name: "original.mp4" };
+    workspace.recordingLinks["candidate:queue-1"] = {
+      recordingId: "candidate-queue-1.mp4",
+      name: "candidate-queue-1.mp4",
+    };
     workspace.candidateSubmissions = {
       "local-1": { id: "queue-1", submittedAt: "2026-01-01" },
       "local-2": { id: "queue-2", submittedAt: "2026-01-01" },
@@ -428,6 +446,19 @@ describe("combo candidate snapshot", () => {
     expect(result.workspace.candidateSubmissions).toEqual({
       "local-2": { id: "queue-2", submittedAt: "2026-01-01" },
     });
+    expect(result.workspace.recordingLinks["local-1"]?.recordingId).toBe("candidate-queue-1.mp4");
+    const revised = finishUploadedCandidate(
+      workspace,
+      {
+        ...candidate,
+        combo: { ...candidate.combo, route: "5B > 236A > 5B", damage: "400" },
+      },
+      [item],
+    );
+    expect(revised.targetId).toBe("local-1");
+    expect(revised.workspace.localCombos).toMatchObject([
+      { id: "local-1", name: "Route", route: "5B > 236A > 5B", damage: "400" },
+    ]);
   });
   it("attaches a matching submitted candidate to its tracked combo identity", () => {
     const original: ComboItem = {
@@ -465,6 +496,22 @@ describe("combo candidate snapshot", () => {
     expect(mergeCandidateItems([changed], [candidate], submissions).map((item) => item.id)).toEqual(
       ["local-1", "candidate:queue-1"],
     );
+    const editedUpstream = {
+      ...candidate,
+      combo: { ...candidate.combo, route: "5B > 236A > 5B", damage: "400" },
+    };
+    const trackedSubmission = {
+      [original.id]: {
+        id: candidate.id,
+        draftSignature: JSON.stringify(candidateComboFromItem(original)),
+      },
+    };
+    expect(mergeCandidateItems([original], [editedUpstream], trackedSubmission)).toMatchObject([
+      { id: "local-1", route: "5B > 236A > 5B", damage: "400", candidate: { id: "queue-1" } },
+    ]);
+    expect(
+      mergeCandidateItems([changed], [editedUpstream], trackedSubmission).map((item) => item.id),
+    ).toEqual(["local-1", "candidate:queue-1"]);
   });
   it("maps an upstream candidate into a distinct combo row with its route starter", () => {
     const item = candidateItem({

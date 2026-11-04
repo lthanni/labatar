@@ -138,7 +138,21 @@ async function authorizedSubmission(request, env, candidateId) {
   return row;
 }
 
-async function createCandidate(request, env, validateRecord) {
+function validateCandidateCombo(combo, validateRecord) {
+  if (!combo || typeof combo !== "object" || Array.isArray(combo)) {
+    throw new Error("Combo details are required.");
+  }
+  if ("youtubeUrl" in combo || "youtubeVideoId" in combo) {
+    throw new Error("Candidate details cannot include a YouTube link.");
+  }
+  const validated = validateRecord("combo", { ...combo, youtubeVideoId: "M7lc1UVf-VE" }, combo.id);
+  delete validated.youtubeVideoId;
+  delete validated.startSeconds;
+  delete validated.sourceCandidateId;
+  return validated;
+}
+
+async function createCandidate(request, env, validateRecord, submitterEmail) {
   let input;
   try {
     input = await bodyJson(request);
@@ -157,12 +171,7 @@ async function createCandidate(request, env, validateRecord) {
     ) {
       throw new Error("originCandidateId must be a candidate UUID.");
     }
-    if (!input.combo || typeof input.combo !== "object" || Array.isArray(input.combo)) {
-      throw new Error("Combo details are required.");
-    }
-    if ("youtubeUrl" in input.combo || "youtubeVideoId" in input.combo) {
-      throw new Error("Candidates must be submitted with their MP4, before YouTube upload.");
-    }
+    input.combo = validateCandidateCombo(input.combo, validateRecord);
     if (
       !Number.isSafeInteger(input.fileSize) ||
       input.fileSize < 1 ||
@@ -179,15 +188,6 @@ async function createCandidate(request, env, validateRecord) {
     ) {
       throw new Error("Use an MP4 file name without a path.");
     }
-    const validated = validateRecord(
-      "combo",
-      { ...input.combo, youtubeVideoId: "M7lc1UVf-VE" },
-      input.combo.id,
-    );
-    delete validated.youtubeVideoId;
-    delete validated.startSeconds;
-    delete validated.sourceCandidateId;
-    input.combo = validated;
   } catch (error) {
     return fail(error instanceof Error ? error.message : "Invalid submission.");
   }
@@ -216,13 +216,14 @@ async function createCandidate(request, env, validateRecord) {
     });
     await env.DB.prepare(`
       INSERT INTO combo_candidates
-        (id, combo_payload, file_name, file_size, object_key, upload_id,
+        (id, combo_payload, submitter_email, file_name, file_size, object_key, upload_id,
          upload_token_hash, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?)
     `)
       .bind(
         id,
         JSON.stringify({ ...input.combo, originCandidateId: input.originCandidateId ?? id }),
+        submitterEmail,
         input.fileName,
         input.fileSize,
         objectKey,
@@ -303,7 +304,11 @@ async function completeCandidate(request, env, id, context, fetchDiscord) {
     .run();
   const completed = { ...candidateView(row), status: "pending", updatedAt: now };
   if (result.meta?.changes === 1 && env.DISCORD_ALERT_WEBHOOK_URL) {
-    const alert = sendDiscordAlert(env, candidateAlert(completed), fetchDiscord).catch((error) => {
+    const alert = sendDiscordAlert(
+      env,
+      candidateAlert(completed, row.submitter_email),
+      fetchDiscord,
+    ).catch((error) => {
       console.error("Could not send Discord candidate alert:", error.message);
     });
     if (context?.waitUntil) context.waitUntil(alert);
@@ -351,6 +356,50 @@ async function listCandidates(env) {
   return json({
     items: rows.filter((row) => !staleIds.has(row.id)).map(candidateView),
   });
+}
+
+async function editCandidate(request, env, id, validateRecord) {
+  const row = await candidate(env.DB, id);
+  if (!row) return fail("Candidate not found.", 404);
+  if (row.status !== "pending") return fail("Only queued candidates can be edited.", 409);
+  let input;
+  let nextCombo;
+  try {
+    input = await bodyJson(request);
+    if (
+      !input ||
+      typeof input !== "object" ||
+      Array.isArray(input) ||
+      Object.keys(input).some((key) => !["combo", "updatedAt"].includes(key)) ||
+      typeof input.updatedAt !== "string"
+    ) {
+      throw new Error("Invalid candidate revision.");
+    }
+    nextCombo = validateCandidateCombo(input.combo, validateRecord);
+    const current = JSON.parse(row.combo_payload);
+    if (nextCombo.id !== current.id) throw new Error("The catalog combo ID cannot change here.");
+  } catch (error) {
+    return fail(error instanceof Error ? error.message : "Invalid candidate revision.");
+  }
+  if (input.updatedAt !== row.updated_at) return fail("Candidate changed. Refresh the queue.", 409);
+  const current = JSON.parse(row.combo_payload);
+  const payload = JSON.stringify({
+    ...nextCombo,
+    originCandidateId: current.originCandidateId ?? row.id,
+  });
+  if (payload === row.combo_payload) return json(candidateView(row));
+  const now = new Date(Math.max(Date.now(), Date.parse(row.updated_at) + 1)).toISOString();
+  const result = await env.DB.prepare(`
+    UPDATE combo_candidates
+    SET combo_payload = ?, rejection_reason = '', updated_at = ?
+    WHERE id = ? AND status = 'pending' AND updated_at = ? AND combo_payload = ?
+  `)
+    .bind(payload, now, id, row.updated_at, row.combo_payload)
+    .run();
+  if (result.meta?.changes !== 1) return fail("Candidate changed. Refresh the queue.", 409);
+  return json(
+    candidateView({ ...row, combo_payload: payload, rejection_reason: "", updated_at: now }),
+  );
 }
 
 async function candidateVideo(request, env, id) {
@@ -552,9 +601,10 @@ export async function handleCandidateRequest(
       return fail("Editor authentication required.", 401);
     }
   }
+  let submitterEmail;
   if (uploadRoot) {
     try {
-      await getComboUpload(request, env);
+      submitterEmail = await getComboUpload(request, env);
     } catch {
       return fail("Combo upload permission required.", 403);
     }
@@ -564,7 +614,7 @@ export async function handleCandidateRequest(
       return fail("Sign in with an approved email to upload combos. Update the desktop app.", 403);
     if (uploadRoot && request.method === "GET") return json({ allowed: true });
     if (uploadRoot && request.method === "POST")
-      return createCandidate(request, env, validateRecord);
+      return createCandidate(request, env, validateRecord, submitterEmail);
     if (part && request.method === "PUT") return uploadPart(request, env, part[1], part[2]);
     if (finish?.[2] === "complete" && request.method === "POST")
       return completeCandidate(request, env, finish[1], context, fetchDiscord);
@@ -573,6 +623,8 @@ export async function handleCandidateRequest(
     if (editorRoot && request.method === "GET") return listCandidates(env);
     if (editorDelete && request.method === "DELETE")
       return deleteUploadedCandidate(env, editorDelete[1]);
+    if (editorDelete && request.method === "PATCH")
+      return editCandidate(request, env, editorDelete[1], validateRecord);
     if (editorItem?.[2] === "video" && request.method === "GET")
       return candidateVideo(request, env, editorItem[1]);
     if (editorItem?.[2] === "approve" && request.method === "POST")

@@ -8,7 +8,7 @@ The desktop reader uses `https://labatar-catalog.landenhanni.workers.dev` by def
 
 ## Discord candidate alerts
 
-The Worker can post to a private Discord channel when a combo MP4 finishes uploading and enters the pending review queue. It sends the character, support, route, and candidate ID. It does not send the MP4, submitter identity, local file path, or upload token. A retry of an already completed upload does not send another alert. Discord delivery is best effort: a failed alert is logged and does not fail the candidate upload.
+The Worker can post to a private Discord channel when a combo MP4 finishes uploading and enters the pending review queue. It sends the verified submitter email, candidate ID, character, support, damage, and route. It does not send the MP4, local file path, or upload token. A retry of an already completed upload does not send another alert. Discord delivery is best effort: a failed alert is logged and does not fail the candidate upload. Candidates created before the submitter migration show "unknown submitter" if they finish afterward.
 
 1. In the Discord server, create a private text channel for alerts. Under **Server Settings → Integrations → Webhooks**, create a webhook for that channel and copy its URL. No Discord bot application is needed for these one-way alerts.
 2. In **Cloudflare → Workers & Pages → labatar-catalog → Settings → Variables and Secrets**, add the URL as a **Secret** named `DISCORD_ALERT_WEBHOOK_URL`. Do not put the URL in `wrangler.toml`, the desktop app, or this repository. This secret is optional so the catalog remains available before Discord is configured. The existing `[secrets].required` list is for mandatory Access secrets.
@@ -46,7 +46,7 @@ The publisher uses revision headers for safe edits. A conflict means another edi
 1. Install or run Wrangler with Vite+: `vp dlx wrangler --version`, then log in with `vp dlx wrangler login` from this directory.
 2. Create a D1 database with `vp dlx wrangler d1 create labatar-catalog`. Put the returned `database_id` in `wrangler.toml`; keep `binding = "DB"` because the Worker uses `env.DB`.
 3. Enable R2 in the Cloudflare dashboard for this account, then create the private bucket with `vp dlx wrangler r2 bucket create labatar-combo-candidates`. Keep `binding = "CANDIDATE_VIDEOS"` in `wrangler.toml` and do not enable public bucket access. Cloudflare error 10042 means R2 still needs to be enabled for the account.
-4. Apply `schema.sql` with `vp dlx wrangler d1 execute labatar-catalog --remote --file schema.sql`. It creates any missing catalog tables, including `catalog_youtube_upload_access`, without changing existing catalog records. Older review clients may have stored an approval marker in the `rejection_reason` field; the current upload path no longer requires it. Rejected candidates continue to use that field for the editor's reason.
+4. For an existing database, first apply `migrations/001_candidate_submitter_email.sql` once with `vp dlx wrangler d1 execute labatar-catalog --remote --file migrations/001_candidate_submitter_email.sql`. For a fresh database, skip that migration. Apply `schema.sql` with `vp dlx wrangler d1 execute labatar-catalog --remote --file schema.sql`. It creates any missing catalog tables, including `catalog_youtube_upload_access`, without changing existing catalog records. Older review clients may have stored an approval marker in the `rejection_reason` field; the current upload path no longer requires it. Rejected candidates continue to use that field for the editor's reason.
 5. This Worker uses the `landenhanni.workers.dev` account subdomain. With `name = "labatar-catalog"` and `workers_dev = true`, its expected URL is `https://labatar-catalog.landenhanni.workers.dev`. No custom domain or change to the GitHub Pages site is needed.
 6. In Cloudflare Zero Trust, create a self-hosted Access application for **only** `labatar-catalog.landenhanni.workers.dev/v1/editor/*`. Enable One-time PIN and attach a dedicated **Allow** policy with **Include → Login Methods → One-time PIN**. Keep any existing owner policy needed for another login method. Never use **Bypass**, which would prevent the Worker from receiving a verified identity. Do not protect the entire Worker because its read endpoints and candidate submission are public.
 7. In Cloudflare **Workers & Pages → labatar-catalog → Settings → Variables and Secrets**, set `ACCESS_TEAM_DOMAIN` to the Access team name, `ACCESS_AUD` to the application Audience (AUD) tag, and `EDITOR_EMAILS` to the fixed owner email(s). Set each as a Secret. These values are not stored in `wrangler.toml`; its `[secrets]` section names the required bindings without exposing their values. Remove any old `COMBO_PREVIEW_ACCESS_MODE` secret. Alternatively, use `vp dlx wrangler secret put <NAME>` for each binding. Keep local `.dev.vars` files out of Git.
@@ -80,10 +80,19 @@ For local database work, run `vp dlx wrangler d1 execute labatar-catalog --local
 | POST           | `/v1/candidates/:id/complete`                     | Upload token | Complete the MP4 and place the combo in review                    |
 | POST           | `/v1/candidates/:id/abort`                        | Upload token | Abort an unfinished upload                                        |
 | GET            | `/v1/editor/candidates`                           | Editor       | List submitted candidates                                         |
+| PATCH          | `/v1/editor/candidates/:id`                       | Editor       | Revise queued combo details in place; resets legacy approval      |
 | GET            | `/v1/editor/candidates/:id/video`                 | Editor       | Download the submitted MP4                                        |
 | POST           | `/v1/editor/candidates/:id/approve`               | Editor       | Legacy approval endpoint for older desktop clients                |
 | POST           | `/v1/editor/candidates/:id/reject`                | Editor       | Reject and remove the queued MP4                                  |
 | POST           | `/v1/editor/candidates/:id/uploaded`              | Editor       | Save a pending candidate's YouTube URL                            |
+
+To revise a queued candidate, send `PATCH /v1/editor/candidates/:id` with
+`{"combo": <full candidate combo>, "updatedAt": "<last updatedAt from the queue>"}`.
+The Worker validates the full public combo, keeps the candidate and original
+submitter IDs, and returns HTTP 409 if the queue row changed meanwhile. A
+revision clears any legacy approval marker. Edit the downloaded MP4 in the
+recording library before uploading that local file to YouTube; editing combo
+details does not overwrite the private queued MP4.
 
 Create with `If-None-Match: *`. Update or unpublish with `If-Match: "<revision>"` using the latest revision returned by the editor list. A stale revision returns HTTP 409. Record IDs, character IDs, support IDs, move IDs, and resource keys are lowercase slugs.
 

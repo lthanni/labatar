@@ -3,6 +3,7 @@ const { BrowserWindow, dialog, session } = require("electron");
 const catalogOrigin = "https://labatar-catalog.landenhanni.workers.dev";
 const editorListUrl = `${catalogOrigin}/v1/editor/combos`;
 const editorAppUrl = `${catalogOrigin}/v1/editor/app`;
+const ownerAccessUrl = `${catalogOrigin}/v1/editor/access-roles`;
 const publisherPartition = "persist:labatar-catalog-publisher";
 const slugPattern = /^[a-z0-9][a-z0-9-]{0,99}$/;
 
@@ -102,6 +103,30 @@ async function listEditorCombos(ses, timeoutMs = 15000, onReset) {
     timeoutMs,
     onReset,
   );
+}
+
+/** Only the configured catalog owner can read access roles. Return a boolean
+ * to the renderer without exposing the owner email or access list. */
+async function isCatalogOwner(ses = publisherSession()) {
+  try {
+    return await publisherRequestWithTimeout("Catalog owner check", async (signal) => {
+      const response = await ses.fetch(ownerAccessUrl, {
+        method: "GET",
+        credentials: "include",
+        redirect: "manual",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+        signal,
+      });
+      if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) {
+        return false;
+      }
+      const body = await response.json();
+      return typeof body?.owner === "string" && Array.isArray(body.items);
+    });
+  } catch {
+    return false;
+  }
 }
 
 function signInToCatalog(ses, parent, verifyAccess = listEditorCombos, targetUrl = editorAppUrl) {
@@ -292,6 +317,7 @@ async function authenticatedPublisherSession(parent) {
 
 module.exports = {
   publishCombo,
+  isCatalogOwner,
   assertExpectedRevision,
   authenticatedPublisherSession,
   signInToCatalog,

@@ -74,6 +74,27 @@ void test("candidate write requests do not retry after a timeout", async () => {
   assert.equal(requests, 1);
 });
 
+void test("candidate revision sends the full combo to the existing queue row", async () => {
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const combo = { id: "aang-katara-5b", route: "5B > 236A > 5B" };
+  const updatedAt = "2026-11-01T00:00:00.000Z";
+  const result = await requestCandidateEditor(
+    {
+      async fetch(url, options) {
+        assert.equal(new URL(url).pathname, `/v1/editor/candidates/${id}`);
+        assert.equal(options.method, "PATCH");
+        assert.deepEqual(JSON.parse(options.body), { combo, updatedAt });
+        assert.equal(options.credentials, "include");
+        return Response.json({ id, combo, updatedAt });
+      },
+    },
+    null,
+    `/${id}`,
+    { method: "PATCH", body: JSON.stringify({ combo, updatedAt }) },
+  );
+  assert.equal(result.id, id);
+});
+
 void test("candidate list stops after one failed connection reset retry", async () => {
   let requests = 0;
   let resets = 0;
@@ -305,6 +326,48 @@ void test("candidate MP4 download uses the video endpoint and retries after sign
       await fs.promises.readFile(path.join(folder, recordingId)),
       Buffer.from([1, 2, 3]),
     );
+  } finally {
+    await fs.promises.rm(folder, { recursive: true, force: true });
+  }
+});
+
+void test("candidate MP4 refresh preserves a locally trimmed file", async () => {
+  const folder = await fs.promises.mkdtemp(path.join(os.tmpdir(), "labatar-candidate-edited-"));
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const name = `candidate-${id}.mp4`;
+  try {
+    await fs.promises.writeFile(path.join(folder, name), Buffer.from([4, 5]));
+    const recordingId = await downloadComboCandidate(null, id, folder, 3, {
+      async fetch() {
+        assert.fail("An existing candidate MP4 must not be downloaded again.");
+      },
+    });
+    assert.equal(recordingId, name);
+    assert.deepEqual(await fs.promises.readFile(path.join(folder, name)), Buffer.from([4, 5]));
+  } finally {
+    await fs.promises.rm(folder, { recursive: true, force: true });
+  }
+});
+
+void test("simultaneous candidate MP4 requests share one download", async () => {
+  const folder = await fs.promises.mkdtemp(path.join(os.tmpdir(), "labatar-candidate-shared-"));
+  const id = "12345678-1234-1234-1234-123456789abc";
+  let requests = 0;
+  const ses = {
+    async fetch() {
+      requests += 1;
+      return new Response(Buffer.from([1, 2, 3]), {
+        headers: { "Content-Type": "video/mp4", "Content-Length": "3" },
+      });
+    },
+  };
+  try {
+    const [first, second] = await Promise.all([
+      downloadComboCandidate(null, id, folder, 3, ses),
+      downloadComboCandidate(null, id, folder, 3, ses),
+    ]);
+    assert.equal(first, second);
+    assert.equal(requests, 1);
   } finally {
     await fs.promises.rm(folder, { recursive: true, force: true });
   }

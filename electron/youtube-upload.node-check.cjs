@@ -6,7 +6,7 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { createYouTubeUploadService } = require("./youtube-upload.cjs");
 
-void test("Desktop OAuth connects with PKCE and the configured client secret", async () => {
+void test("Combos OAuth refreshes, clears a revoked connection, and reconnects", async () => {
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "labatar-youtube-test-"));
   const resolved = fs.realpathSync(userData);
   const tempRoot = fs.realpathSync(os.tmpdir()) + path.sep;
@@ -60,9 +60,9 @@ void test("Desktop OAuth connects with PKCE and the configured client secret", a
     },
   });
   try {
-    assert.equal(service.status().configured, true);
-    assert.equal(service.status().connected, false);
-    const result = await service.connect();
+    assert.equal(service.status("combos").configured, true);
+    assert.equal(service.status("combos").connected, false);
+    const result = await service.connect("combos");
     assert.equal(result.connected, true);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].client_id, process.env.LABATAR_YOUTUBE_CLIENT_ID);
@@ -73,6 +73,7 @@ void test("Desktop OAuth connects with PKCE and the configured client secret", a
     fs.writeFileSync(videoPath, "test-video");
     await assert.rejects(
       service.upload({
+        destination: "combos",
         filePath: videoPath,
         title: "Test video",
         description: "",
@@ -84,6 +85,60 @@ void test("Desktop OAuth connects with PKCE and the configured client secret", a
     assert.equal(requests.length, 2);
     assert.equal(requests[1].grant_type, "refresh_token");
     assert.equal(requests[1].client_secret, process.env.LABATAR_YOUTUBE_CLIENT_SECRET);
+    const tokenPath = path.join(userData, "youtube-combos-token.bin");
+    const tokens = JSON.parse(fs.readFileSync(tokenPath, "utf8"));
+    fs.writeFileSync(tokenPath, JSON.stringify({ ...tokens, expiresAt: 0 }));
+    global.fetch = async (url, options) => {
+      assert.equal(url, "https://oauth2.googleapis.com/token");
+      assert.equal(Object.fromEntries(options.body).grant_type, "refresh_token");
+      return {
+        ok: false,
+        json: async () => ({
+          error: "invalid_grant",
+          error_description: "Token has been expired or revoked.",
+        }),
+      };
+    };
+    await assert.rejects(
+      service.upload({
+        destination: "combos",
+        filePath: videoPath,
+        title: "Test video",
+        description: "",
+        privacyStatus: "unlisted",
+        madeForKids: false,
+      }),
+      /Labatar \(combos\) YouTube connection expired or was revoked/,
+    );
+    assert.equal(service.status("combos").connected, false);
+    assert.equal(fs.existsSync(tokenPath), false);
+    global.fetch = async (url, options) => {
+      if (url === "https://oauth2.googleapis.com/token") {
+        assert.equal(Object.fromEntries(options.body).grant_type, "authorization_code");
+        return {
+          ok: true,
+          json: async () => ({
+            access_token: "new-access",
+            refresh_token: "new-refresh",
+            expires_in: 3600,
+          }),
+        };
+      }
+      assert.equal(options.headers.Authorization, "Bearer new-access");
+      throw new Error("Upload stopped after reconnect.");
+    };
+    assert.equal((await service.connect("combos")).connected, true);
+    await assert.rejects(
+      service.upload({
+        destination: "combos",
+        filePath: videoPath,
+        title: "Test video",
+        description: "",
+        privacyStatus: "unlisted",
+        madeForKids: false,
+      }),
+      /Upload stopped after reconnect/,
+    );
   } finally {
     global.fetch = previousFetch;
     if (previousId === undefined) delete process.env.LABATAR_YOUTUBE_CLIENT_ID;

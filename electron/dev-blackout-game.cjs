@@ -7,21 +7,21 @@ const { performance } = require("node:perf_hooks");
 
 const execFileAsync = promisify(execFile);
 const originals = {
-  "watertribe.pak": "2138e9227a2948fe19fe77cc4bfc1b34c6a9265525b757a856db6f911a98ba78",
-  "aang.pak": "7dd391498a460b7c17478caf66565bc58f3c0e3e6e7888a655ce564e31a36dca",
-  "aang_avchar.pak": "7f6a32b5b1b1a14eb28132e3ffc8d9e0548f621b24215907bcbd7d9bf6f91e8a",
-  "korra.pak": "b2241aac58acd890026c084e6f2e8e677e995a3bdf3f9c3701ebe0cc338f6559",
-  "korra_nightmare.pak": "841110a58e855cdc24723b6c31a43666dceea13bc8f6fd3b357732a925b2f9bd",
-  "zuko.pak": "1eb34e107cefe54ac64d2edf9aeb760020ba981782c7d3fa12902eb64a9c61df",
-  "katara.pak": "20172cab2412a67baca64d0fcc0488f5671da419cb30e70a934631de6b5262fe",
-  "toph.pak": "fa3be37815653520b7e07f711c49e24c8ec03dff9e38887068f7359c57cec547",
-  "sokka.pak": "e7cc1cee06aaf4e52d1f9da20ee485fb2fb076fcbea1ea3407d99d357f6e8205",
-  "azula.pak": "1777db294988fc6c0a34a0a154d5f5d4c630b90d54d6c1b45363cdaa14b35655",
-  "kyoshi.pak": "bc42257f9c888c210cdb00d1e957cc239d74d85cb478eb7ac6c92b9efa9ccf25",
-  "ozai.pak": "fc428470788cbade023dc2763ae6412e4cd8b3b3053800ae68685448a3669f38",
-  "zaheer.pak": "f8fc45e31b39b91426a7f1fbccb02abefaecdbd92c8a138d3343bcf25bff812c",
-  "hud.pak": "24b0d04eb5288f28a9e0d28b6b22985e7e81f3a6ea611ef9f6f192acac0e1ce1",
-  "hitspark.pak": "968d716ac1f14ff00544712e5e1ab768ca32d4b50ec2b0a7ca4a085fa6cc2aa8",
+  "watertribe.pak": "36409c0bd3b7b4e96695b92091b1d628ba814865b4e0cb5a77dff1430ace57c3",
+  "aang.pak": "cb7a6978b4706e3201dbb23d52cf01784bb70fdcc4f6e1e3a3590df073ad550e",
+  "aang_avchar.pak": "0dd22f7759721539170ca74633a05cb4a8dd94f77b08d197aaf15c10582850a8",
+  "korra.pak": "ef1f402b845bd00df0f45117cc00f72579cb7a8096fc835acada0d21f02c7645",
+  "korra_nightmare.pak": "87b65612e37039b0f2f2d677d3f57271f66624e4aa27b635dfb1fea3750bf2f7",
+  "zuko.pak": "f0f61302702d15a63c8618cb3be8d22846cb38a915303b7d55df49903c86e8a0",
+  "katara.pak": "5925b1d0f88781807ea5aa07fc9449b37672f7ffd067a2bfbb50f7cef5ae9131",
+  "toph.pak": "ed97c4e4b611af5e2bbc0464fbb28b24e569d22179a3ad79a6c33c5c4c244c3e",
+  "sokka.pak": "7078d686689af6d7c7702b958b0f4c50bc2d41d3ffee34b534e6e01046f884f8",
+  "azula.pak": "4b24e35321248f752f73657dfd61e11668e723862fc6b171a515a851f9c6c361",
+  "kyoshi.pak": "c2dd8ff589b3b381b3e901f219634837f2f4a334c9c461b8f27382a87967dfc9",
+  "ozai.pak": "d986de4462e72c34514d82fe6de7b530a18dda82cd4f5db5329f5194c44d8109",
+  "zaheer.pak": "8e2779973c2ac23fa775052f1b563e42b22e52185dfc446c273db3defdf526b3",
+  "hud.pak": "e5354e6a82988d070d06627a5769f329f2e4fe3d8b584e988526e784e14e1453",
+  "hitspark.pak": "5a5854217385313fa80d112d9f0525548342641c73a54772166944d74dae40b0",
 };
 const characterPackages = {
   Aang: "aang.pak",
@@ -150,7 +150,16 @@ async function prepareSession({
   if (!(await fs.promises.stat(executable).catch(() => null))?.isFile()) {
     throw new Error("The selected game folder does not contain Atla.exe.");
   }
-  const backupDir = path.join(backupRoot, "verified-originals");
+  const version = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify(
+        Object.entries(expectedOriginals).sort(([left], [right]) => left.localeCompare(right)),
+      ),
+    )
+    .digest("hex")
+    .slice(0, 16);
+  const backupDir = path.join(backupRoot, `verified-originals-${version}`);
   const files = [];
   for (const [name, replacementName] of Object.entries(replacementPlan(testedCharacter))) {
     const target = path.join(gameRoot, "data_packages", name);

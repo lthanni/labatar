@@ -150,10 +150,16 @@ export function decodePortraitMunged(raw: Uint8Array): DecodedPortrait {
   const packedColumns = Math.min(tileCount, 30);
   const expectedWidth = packedColumns * 34;
   const expectedHeight = Math.ceil(tileCount / packedColumns) * 34;
-  const unpackedBytes = expectedWidth * expectedHeight * 4;
+  // The game uses a 1x34 atlas for an empty, single-tile portrait placeholder.
+  const emptyTilePacking =
+    tileCount === 1 &&
+    packedWidth === 1 &&
+    packedHeight === 34 &&
+    readU32(raw, dimensionsAt + 48) === 1 &&
+    raw[dimensionsAt + 52] === 0;
+  const unpackedBytes = packedWidth * packedHeight * 4;
   if (
-    packedWidth !== expectedWidth ||
-    packedHeight !== expectedHeight ||
+    (!emptyTilePacking && (packedWidth !== expectedWidth || packedHeight !== expectedHeight)) ||
     unpackedBytes > maxImageBytes
   ) {
     throw new Error("Unsupported portrait tile packing.");
@@ -168,6 +174,7 @@ export function decodePortraitMunged(raw: Uint8Array): DecodedPortrait {
   if (blockAt < 0) throw new Error("Missing compressed portrait block.");
   const packed = decodeLz4Block(raw.subarray(blockAt), unpackedBytes);
   const pixels = new Uint8Array(width * height * 4);
+  if (emptyTilePacking) return { sourcePath, width, height, pixels };
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const tileIndex = Math.floor(y / 32) * tileColumns + Math.floor(x / 32);

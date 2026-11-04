@@ -1,4 +1,5 @@
 import type { ComboNote, ComboNoteCategory, ComboNoteRange } from "./tech-types";
+import { normalizeMoveNotation } from "./move-notation";
 
 export type ComboRouteToken = { text: string; start: number; end: number };
 
@@ -27,6 +28,69 @@ export function comboRouteTokens(route: string): ComboRouteToken[] {
     }
   }
   return tokens;
+}
+
+/** Canonicalize recognized move inputs without changing route separators or free text. */
+export function normalizeComboRoute(route: string): string {
+  const tokens = comboRouteTokens(route);
+  let result = "";
+  let offset = 0;
+  for (const token of tokens) {
+    const hit = /\(\d+\)$/.exec(token.text)?.[0] ?? "";
+    const withoutHit = hit ? token.text.slice(0, -hit.length) : token.text;
+    const crit = withoutHit.endsWith("!") ? "!" : "";
+    const input = crit ? withoutHit.slice(0, -1) : withoutHit;
+    const notation = normalizeMoveNotation(input, { allowDirectionless: true });
+    result += route.slice(offset, token.start) + (notation ? notation + crit + hit : token.text);
+    offset = token.end;
+  }
+  return result + route.slice(offset);
+}
+
+/** Format move inputs and use one space between moves. A tilde stays attached
+ * to a stance followup because it carries route meaning. */
+export function formatComboRoute(route: string): string {
+  const normalized = normalizeComboRoute(route);
+  const tokens = comboRouteTokens(normalized);
+  return tokens
+    .map((token, index) => {
+      if (index === 0) return token.text;
+      const gap = normalized.slice(tokens[index - 1].end, token.start);
+      return `${gap.includes("~") ? "~" : " "}${token.text}`;
+    })
+    .join("");
+}
+
+export function comboRouteFormatError(route: string): string | null {
+  if (!route.trim()) return "Enter a combo route.";
+  if (route.includes("<")) return "Remove < from the route.";
+  if (route !== formatComboRoute(route)) {
+    return "Use one space between moves, with no arrows or commas. Keep ~ attached to stance followups and use move casing like 2B or j.2C.";
+  }
+  return null;
+}
+
+/** Keep valid note selections attached to the same tokens after normalization. */
+export function normalizeComboNoteRanges(
+  originalRoute: string,
+  normalizedRoute: string,
+  notes: ComboNote[],
+): ComboNote[] {
+  const tokens = comboRouteTokens(normalizedRoute);
+  return notes.map((note) => {
+    const range = note.range;
+    if (!range || !comboNoteRangeOffsets(originalRoute, range)) return note;
+    return {
+      ...note,
+      range: {
+        ...range,
+        excerpt: normalizedRoute.slice(
+          tokens[range.startToken].start,
+          tokens[range.endToken - 1].end,
+        ),
+      },
+    };
+  });
 }
 
 export function comboNoteRangeFromSelection(

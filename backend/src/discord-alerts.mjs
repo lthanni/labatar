@@ -37,14 +37,13 @@ export async function sendDiscordAlert(env, content, fetcher = fetch) {
   if (!response.ok) throw new Error(`Discord rejected the alert (${response.status}).`);
 }
 
-export function candidateAlert(candidate) {
+export function candidateAlert(candidate, submitterEmail) {
   const combo = candidate.combo;
   const route = combo.route.replace(/\s+/g, " ");
   const routePreview = route.length > 300 ? `${route.slice(0, 297)}...` : route;
+  const submitter = submitterEmail?.trim().replace(/\s+/g, " ") || "unknown submitter";
   return [
-    "New Labatar combo candidate ready for review",
-    `${combo.characterId} / ${combo.supportId}: ${routePreview}`,
-    `Candidate ID: ${candidate.id}`,
-    "Open Labatar > Combos > Candidates to review it.",
+    `New combo candidate from ${submitter} ready for review: candidate ID: ${candidate.id}`,
+    `${combo.characterId} / ${combo.supportId} (${combo.damage}): ${routePreview}`,
   ].join("\n");
 }

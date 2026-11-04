@@ -238,6 +238,78 @@ function buildHiddenImagesPak(source, destination, mode = "default") {
   }
 }
 
+const WATERTRIBE_LEVEL = "data/levels/watertribe/watertribe.lvl";
+
+function blackoutStageLevel(raw) {
+  const source = raw.toString("utf8");
+  if (!Buffer.from(source, "utf8").equals(raw)) throw new Error("Invalid Water Tribe level text.");
+  const newline = source.includes("\r\n") ? "\r\n" : "\n";
+  const lines = source.split(newline);
+  const start = lines.indexOf("# --- Layers and Sprites ---");
+  const end = lines.findIndex(
+    (line, index) => index > start && /^# --- Envir(?:o|on)ment ---$/.test(line),
+  );
+  if (start < 0 || end <= start) throw new Error("Water Tribe layer section changed.");
+  let hiddenCommands = 0;
+  let hiddenLayers = 0;
+  for (let index = start + 1; index < end; index++) {
+    const first = lines[index].search(/\S/);
+    if (first < 0 || lines[index][first] === "#") continue;
+    if (lines[index].slice(first).startsWith("Layer ")) hiddenLayers++;
+    lines[index] = `${lines[index].slice(0, first)}#${lines[index].slice(first + 1)}`;
+    hiddenCommands++;
+  }
+  if (hiddenCommands < 1 || hiddenLayers < 1) {
+    throw new Error("Water Tribe has no visible layers to hide.");
+  }
+  let shadowCount = 0;
+  for (let index = end + 1; index < lines.length; index++) {
+    const match = /^(FloorShadowColor\s+\d+,\d+,\d+,)(\d+)(\s*)$/.exec(lines[index]);
+    if (!match) continue;
+    if (match[2].split("").every((digit) => digit === "0")) {
+      throw new Error("Water Tribe floor shadow is already hidden.");
+    }
+    lines[index] = `${match[1]}${"0".repeat(match[2].length)}${match[3]}`;
+    shadowCount++;
+  }
+  if (shadowCount !== 1) throw new Error("Water Tribe floor shadow layout changed.");
+  const bytes = Buffer.from(lines.join(newline), "utf8");
+  if (bytes.length !== raw.length)
+    throw new Error("Water Tribe level size changed during blackout.");
+  return { bytes, hiddenCommands, hiddenLayers };
+}
+
+function buildHiddenStagePak(source, destination) {
+  if (path.basename(source).toLowerCase() !== "watertribe.pak") {
+    throw new Error("The stage builder only accepts watertribe.pak.");
+  }
+  if (path.resolve(source).toLowerCase() === path.resolve(destination).toLowerCase()) {
+    throw new Error("Source and destination must differ.");
+  }
+  const sourceFd = fs.openSync(source, "r");
+  let created = false;
+  try {
+    const entries = pakEntries(sourceFd);
+    const level = entries.find((entry) => entry.name === WATERTRIBE_LEVEL);
+    if (!level) throw new Error("Water Tribe level script is missing.");
+    const { bytes, ...summary } = blackoutStageLevel(readAt(sourceFd, level.bytes, level.offset));
+    fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+    created = true;
+    const destinationFd = fs.openSync(destination, "r+");
+    try {
+      writeAt(destinationFd, bytes, level.offset);
+    } finally {
+      fs.closeSync(destinationFd);
+    }
+    return { entries: entries.length, ...summary };
+  } catch (error) {
+    if (created) fs.rmSync(destination, { force: true });
+    throw error;
+  } finally {
+    fs.closeSync(sourceFd);
+  }
+}
+
 if (require.main === module) {
   const [source, destination, mode = "default"] = process.argv.slice(2);
   if (!source || !destination) {
@@ -255,4 +327,12 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildHiddenImagesPak, pakEntries, solidLz4, transparentMunged, isSupportImage };
+module.exports = {
+  buildHiddenImagesPak,
+  buildHiddenStagePak,
+  blackoutStageLevel,
+  pakEntries,
+  solidLz4,
+  transparentMunged,
+  isSupportImage,
+};

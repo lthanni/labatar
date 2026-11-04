@@ -1,4 +1,13 @@
-import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  StrictMode,
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createRoot } from "react-dom/client";
 import { AgGridProvider } from "ag-grid-react";
 import { AllCommunityModule } from "ag-grid-community";
@@ -17,6 +26,8 @@ import {
   Paper,
   Slider,
   Stack,
+  Tab,
+  Tabs,
   TextField,
   ThemeProvider,
   Typography,
@@ -24,6 +35,7 @@ import {
 } from "@mui/material";
 import { AvatarGrid, type ReplayRow } from "./AvatarGrid";
 import { OPPONENT_CHARACTER_ROSTER, type AnalysisSummary } from "./AnalyticsSection";
+import { ObsRecordingProvider } from "./ObsRecordingContext";
 import { extractWebArtwork, type WebArtworkLibrary, type WebArtworkProgress } from "./web/artwork";
 import {
   combineReplaySubfolder,
@@ -42,6 +54,9 @@ const theme = createTheme({
     primary: { main: "#90caf9" },
   },
 });
+const BrowserCombosPage = lazy(async () => ({
+  default: (await import("./CombosPage")).CombosPage,
+}));
 const EMPTY_SUMMARY: AnalysisSummary = {
   games: 0,
   sessions: 0,
@@ -117,6 +132,7 @@ function isAbort(error: unknown) {
 }
 
 function WebApp() {
+  const [view, setView] = useState<"history" | "combos">("history");
   const [folder, setFolder] = useState<ReplayFolderSelection | null>(null);
   const [result, setResult] = useState<ReplayScanResult | null>(null);
   const [artwork, setArtwork] = useState<WebArtworkLibrary | null>(null);
@@ -353,6 +369,66 @@ function WebApp() {
     /(^|\/)logs\/.*\.txt$/i.test(relativePath),
   );
 
+  if (view === "combos") {
+    return (
+      <Box
+        sx={{
+          height: "100vh",
+          display: "flex",
+          flexDirection: "column",
+          bgcolor: "background.default",
+        }}
+      >
+        <Tabs
+          value={view}
+          onChange={(_, value: "history" | "combos") => setView(value)}
+          aria-label="Browser views"
+          sx={{ px: { xs: 1, sm: 2 } }}
+        >
+          <Tab value="history" label="Match history" />
+          <Tab value="combos" label="Combos" />
+        </Tabs>
+        <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", p: { xs: 1, sm: 2 } }}>
+          <Stack
+            direction={{ xs: "column", sm: "row" }}
+            spacing={1}
+            sx={{ alignItems: { sm: "center" }, mb: 1.5 }}
+          >
+            <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
+              {artwork
+                ? `${artwork.decodedCount} portraits loaded from your game folder.`
+                : "Choose your game folder to show character and support portraits."}
+            </Typography>
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => void chooseFolder(true)}
+              disabled={selecting || scanBusy}
+            >
+              {artwork ? "Change game folder" : "Load portraits"}
+            </Button>
+          </Stack>
+          {scanBusy && <LinearProgress aria-label="Loading game artwork" sx={{ mb: 1.5 }} />}
+          {error && (
+            <Alert severity="error" sx={{ mb: 1.5 }}>
+              {error}
+            </Alert>
+          )}
+          {artworkIssue && (
+            <Alert severity="warning" sx={{ mb: 1.5 }}>
+              {artworkIssue}
+            </Alert>
+          )}
+          <ObsRecordingProvider>
+            <Suspense fallback={<LinearProgress aria-label="Loading combos" />}>
+              <BrowserCombosPage active readOnly webArtwork={artwork} />
+            </Suspense>
+          </ObsRecordingProvider>
+        </Box>
+      </Box>
+    );
+  }
+
   return (
     <Box
       sx={{
@@ -366,6 +442,15 @@ function WebApp() {
         bgcolor: "background.default",
       }}
     >
+      <Tabs
+        value={view}
+        onChange={(_, value: "history" | "combos") => setView(value)}
+        aria-label="Browser views"
+        sx={{ mb: 1.5 }}
+      >
+        <Tab value="history" label="Match history" />
+        <Tab value="combos" label="Combos" />
+      </Tabs>
       <Stack
         direction={{ xs: "column", sm: "row" }}
         spacing={1.5}

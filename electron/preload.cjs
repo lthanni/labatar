@@ -178,6 +178,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   catalogPublisher: {
     publishCombo: (request) => ipcRenderer.invoke("catalog:publish-combo", request),
+    isOwner: () => ipcRenderer.invoke("catalog:is-owner"),
   },
   comboCandidates: {
     status: () => ipcRenderer.invoke("combo-candidates:status"),
@@ -190,6 +191,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
     list: (request) => ipcRenderer.invoke("combo-candidates:list", request),
     approve: (request) => ipcRenderer.invoke("combo-candidates:approve", request),
+    edit: (request) => ipcRenderer.invoke("combo-candidates:edit", request),
     reject: (request) => ipcRenderer.invoke("combo-candidates:reject", request),
     markUploaded: (request) => ipcRenderer.invoke("combo-candidates:uploaded", request),
     removeUploaded: (request) => ipcRenderer.invoke("combo-candidates:remove-uploaded", request),

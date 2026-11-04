@@ -19,7 +19,13 @@ meter remains in its separate unmodified PAK. A detached watcher restores the
 original PAKs after exit. It reuses one verified original backup set across
 sessions, so each launch does not add another full copy. A saved
 session manifest lets a later app launch recover an interrupted install or
-restore. Changed game versions fail the hash check before installation.
+restore. When game PAK hashes change, Labatar shows the previous and current
+hashes and asks for approval before building or installing anything. Approval
+is saved in development user data. Replacement PAKs are rebuilt from the
+approved game files, including the Water Tribe stage, and original backups are
+stored separately for each approved version. The hash approval confirms which
+local files to use; the resulting blackout still needs an in-game visual check.
+Each approved version can require several GiB for its own original backups.
 
 Manual move arming, move-take recording, and automatic move capture require a
 running game with the selected fighter's verified blackout profile and an OBS
@@ -281,9 +287,10 @@ its SHA-256 matched the saved backup:
 `2138e9227a2948fe19fe77cc4bfc1b34c6a9265525b757a856db6f911a98ba78`.
 
 The local ignored work area retains the original and test PAKs under
-`.dev/installer/black-stage/`. The original PAKs are installed now. A game
-update may change the shipped PAKs, so compare their hashes with the backups
-before reusing test copies. The modding tools at
+`.dev/installer/black-stage/`. The original PAKs are installed now. The
+launcher rebuilds Water Tribe from the approved current PAK, preserving new
+entries and patch-specific level-script values while hiding its layers and
+floor shadow. The modding tools at
 [calebrisc/avatar-legends-tools](https://github.com/calebrisc/avatar-legends-tools)
 document PAK extraction and repacking, type-3 frame encoding, and the finding
 that loose files or extra PAKs do not override shipped entries. Removing stage

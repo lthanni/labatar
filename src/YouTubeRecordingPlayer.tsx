@@ -180,7 +180,7 @@ export const YouTubeRecordingPlayer = forwardRef<
                   : event.data === 100
                     ? "This YouTube video is unavailable or private."
                     : event.data === 153
-                      ? "YouTube could not identify this desktop player."
+                      ? "YouTube could not identify this player."
                       : `YouTube playback failed (error ${event.data}).`;
               callbacks.current.onError?.(message);
             },

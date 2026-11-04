@@ -6,7 +6,32 @@ import { test } from "node:test";
 import { handleRequest } from "../src/worker.mjs";
 
 const schema = readFileSync(new URL("../schema.sql", import.meta.url), "utf8");
+const submitterMigration = readFileSync(
+  new URL("../migrations/001_candidate_submitter_email.sql", import.meta.url),
+  "utf8",
+);
 const videoId = "M7lc1UVf-VE";
+
+void test("submitter migration keeps existing candidate rows", () => {
+  const sqlite = new DatabaseSync(":memory:");
+  try {
+    sqlite.exec(schema.replace(/^  submitter_email TEXT,\r?\n/m, ""));
+    sqlite
+      .prepare(`
+      INSERT INTO combo_candidates
+        (id, combo_payload, file_name, file_size, object_key, upload_id,
+         upload_token_hash, status, created_at, updated_at)
+      VALUES (?, '{}', 'old.mp4', 1, ?, 'upload', 'hash', 'uploading', 'now', 'now')
+    `)
+      .run("old-id", "combo-candidates/old-id.mp4");
+    sqlite.exec(submitterMigration);
+    const row = sqlite.prepare("SELECT id, submitter_email FROM combo_candidates").get();
+    assert.equal(row.id, "old-id");
+    assert.equal(row.submitter_email, null);
+  } finally {
+    sqlite.close();
+  }
+});
 
 function database() {
   const sqlite = new DatabaseSync(":memory:");
@@ -169,9 +194,15 @@ void test("a completed candidate sends one Discord alert after entering the revi
     await Promise.all(tasks);
     assert.equal(sent.length, 1);
     assert.equal(sent[0].url, env.DISCORD_ALERT_WEBHOOK_URL);
-    assert.match(sent[0].body.content, /New Labatar combo candidate ready for review/);
-    assert.match(sent[0].body.content, new RegExp(created.id));
-    assert.match(sent[0].body.content, /aang \/ katara: 5B > 236A/);
+    assert.equal(
+      sent[0].body.content,
+      `New combo candidate from uploader@example.com ready for review: candidate ID: ${created.id}\naang / katara (302): 5B > 236A`,
+    );
+    const row = await db
+      .prepare("SELECT submitter_email FROM combo_candidates WHERE id = ?")
+      .bind(created.id)
+      .all();
+    assert.equal(row.results[0].submitter_email, "uploader@example.com");
     assert.deepEqual(sent[0].body.allowed_mentions, { parse: [] });
     const repeated = await handleRequest(
       request(
@@ -582,6 +613,74 @@ void test("candidate requires a valid MP4 upload and an editor can record its Yo
       ).status,
       404,
     );
+  } finally {
+    db.close();
+  }
+});
+
+void test("an editor revises a queued candidate in place before publication", async () => {
+  const db = database();
+  const videos = bucket();
+  const env = { DB: db, CANDIDATE_VIDEOS: videos };
+  const editor = async () => "editor@example.com";
+  try {
+    const created = await submit(env);
+    const url = `/v1/editor/candidates/${created.id}`;
+    const initial = (
+      await (await handleRequest(request("/v1/editor/candidates"), env, {}, editor)).json()
+    ).items[0];
+    const editedCombo = { ...combo(), name: "Trimmed route", route: "5B > 236A > 5B" };
+    const denied = await handleRequest(
+      request(url, "PATCH", { combo: editedCombo, updatedAt: initial.updatedAt }),
+      env,
+    );
+    assert.equal(denied.status, 401);
+    const approved = await handleRequest(request(`${url}/approve`, "POST"), env, {}, editor);
+    const approvedCandidate = await approved.json();
+    assert.equal(approvedCandidate.status, "approved");
+    const revised = await handleRequest(
+      request(url, "PATCH", { combo: editedCombo, updatedAt: approvedCandidate.updatedAt }),
+      env,
+      {},
+      editor,
+    );
+    assert.equal(revised.status, 200);
+    const next = await revised.json();
+    assert.equal(next.id, created.id);
+    assert.equal(next.originCandidateId, created.id);
+    assert.equal(next.status, "pending");
+    assert.equal(next.combo.name, "Trimmed route");
+    assert.equal(next.combo.route, "5B > 236A > 5B");
+    assert.equal(videos.objects.size, 1);
+    assert.equal(
+      await (await handleRequest(request(`${url}/video`), env, {}, editor)).text(),
+      "mp4",
+    );
+    const stale = await handleRequest(
+      request(url, "PATCH", {
+        combo: { ...editedCombo, damage: "400" },
+        updatedAt: initial.updatedAt,
+      }),
+      env,
+      {},
+      editor,
+    );
+    assert.equal(stale.status, 409);
+    const invalid = await handleRequest(
+      request(url, "PATCH", {
+        combo: { ...editedCombo, youtubeUrl: `https://youtu.be/${videoId}` },
+        updatedAt: next.updatedAt,
+      }),
+      env,
+      {},
+      editor,
+    );
+    assert.equal(invalid.status, 400);
+    const listed = (
+      await (await handleRequest(request("/v1/editor/candidates"), env, {}, editor)).json()
+    ).items;
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].combo.route, editedCombo.route);
   } finally {
     db.close();
   }

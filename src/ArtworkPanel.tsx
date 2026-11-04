@@ -9,11 +9,17 @@ type ArtworkProgress = {
   total: number | null;
 };
 
-export function ArtworkPanel({ onImported }: { onImported: () => void }) {
+export function ArtworkPanel({
+  onImported,
+  autoImporting = false,
+}: {
+  onImported: () => void;
+  autoImporting?: boolean;
+}) {
   const api = window.electronAPI?.artwork;
   const [progress, setProgress] = useState<ArtworkProgress | null>(null);
   const [busyAction, setBusyAction] = useState<"import" | "browse" | null>(null);
-  const busy = busyAction !== null;
+  const busy = busyAction !== null || autoImporting;
   const [cancelling, setCancelling] = useState(false);
   const [savedPortraits, setSavedPortraits] = useState<number | null>(null);
   const [flowIconImported, setFlowIconImported] = useState(false);
@@ -103,13 +109,16 @@ export function ArtworkPanel({ onImported }: { onImported: () => void }) {
             Decode the game&apos;s encoded files to display character and support portraits and the
             Flow and Pips icons, including the colored dots and Chi meter on combo cards. You should
             only need to do this once, or again if a game update adds new characters or supports.
-            The app reads the data_packages folder inside your selected game folder automatically.
-            Decoded artwork stays on this computer and is not added to the repository.
+            Missing artwork is imported from the data_packages folder in your selected game folder
+            when the app starts. Decoded artwork stays on this computer and is not added to the
+            repository.
           </Typography>
         </div>
         <Stack direction="row" spacing={1}>
           <Button variant="contained" onClick={() => void importArtwork()} disabled={busy}>
-            {busyAction === "import" ? "Importing artwork..." : "Import game artwork"}
+            {busyAction === "import" || autoImporting
+              ? "Importing artwork..."
+              : "Import game artwork"}
           </Button>
           {busy && (
             <Button

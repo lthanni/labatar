@@ -17,6 +17,7 @@ CREATE INDEX IF NOT EXISTS catalog_versions_lookup
 CREATE TABLE IF NOT EXISTS combo_candidates (
   id TEXT PRIMARY KEY,
   combo_payload TEXT NOT NULL CHECK (json_valid(combo_payload)),
+  submitter_email TEXT,
   file_name TEXT NOT NULL,
   file_size INTEGER NOT NULL CHECK (file_size > 0),
   object_key TEXT NOT NULL UNIQUE,

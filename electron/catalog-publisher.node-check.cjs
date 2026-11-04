@@ -5,7 +5,27 @@ const {
   publisherRequestWithTimeout,
   publisherReadWithRecovery,
   listEditorCombos,
+  isCatalogOwner,
 } = require("./catalog-publisher.cjs");
+
+void test("route audit owner check fails closed without revealing access roles", async () => {
+  const ses = {
+    async fetch(url, options) {
+      assert.equal(new URL(url).pathname, "/v1/editor/access-roles");
+      assert.equal(options.credentials, "include");
+      return Response.json({ owner: "owner@example.com", items: [] });
+    },
+  };
+  assert.equal(await isCatalogOwner(ses), true);
+  ses.fetch = async () => Response.json({ error: "Not owner" }, { status: 403 });
+  assert.equal(await isCatalogOwner(ses), false);
+  ses.fetch = async () => new Response("Sign in", { status: 200 });
+  assert.equal(await isCatalogOwner(ses), false);
+  ses.fetch = async () => {
+    throw new Error("Offline");
+  };
+  assert.equal(await isCatalogOwner(ses), false);
+});
 
 void test("catalog requests time out and abort instead of leaving the modal waiting", async () => {
   let signal;

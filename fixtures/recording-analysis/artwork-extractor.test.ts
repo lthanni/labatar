@@ -98,4 +98,34 @@ describe("local artwork formats", () => {
     const scanlines = inflateSync(png.subarray(41, png.length - 16));
     expect([...scanlines]).toEqual([0, ...expected.subarray(0, 8), 0, ...expected.subarray(8)]);
   });
+
+  it("decodes an empty single-tile portrait placeholder", () => {
+    const name = new TextEncoder().encode("src/sprites/test/hud/art/portraitart.png");
+    const dimensionsAt = 0x20 + name.length + 8;
+    const compressed = Uint8Array.of(0x1f, 0, 1, 0, 116);
+    const blockAt = dimensionsAt + 69;
+    const raw = new Uint8Array(blockAt + compressed.length);
+    raw[0x1a] = 6;
+    raw[0x1b] = name.length + 1;
+    raw.set(name, 0x20);
+    const view = new DataView(raw.buffer);
+    view.setUint32(dimensionsAt, 2, true);
+    view.setUint32(dimensionsAt + 4, 2, true);
+    view.setUint32(dimensionsAt + 16, 1, true);
+    view.setUint32(dimensionsAt + 20, 34, true);
+    view.setUint32(dimensionsAt + 28, 1, true);
+    view.setUint32(dimensionsAt + 32, 1, true);
+    view.setUint32(dimensionsAt + 48, 1, true);
+    view.setUint32(dimensionsAt + 53, 1, true);
+    view.setUint32(dimensionsAt + 57, compressed.length + 8, true);
+    view.setUint32(dimensionsAt + 61, 136, true);
+    view.setUint32(dimensionsAt + 65, compressed.length, true);
+    raw.set(compressed, blockAt);
+
+    const decoded = decodePortraitMunged(raw);
+    expect([decoded.width, decoded.height]).toEqual([2, 2]);
+    expect(decoded.pixels).toEqual(new Uint8Array(16));
+    raw[dimensionsAt + 52] = 1;
+    expect(() => decodePortraitMunged(raw)).toThrow("Unsupported portrait tile packing");
+  });
 });

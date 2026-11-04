@@ -19,6 +19,7 @@ const uploadApi = `${editorApi}/upload`;
 const accessRequestApi = `${catalogOrigin}/v1/editor/upload-access-request`;
 const candidateIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const maxFileSize = 2 * 1024 * 1024 * 1024;
+const candidateDownloadInFlight = new Map();
 
 async function checkCandidateAccess(ses, timeoutMs = 15000) {
   return publisherReadWithRecovery(
@@ -279,6 +280,17 @@ async function approveComboCandidate(parent, id) {
   return editorRequest(parent, `/${id}/approve`, { method: "POST" });
 }
 
+async function editComboCandidate(parent, id, combo, updatedAt) {
+  candidateId(id);
+  if (!combo || typeof combo !== "object" || typeof updatedAt !== "string") {
+    throw new Error("Invalid candidate revision.");
+  }
+  return editorRequest(parent, `/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ combo, updatedAt }),
+  });
+}
+
 async function rejectComboCandidate(parent, id, reason) {
   candidateId(id);
   if (typeof reason !== "string" || reason.length > 1000)
@@ -324,56 +336,69 @@ async function downloadComboCandidate(
   const target = path.join(root, name);
   const recordingId = path.relative(root, target).split(path.sep).join("/");
   const existing = await fs.promises.stat(target).catch(() => null);
-  if (existing?.isFile() && existing.size === expectedSize) return recordingId;
-  const requestVideo = async () => {
+  // Downloads are written atomically. A nonempty file at this path may have been
+  // trimmed in the recording library, so a later queue refresh must keep it.
+  if (existing?.isFile() && existing.size > 0) return recordingId;
+  const inFlight = candidateDownloadInFlight.get(target);
+  if (inFlight) return inFlight;
+  const downloading = (async () => {
+    const requestVideo = async () => {
+      try {
+        return await publisherReadWithRecovery(
+          ses,
+          "Candidate MP4 request",
+          (signal) =>
+            ses.fetch(`${editorApi}/${id}/video`, {
+              credentials: "include",
+              redirect: "manual",
+              cache: "no-store",
+              headers: { Accept: "video/mp4" },
+              signal,
+            }),
+          requestTimeoutMs,
+        );
+      } catch (error) {
+        if (isCancelledEditorRedirect(error)) return new Response(null, { status: 401 });
+        throw error;
+      }
+    };
+    let response = await requestVideo();
+    if (response.status === 401 || (response.status >= 300 && response.status < 400)) {
+      await signIn(ses, parent, () => checkCandidateAccess(ses));
+      response = await requestVideo();
+    }
+    if (
+      !response.ok ||
+      !response.body ||
+      !(response.headers.get("Content-Type") ?? "").includes("video/mp4")
+    ) {
+      throw new Error(`Could not download candidate MP4 (${response.status}).`);
+    }
+    if (Number(response.headers.get("Content-Length")) !== expectedSize) {
+      throw new Error("Candidate MP4 size changed. Refresh the review queue.");
+    }
+    const temporary = path.join(root, `.${name}.${randomUUID()}.partial`);
     try {
-      return await publisherReadWithRecovery(
-        ses,
-        "Candidate MP4 request",
-        (signal) =>
-          ses.fetch(`${editorApi}/${id}/video`, {
-            credentials: "include",
-            redirect: "manual",
-            cache: "no-store",
-            headers: { Accept: "video/mp4" },
-            signal,
-          }),
-        requestTimeoutMs,
+      await pipeline(
+        Readable.fromWeb(response.body),
+        fs.createWriteStream(temporary, { flags: "wx" }),
       );
-    } catch (error) {
-      if (isCancelledEditorRedirect(error)) return new Response(null, { status: 401 });
-      throw error;
+      if ((await fs.promises.stat(temporary)).size !== expectedSize) {
+        throw new Error("Candidate MP4 download was incomplete.");
+      }
+      await fs.promises.rm(target, { force: true });
+      await fs.promises.rename(temporary, target);
+      return recordingId;
+    } finally {
+      await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
     }
-  };
-  let response = await requestVideo();
-  if (response.status === 401 || (response.status >= 300 && response.status < 400)) {
-    await signIn(ses, parent, () => checkCandidateAccess(ses));
-    response = await requestVideo();
-  }
-  if (
-    !response.ok ||
-    !response.body ||
-    !(response.headers.get("Content-Type") ?? "").includes("video/mp4")
-  ) {
-    throw new Error(`Could not download candidate MP4 (${response.status}).`);
-  }
-  if (Number(response.headers.get("Content-Length")) !== expectedSize) {
-    throw new Error("Candidate MP4 size changed. Refresh the review queue.");
-  }
-  const temporary = path.join(root, `.${name}.${randomUUID()}.partial`);
+  })();
+  candidateDownloadInFlight.set(target, downloading);
   try {
-    await pipeline(
-      Readable.fromWeb(response.body),
-      fs.createWriteStream(temporary, { flags: "wx" }),
-    );
-    if ((await fs.promises.stat(temporary)).size !== expectedSize) {
-      throw new Error("Candidate MP4 download was incomplete.");
-    }
-    await fs.promises.rm(target, { force: true });
-    await fs.promises.rename(temporary, target);
-    return recordingId;
+    return await downloading;
   } finally {
-    await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
+    if (candidateDownloadInFlight.get(target) === downloading)
+      candidateDownloadInFlight.delete(target);
   }
 }
 
@@ -434,6 +459,7 @@ module.exports = {
   submitComboCandidate,
   listComboCandidates,
   approveComboCandidate,
+  editComboCandidate,
   rejectComboCandidate,
   markComboCandidateUploaded,
   removeUploadedComboCandidate,

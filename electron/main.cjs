@@ -45,13 +45,14 @@ const { normalizeYouTubeVideoUrl, readYouTubeVideoUrl } = require("./recording-y
 const { replaceLocalRecordingWithYouTube } = require("./youtube-recording-replacement.cjs");
 const { createYouTubeUploadService } = require("./youtube-upload.cjs");
 const { requireYouTubeUploadAccess } = require("./youtube-access.cjs");
-const { publishCombo } = require("./catalog-publisher.cjs");
+const { publishCombo, isCatalogOwner } = require("./catalog-publisher.cjs");
 const {
   candidateServiceStatus,
   requestComboUploadAccess,
   submitComboCandidate,
   listComboCandidates,
   approveComboCandidate,
+  editComboCandidate,
   rejectComboCandidate,
   markComboCandidateUploaded,
   removeUploadedComboCandidate,
@@ -94,6 +95,11 @@ const {
   detectInstalledProfile: detectBlackoutProfile,
   restoreSession: restoreBlackoutSession,
 } = require("./dev-blackout-game.cjs");
+const {
+  readApprovedHashes: readApprovedBlackoutHashes,
+  inspectGameHashes: inspectBlackoutGameHashes,
+  saveApprovedHashes: saveApprovedBlackoutHashes,
+} = require("./blackout-approval.cjs");
 const { createOpponentSetHistory } = require("./opponent-set-history.cjs");
 const {
   createReplayStagingStore,
@@ -3139,19 +3145,88 @@ function blackoutSourceRoot() {
   return path.resolve(__dirname, "..", ".dev", "installer", "black-stage");
 }
 
-async function ensureBlackoutCharacterAssets(gameRoot, sourceRoot, testedCharacter) {
+async function approveBlackoutOriginals(gameRoot) {
+  const approvalPath = path.join(app.getPath("userData"), "blackout-approved-hashes.json");
+  const { current, changes: baselineChanges } = await inspectBlackoutGameHashes(
+    gameRoot,
+    blackoutOriginals,
+    sha256BlackoutFile,
+  );
+  if (baselineChanges.length === 0) {
+    return { hashes: blackoutOriginals, approvalPath, changed: false };
+  }
+  const trusted = readApprovedBlackoutHashes(approvalPath, blackoutOriginals) ?? blackoutOriginals;
+  const changes = Object.entries(trusted)
+    .filter(([name, hash]) => current[name] !== hash)
+    .map(([name, approvedHash]) => ({ name, approvedHash, actualHash: current[name] }));
+  if (changes.length === 0) return { hashes: trusted, approvalPath, changed: false };
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    throw new Error("Open Labatar to approve the changed game files before blackout launch.");
+  }
+  const backupBytes = (
+    await Promise.all(
+      Object.keys(current).map((name) =>
+        fs.promises.stat(path.join(gameRoot, "data_packages", name)).then((stat) => stat.size),
+      ),
+    )
+  ).reduce((total, size) => total + size, 0);
+  const detail = [
+    "Labatar will rebuild blackout assets and keep separate backups for this version.",
+    `A new backup set requires about ${(backupBytes / 1024 ** 3).toFixed(2)} GiB.`,
+    "Visual behavior must be checked after the game opens.",
+    "",
+    ...changes.flatMap(({ name, approvedHash, actualHash }) => [
+      name,
+      `Approved: ${approvedHash}`,
+      `Current:  ${actualHash}`,
+      "",
+    ]),
+  ].join("\n");
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    title: "Game files changed",
+    message: `${changes.length} game PAK file${changes.length === 1 ? " has" : "s have"} changed. Approve this version for blackout mode?`,
+    detail,
+    buttons: ["Cancel", "Approve and rebuild"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  });
+  if (result.response !== 1) {
+    throw new Error("Blackout launch cancelled. Game files were not changed.");
+  }
+  const rechecked = await inspectBlackoutGameHashes(gameRoot, current, sha256BlackoutFile);
+  if (rechecked.changes.length > 0) {
+    throw new Error("Game files changed while approval was open. Try blackout launch again.");
+  }
+  return { hashes: current, approvalPath, changed: true };
+}
+
+async function ensureBlackoutCharacterAssets(
+  gameRoot,
+  sourceRoot,
+  testedCharacter,
+  expectedOriginals,
+) {
   const plan = blackoutReplacementPlan(testedCharacter);
-  const { buildHiddenImagesPak } = require("../scripts/build-capture-isolation.cjs");
+  const {
+    buildHiddenImagesPak,
+    buildHiddenStagePak,
+  } = require("../scripts/build-capture-isolation.cjs");
   await fs.promises.mkdir(sourceRoot, { recursive: true });
   for (const [packageName, replacementName] of Object.entries(plan)) {
     const mode = replacementName.endsWith("-supports-hidden.pak")
       ? "supports"
       : replacementName.endsWith("-all-hidden.pak")
         ? "all"
-        : null;
+        : packageName === "watertribe.pak"
+          ? "stage"
+          : packageName === "hud.pak" || packageName === "hitspark.pak"
+            ? "default"
+            : null;
     if (!mode) continue;
     const originalPath = path.join(gameRoot, "data_packages", packageName);
-    const originalHash = blackoutOriginals[packageName];
+    const originalHash = expectedOriginals[packageName];
     if (!originalHash || (await sha256BlackoutFile(originalPath)) !== originalHash) {
       throw new Error(
         `${packageName} differs from the verified original. Blackout assets were not built.`,
@@ -3173,16 +3248,19 @@ async function ensureBlackoutCharacterAssets(gameRoot, sourceRoot, testedCharact
     }
     const temporaryPath = `${outputPath}.${randomUUID()}.tmp`;
     try {
-      const result = buildHiddenImagesPak(originalPath, temporaryPath, mode);
-      if (result.replacedImages < 1)
-        throw new Error(`No images were found to hide in ${packageName}.`);
+      const result =
+        mode === "stage"
+          ? buildHiddenStagePak(originalPath, temporaryPath)
+          : buildHiddenImagesPak(originalPath, temporaryPath, mode);
+      const changed = result.replacedImages ?? result.hiddenCommands;
+      if (changed < 1) throw new Error(`No assets were found to hide in ${packageName}.`);
       const replacementHash = await sha256BlackoutFile(temporaryPath);
       if (outputExists) await fs.promises.copyFile(temporaryPath, outputPath);
       else await fs.promises.rename(temporaryPath, outputPath);
       await fs.promises.writeFile(
         metadataPath,
         JSON.stringify(
-          { packageName, originalHash, replacementHash, replacedImages: result.replacedImages },
+          { packageName, originalHash, replacementHash, changedAssets: changed },
           null,
           2,
         ),
@@ -3365,16 +3443,35 @@ async function startDevBlackoutGame(request = {}) {
     const gameRoot = getReplayFolder();
     if (!gameRoot) throw new Error("Select the game installation folder in Settings first.");
     const testedCharacter = String(request.testedCharacter ?? "");
+    blackoutReplacementPlan(testedCharacter);
+    const resolvedGameRoot = path.resolve(gameRoot);
+    const approval = await approveBlackoutOriginals(resolvedGameRoot);
+    if (await blackoutGameRunning()) {
+      throw new Error("Close the already open game before starting blackout mode.");
+    }
     await ensureBlackoutCharacterAssets(
-      path.resolve(gameRoot),
+      resolvedGameRoot,
       blackoutSourceRoot(),
       testedCharacter,
+      approval.hashes,
     );
+    if (approval.changed) {
+      const rechecked = await inspectBlackoutGameHashes(
+        resolvedGameRoot,
+        approval.hashes,
+        sha256BlackoutFile,
+      );
+      if (rechecked.changes.length > 0) {
+        throw new Error("Game files changed while blackout assets were being built. Try again.");
+      }
+      await saveApprovedBlackoutHashes(approval.approvalPath, approval.hashes, blackoutOriginals);
+    }
     session = await prepareBlackoutSession({
-      gameRoot: path.resolve(gameRoot),
+      gameRoot: resolvedGameRoot,
       sourceRoot: blackoutSourceRoot(),
       backupRoot: blackoutBackupRoot(),
       testedCharacter,
+      expectedOriginals: approval.hashes,
     });
     await startBlackoutWatcher(session);
     await installBlackoutSession(session);
@@ -6577,6 +6674,7 @@ const uiArtworkNames = [
 ];
 const uiArtworkLibraryPath = (name) => path.join(portraitLibraryRoot(), "ui", `${name}.png`);
 const artworkJobs = new Map();
+let artworkExtractionPromise = null;
 let portraitLibraryInitialization = null;
 
 function ensurePortraitLibrary() {
@@ -6815,7 +6913,7 @@ ipcMain.handle("artwork:get-status", async () => {
     missing,
   };
 });
-ipcMain.handle("artwork:extract", async (event) => {
+async function extractArtwork(event) {
   const runId = `run-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const controller = new AbortController();
   artworkJobs.set(runId, controller);
@@ -6907,6 +7005,13 @@ ipcMain.handle("artwork:extract", async (event) => {
       });
     }
   }
+}
+ipcMain.handle("artwork:extract", (event) => {
+  if (artworkExtractionPromise) return artworkExtractionPromise;
+  artworkExtractionPromise = extractArtwork(event).finally(() => {
+    artworkExtractionPromise = null;
+  });
+  return artworkExtractionPromise;
 });
 ipcMain.handle("artwork:browse-matches", async (event, request = {}) => {
   const filenameContains = String(request.filenameContains ?? "")
@@ -7097,7 +7202,20 @@ ipcMain.handle("recordings:youtube-connect", async (_, request) => {
   youtubeConnectionsChanging.add(destination);
   try {
     await requireYouTubeUploadAccess(mainWindow);
-    return await youtubeUploader.connect(destination);
+    const status = await youtubeUploader.connect(destination);
+    for (const [workId, work] of recordingWork) {
+      if (
+        work.kind === "youtube-upload" &&
+        work.phase === "failed" &&
+        work.destination === destination &&
+        /Token has been expired or revoked|YouTube connection expired or was revoked/.test(
+          work.detail ?? "",
+        )
+      ) {
+        setRecordingWork(workId, { detail: "YouTube account reconnected. Retry this upload." });
+      }
+    }
+    return status;
   } finally {
     youtubeConnectionsChanging.delete(destination);
   }
@@ -7435,6 +7553,7 @@ ipcMain.handle("catalog:publish-combo", async (event, request) => {
     throw error;
   }
 });
+ipcMain.handle("catalog:is-owner", () => isCatalogOwner());
 ipcMain.handle("combo-candidates:status", () => candidateServiceStatus());
 ipcMain.handle("combo-candidates:request-upload-access", () => requestComboUploadAccess());
 ipcMain.handle("combo-candidates:submit", async (event, request) => {
@@ -7487,6 +7606,14 @@ ipcMain.handle("combo-candidates:approve", async (event, request) => {
     throw error;
   }
 });
+ipcMain.handle("combo-candidates:edit", (event, request) =>
+  editComboCandidate(
+    BrowserWindow.fromWebContents(event.sender),
+    request?.id,
+    request?.combo,
+    request?.updatedAt,
+  ),
+);
 ipcMain.handle("combo-candidates:reject", (event, request) =>
   rejectComboCandidate(
     BrowserWindow.fromWebContents(event.sender),

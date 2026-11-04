@@ -1,42 +1,41 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Alert,
   Box,
   Button,
   Divider,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControlLabel,
   Paper,
-  Slider,
   Stack,
   Switch,
   TextField,
   Typography,
 } from "@mui/material";
-import { candidateReviewStatus, type ComboCandidate } from "./combo-candidates";
+import {
+  candidateReviewStatus,
+  type CandidateCombo,
+  type ComboCandidate,
+} from "./combo-candidates";
 import { candidateRecordingTitle } from "./combo-recording-name";
+import { comboRouteFormatError, formatComboRoute, normalizeComboNoteRanges } from "./combo-notes";
+import { comboScreenPositions } from "./combo-screen-position";
 import type { RecordedVideo } from "./recording-types";
-
-function playbackTime(seconds: number) {
-  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
-  const whole = Math.floor(seconds);
-  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
-}
 
 export function ComboCandidateReview({
   candidate,
   onChanged,
   savedRecording,
   onRecordingSaved,
-  savedVideoShownAbove,
 }: {
   candidate: ComboCandidate;
   onChanged: (candidate: ComboCandidate, recording?: RecordedVideo) => Promise<void>;
   savedRecording: RecordedVideo | null;
   onRecordingSaved: (recording: RecordedVideo) => void;
-  savedVideoShownAbove: boolean;
 }) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const scrubbingRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -47,10 +46,6 @@ export function ComboCandidateReview({
   const recording =
     savedRecording ??
     (recentlySaved?.candidateId === candidate.id ? recentlySaved.recording : null);
-  const [videoError, setVideoError] = useState(false);
-  const [playing, setPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
   const [reason, setReason] = useState(candidate.rejectionReason);
   const [youtubeUrl, setYoutubeUrl] = useState(candidate.youtubeUrl);
   const [title, setTitle] = useState(candidateRecordingTitle(candidate.combo));
@@ -59,14 +54,13 @@ export function ComboCandidateReview({
   );
   const [madeForKids, setMadeForKids] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [draft, setDraft] = useState<CandidateCombo | null>(null);
+  const [draftRouteError, setDraftRouteError] = useState("");
+  const [moveIdsText, setMoveIdsText] = useState("");
+  const [mechanicsText, setMechanicsText] = useState("");
 
   useEffect(() => {
     setRecentlySaved(null);
-    setVideoError(false);
-    setPlaying(false);
-    setCurrentTime(0);
-    setDuration(0);
-    scrubbingRef.current = false;
     setReason(candidate.rejectionReason);
     setYoutubeUrl(candidate.youtubeUrl);
     setTitle(candidateRecordingTitle(candidate.combo));
@@ -75,7 +69,9 @@ export function ComboCandidateReview({
     );
     setMessage("");
     setError("");
-  }, [candidate.id]);
+    setDraft(null);
+    setDraftRouteError("");
+  }, [candidate.id, candidate.updatedAt]);
   useEffect(() => {
     if (candidate.status !== "pending" && candidate.status !== "approved") return;
     let cancelled = false;
@@ -98,6 +94,14 @@ export function ComboCandidateReview({
       setMessage(await action());
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Candidate action failed.");
+      try {
+        const status = await window.electronAPI!.recordings.getYouTubeUploadStatus({
+          destination: "combos",
+        });
+        setConnected(status.connected);
+      } catch {
+        // Keep the original action error visible if status cannot be checked.
+      }
     } finally {
       setBusy(false);
     }
@@ -115,20 +119,43 @@ export function ComboCandidateReview({
     onRecordingSaved(imported);
     return imported;
   };
-  const download = () =>
-    void act(async () => {
-      await localRecording();
-      return "MP4 saved in the recording library.";
-    });
-  const togglePlayback = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    if (!video.paused) {
-      video.pause();
+  const updateDraft = <K extends keyof CandidateCombo>(key: K, value: CandidateCombo[K]) =>
+    setDraft((current) => (current ? { ...current, [key]: value } : current));
+  const saveDetails = () => {
+    if (!draft || busy) return;
+    const route = formatComboRoute(draft.route);
+    const routeError = comboRouteFormatError(route);
+    if (routeError) {
+      setDraftRouteError(routeError);
       return;
     }
-    void video.play().catch((cause: unknown) => {
-      if (!(cause instanceof DOMException && cause.name === "AbortError")) setVideoError(true);
+    setDraftRouteError("");
+    void act(async () => {
+      const combo: CandidateCombo = {
+        ...draft,
+        route,
+        moveIds: moveIdsText
+          .split("\n")
+          .map((value) => value.trim())
+          .filter(Boolean),
+        mechanics: mechanicsText
+          .split("\n")
+          .map((value) => value.trim())
+          .filter(Boolean),
+        notes: normalizeComboNoteRanges(
+          draft.route,
+          route,
+          draft.notes.filter((note) => note.text.trim()),
+        ),
+      };
+      const updated = await window.electronAPI!.comboCandidates.edit({
+        id: candidate.id,
+        combo,
+        updatedAt: candidate.updatedAt,
+      });
+      await onChanged(updated);
+      setDraft(null);
+      return "Candidate details updated. Review approval was reset.";
     });
   };
   const reject = () => {
@@ -165,6 +192,11 @@ export function ComboCandidateReview({
     }
   };
   const upload = () => {
+    const routeError = comboRouteFormatError(candidate.combo.route);
+    if (routeError) {
+      setError(`Format the candidate route before uploading: ${routeError}`);
+      return;
+    }
     void act(async () => {
       const source = await localRecording();
       const result = await window.electronAPI!.recordings.uploadToYouTube({
@@ -188,88 +220,33 @@ export function ComboCandidateReview({
         {error && <Alert severity="error">{error}</Alert>}
         {message && <Alert severity="success">{message}</Alert>}
         <Typography variant="body2" color="text.secondary">
-          {candidate.fileName} ({Math.round(candidate.fileSize / 1024 / 1024)} MB)
+          Queued MP4: {candidate.fileName} ({Math.round(candidate.fileSize / 1024 / 1024)} MB)
         </Typography>
         {(candidate.status === "pending" || candidate.status === "approved") && (
           <>
-            {!savedVideoShownAbove && (
-              <>
-                <Box
-                  component="video"
-                  key={`${candidate.id}:${recording?.id ?? "remote"}`}
-                  ref={videoRef}
-                  src={recording?.url ?? `labatar-media://candidate/${candidate.id}`}
-                  controls
-                  preload="metadata"
-                  onError={() => setVideoError(true)}
-                  onLoadedMetadata={(event) => {
-                    setVideoError(false);
-                    setDuration(event.currentTarget.duration);
-                    setCurrentTime(0);
-                  }}
-                  onDurationChange={(event) => setDuration(event.currentTarget.duration)}
-                  onTimeUpdate={(event) => {
-                    if (!scrubbingRef.current) setCurrentTime(event.currentTarget.currentTime);
-                  }}
-                  onPlay={() => {
-                    setPlaying(true);
-                    setVideoError(false);
-                  }}
-                  onPause={() => setPlaying(false)}
-                  onEnded={() => setPlaying(false)}
-                  sx={{ width: "100%", maxHeight: 420, bgcolor: "black" }}
-                />
-                <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                  <Button size="small" variant="contained" onClick={togglePlayback}>
-                    {playing ? "Pause" : "Play"}
-                  </Button>
-                  <Slider
-                    aria-label="Candidate video position"
-                    min={0}
-                    max={Number.isFinite(duration) && duration > 0 ? duration : 1}
-                    value={Math.min(
-                      currentTime,
-                      Number.isFinite(duration) && duration > 0 ? duration : 1,
-                    )}
-                    disabled={!Number.isFinite(duration) || duration <= 0}
-                    onChange={(_, value) => {
-                      if (typeof value === "number") {
-                        scrubbingRef.current = true;
-                        setCurrentTime(value);
-                      }
-                    }}
-                    onChangeCommitted={(_, value) => {
-                      if (typeof value === "number" && videoRef.current)
-                        videoRef.current.currentTime = value;
-                      scrubbingRef.current = false;
-                    }}
-                    sx={{ flex: 1 }}
-                  />
-                  <Typography variant="caption" sx={{ whiteSpace: "nowrap" }}>
-                    {playbackTime(currentTime)} / {playbackTime(duration)}
-                  </Typography>
-                </Stack>
-                {videoError && (
-                  <Alert severity="warning">
-                    Could not play this MP4. Refresh candidates or sign in to the catalog again.
-                  </Alert>
-                )}
-              </>
-            )}
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => {
+                setDraft({ ...candidate.combo, notes: [...candidate.combo.notes] });
+                setMoveIdsText(candidate.combo.moveIds.join("\n"));
+                setMechanicsText(candidate.combo.mechanics.join("\n"));
+              }}
+              disabled={busy}
+              sx={{ alignSelf: "flex-start" }}
+            >
+              Edit candidate details
+            </Button>
             {recording ? (
               <Alert severity="success">
-                MP4 saved in the recording library{savedVideoShownAbove ? "; play it above." : "."}
+                MP4 saved in the recording library. Play it above or open it there to trim it. The
+                local copy is used for YouTube upload.
               </Alert>
             ) : (
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={download}
-                disabled={busy}
-                sx={{ alignSelf: "flex-start" }}
-              >
-                Save MP4 to recording library
-              </Button>
+              <Alert severity="info">
+                The candidate MP4 is not in the recording library yet. Refresh candidates to retry
+                its download.
+              </Alert>
             )}
           </>
         )}
@@ -277,10 +254,6 @@ export function ComboCandidateReview({
           <>
             <Divider />
             <Typography variant="subtitle2">Upload to YouTube</Typography>
-            <Typography variant="body2" color="text.secondary">
-              The candidate MP4 will be saved to the recording library automatically when you upload
-              it.
-            </Typography>
             {!connected && (
               <Button
                 size="small"
@@ -383,6 +356,295 @@ export function ComboCandidateReview({
           <Typography variant="body2">Reason: {candidate.rejectionReason}</Typography>
         )}
       </Stack>
+      <Dialog open={Boolean(draft)} onClose={() => !busy && setDraft(null)} maxWidth="md" fullWidth>
+        <DialogTitle>Edit candidate details</DialogTitle>
+        <DialogContent dividers>
+          {draft && (
+            <Stack spacing={2} sx={{ pt: 1 }}>
+              <Typography variant="body2" color="text.secondary">
+                Save changes to this queued candidate before its YouTube upload and catalog review.
+                The candidate ID and MP4 link stay the same.
+              </Typography>
+              <Box
+                sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2 }}
+              >
+                <TextField
+                  label="Public name"
+                  value={draft.name ?? ""}
+                  onChange={(event) => updateDraft("name", event.target.value)}
+                />
+                <TextField
+                  label="Damage"
+                  required
+                  value={draft.damage}
+                  onChange={(event) => updateDraft("damage", event.target.value)}
+                />
+                <TextField
+                  label="Route"
+                  required
+                  multiline
+                  minRows={2}
+                  value={draft.route}
+                  error={Boolean(draftRouteError)}
+                  helperText={
+                    draftRouteError ||
+                    "Saved routes use one space between moves; ~ marks a stance followup. Inputs use casing like 2B and j.2C."
+                  }
+                  onChange={(event) => {
+                    setDraftRouteError("");
+                    updateDraft("route", event.target.value);
+                    setDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            notes: current.notes.map(({ range: _range, ...note }) => note),
+                          }
+                        : current,
+                    );
+                  }}
+                  sx={{ gridColumn: "1 / -1" }}
+                />
+                {draft.route && draft.route !== formatComboRoute(draft.route) && (
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      setDraft((current) => {
+                        if (!current) return current;
+                        const route = formatComboRoute(current.route);
+                        return {
+                          ...current,
+                          route,
+                          notes: normalizeComboNoteRanges(current.route, route, current.notes),
+                        };
+                      });
+                      setDraftRouteError("");
+                    }}
+                    sx={{ justifySelf: "start" }}
+                  >
+                    Format route
+                  </Button>
+                )}
+                <TextField
+                  select
+                  label="Screen position"
+                  value={draft.screenPosition}
+                  onChange={(event) => updateDraft("screenPosition", event.target.value)}
+                  slotProps={{ select: { native: true } }}
+                >
+                  {comboScreenPositions.map((position) => (
+                    <option key={position} value={position}>
+                      {position}
+                    </option>
+                  ))}
+                </TextField>
+                <TextField
+                  select
+                  label="Editor difficulty"
+                  value={draft.difficulty ?? ""}
+                  onChange={(event) =>
+                    updateDraft(
+                      "difficulty",
+                      event.target.value ? Number(event.target.value) : undefined,
+                    )
+                  }
+                  slotProps={{ select: { native: true }, inputLabel: { shrink: true } }}
+                >
+                  <option value="">Unrated</option>
+                  {[1, 2, 3, 4, 5].map((level) => (
+                    <option key={level} value={level}>
+                      {level}
+                    </option>
+                  ))}
+                </TextField>
+                <TextField
+                  label="Pips"
+                  type="number"
+                  value={draft.resourceCosts.pips ?? 0}
+                  onChange={(event) =>
+                    setDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            resourceCosts: {
+                              ...current.resourceCosts,
+                              pips: Math.max(0, Math.floor(Number(event.target.value) || 0)),
+                            },
+                          }
+                        : current,
+                    )
+                  }
+                  slotProps={{ htmlInput: { min: 0 } }}
+                />
+                <TextField
+                  label="Flow"
+                  type="number"
+                  value={draft.resourceCosts.flow ?? 0}
+                  onChange={(event) =>
+                    setDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            resourceCosts: {
+                              ...current.resourceCosts,
+                              flow: Math.max(0, Math.floor(Number(event.target.value) || 0)),
+                            },
+                          }
+                        : current,
+                    )
+                  }
+                  slotProps={{ htmlInput: { min: 0 } }}
+                />
+                <TextField
+                  label="Editor pick context"
+                  value={draft.editorPickContext ?? ""}
+                  onChange={(event) => updateDraft("editorPickContext", event.target.value)}
+                />
+                <TextField
+                  select
+                  label="Routing mode"
+                  value={draft.routingMode ?? "autopilot"}
+                  onChange={(event) =>
+                    updateDraft("routingMode", event.target.value as CandidateCombo["routingMode"])
+                  }
+                  slotProps={{ select: { native: true } }}
+                >
+                  <option value="autopilot">Autopilot</option>
+                  <option value="unique">Unique routing</option>
+                </TextField>
+                <TextField
+                  label="Why the editor picked it"
+                  multiline
+                  minRows={2}
+                  value={draft.editorPickReason ?? ""}
+                  onChange={(event) => updateDraft("editorPickReason", event.target.value)}
+                  sx={{ gridColumn: "1 / -1" }}
+                />
+                <TextField
+                  label="Move IDs, one per line"
+                  multiline
+                  minRows={2}
+                  value={moveIdsText}
+                  onChange={(event) => setMoveIdsText(event.target.value)}
+                />
+                <TextField
+                  label="Mechanics, one per line"
+                  multiline
+                  minRows={2}
+                  value={mechanicsText}
+                  onChange={(event) => setMechanicsText(event.target.value)}
+                />
+                <Stack spacing={1} sx={{ gridColumn: "1 / -1" }}>
+                  <Typography variant="subtitle2">Editor notes</Typography>
+                  {draft.notes.map((note, index) => (
+                    <Stack key={note.id} direction={{ xs: "column", sm: "row" }} spacing={1}>
+                      <TextField
+                        label={`Note ${index + 1}`}
+                        multiline
+                        minRows={2}
+                        fullWidth
+                        value={note.text}
+                        onChange={(event) =>
+                          setDraft((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  notes: current.notes.map((entry, position) => {
+                                    if (position !== index) return entry;
+                                    const { range: _range, ...plain } = entry;
+                                    return { ...plain, text: event.target.value };
+                                  }),
+                                }
+                              : current,
+                          )
+                        }
+                      />
+                      <TextField
+                        select
+                        label="Category"
+                        value={note.category}
+                        onChange={(event) =>
+                          setDraft((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  notes: current.notes.map((entry, position) =>
+                                    position === index
+                                      ? {
+                                          ...entry,
+                                          category: event.target
+                                            .value as CandidateCombo["notes"][number]["category"],
+                                        }
+                                      : entry,
+                                  ),
+                                }
+                              : current,
+                          )
+                        }
+                        slotProps={{ select: { native: true } }}
+                        sx={{ minWidth: 150 }}
+                      >
+                        <option value="general">General</option>
+                        <option value="execution">Execution</option>
+                        <option value="situational">Situational</option>
+                      </TextField>
+                      <Button
+                        onClick={() =>
+                          setDraft((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  notes: current.notes.filter((_, position) => position !== index),
+                                }
+                              : current,
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </Stack>
+                  ))}
+                  <Button
+                    onClick={() =>
+                      setDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              notes: [
+                                ...current.notes,
+                                { id: crypto.randomUUID(), text: "", category: "general" },
+                              ],
+                            }
+                          : current,
+                      )
+                    }
+                    disabled={draft.notes.length >= 20}
+                    sx={{ alignSelf: "flex-start" }}
+                  >
+                    Add note
+                  </Button>
+                </Stack>
+              </Box>
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          {error && (
+            <Typography color="error" variant="body2" sx={{ mr: "auto" }}>
+              {error}
+            </Typography>
+          )}
+          <Button onClick={() => setDraft(null)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={saveDetails}
+            disabled={busy || !draft?.route.trim() || !draft.damage.trim()}
+          >
+            Save candidate
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Paper>
   );
 }

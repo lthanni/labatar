@@ -42,15 +42,24 @@ import {
   type ComboCandidate,
 } from "./combo-candidates";
 import { comboStarterFromRoute, comboStarterGroup, comboStarterGroups } from "./combo-starter";
+import { routeAuditTargets } from "./combo-route-audit";
 import { candidateRecordingTitle, formatComboRecordingBaseName } from "./combo-recording-name";
 import { useObsRecording } from "./ObsRecordingContext";
-import { comboNoteCategoryLabel, comboNoteRangeOffsets, normalizeComboNotes } from "./combo-notes";
+import {
+  comboRouteFormatError,
+  comboNoteCategoryLabel,
+  comboNoteRangeOffsets,
+  formatComboRoute,
+  normalizeComboNoteRanges,
+  normalizeComboNotes,
+} from "./combo-notes";
 import {
   catalogSnapshot,
   comboItems,
   comboStatuses,
   countLocalCombos,
   effectiveDifficulty,
+  emptyComboWorkspace,
   emptyPersonalEntry,
   localRevisionDraft,
   replaceLocalComboWithCatalog,
@@ -77,6 +86,7 @@ import {
 import { publishedComboFromDraft, type PublishComboDraft } from "./publish-combo-draft";
 import { comboMediaGap, comboYouTubeVideo, isLocalMp4, type ComboMediaGap } from "./combo-media";
 import type { RecordedVideo } from "./recording-types";
+import type { WebArtworkLibrary } from "./web/artwork";
 import {
   forgetPendingYouTubeUpload,
   pendingYouTubeUploadUrl,
@@ -198,6 +208,9 @@ const rawColumns = [
   ["tags", "My tags"],
 ] as const;
 type RawColumn = (typeof rawColumns)[number][0];
+const browserRawColumns = rawColumns.filter(
+  ([id]) => id !== "source" && id !== "status" && id !== "tags",
+);
 
 function field(
   item: ComboItem,
@@ -353,11 +366,11 @@ function ComboSourceCounts({ local, candidates }: { local: number; candidates: n
 }
 
 function ComboPipIcons({ pips }: { pips: number }) {
-  const [available, setAvailable] = useState(true);
+  const [available, setAvailable] = useState(Boolean(window.electronAPI?.artwork));
   const [version, setVersion] = useState(0);
   useEffect(() => {
     const refresh = () => {
-      setAvailable(true);
+      setAvailable(Boolean(window.electronAPI?.artwork));
       setVersion((current) => current + 1);
     };
     window.addEventListener("labatar-artwork-imported", refresh);
@@ -390,11 +403,11 @@ function ComboPipIcons({ pips }: { pips: number }) {
 }
 
 function ComboFlowMeter({ flow }: { flow: number }) {
-  const [available, setAvailable] = useState(true);
+  const [available, setAvailable] = useState(Boolean(window.electronAPI?.artwork));
   const [version, setVersion] = useState(0);
   useEffect(() => {
     const refresh = () => {
-      setAvailable(true);
+      setAvailable(Boolean(window.electronAPI?.artwork));
       setVersion((current) => current + 1);
     };
     window.addEventListener("labatar-artwork-imported", refresh);
@@ -469,6 +482,7 @@ function PortraitPicker({
   kind,
   options,
   character,
+  webArtwork,
   localCount,
   candidateCount,
   onClose,
@@ -478,22 +492,31 @@ function PortraitPicker({
   kind: "character" | "support";
   options: string[];
   character: string;
+  webArtwork?: WebArtworkLibrary | null;
   localCount: (id: string) => number;
   candidateCount?: (id: string) => number;
   onClose: () => void;
   onChoose: (id: string) => void;
 }) {
   const [images, setImages] = useState<Record<string, string | null>>({});
+  const pairs = options.map((id) => ({
+    character: kind === "character" ? displayName(id) : displayName(character),
+    support:
+      kind === "support"
+        ? displayName(id)
+        : (Object.values(supportMap[displayName(id) as keyof typeof supportMap] ?? {})[0] ?? ""),
+  }));
+  const webImages = webArtwork
+    ? Object.fromEntries(
+        options.map((id, index) => {
+          const portrait = webArtwork.portraitArtwork(pairs[index].character, pairs[index].support);
+          return [id, kind === "character" ? portrait.portraitUrl : portrait.supportUrl];
+        }),
+      )
+    : null;
   useEffect(() => {
-    if (!open || !window.electronAPI?.replays?.resolvePortraits) return;
+    if (!open || webArtwork || !window.electronAPI?.replays?.resolvePortraits) return;
     let cancelled = false;
-    const pairs = options.map((id) => ({
-      character: kind === "character" ? displayName(id) : displayName(character),
-      support:
-        kind === "support"
-          ? displayName(id)
-          : (Object.values(supportMap[displayName(id) as keyof typeof supportMap] ?? {})[0] ?? ""),
-    }));
     void window.electronAPI.replays
       .resolvePortraits({ pairs })
       .then((results) => {
@@ -515,7 +538,7 @@ function PortraitPicker({
     return () => {
       cancelled = true;
     };
-  }, [open, kind, options.join("|"), character]);
+  }, [open, kind, options.join("|"), character, webArtwork]);
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ color: "text.primary" }}>Choose {kind}</DialogTitle>
@@ -540,10 +563,10 @@ function PortraitPicker({
                 textTransform: "none",
               }}
             >
-              {images[id] ? (
+              {(webImages ?? images)[id] ? (
                 <Box
                   component="img"
-                  src={images[id] ?? ""}
+                  src={(webImages ?? images)[id] ?? ""}
                   alt=""
                   sx={{ width: 55, height: 62, objectFit: "contain" }}
                 />
@@ -712,9 +735,37 @@ function LocalComboDialog({
               required
               value={form.route}
               onChange={(e) => update("route", e.target.value)}
-              helperText={`Starter (this can be edited later): ${comboStarterFromRoute(form.route, form.publishedBase?.starterIsNonAttackStance ?? false) || "Enter a route"}`}
+              helperText={`Saved routes use one space between moves; ~ marks a stance followup. Inputs use casing like 2B and j.2C. Starter: ${comboStarterFromRoute(form.route, form.publishedBase?.starterIsNonAttackStance ?? false) || "Enter a route"}`}
               sx={{ gridColumn: { sm: "span 2" } }}
             />
+            {form.route && form.route !== formatComboRoute(form.route) && (
+              <Button
+                size="small"
+                onClick={() => {
+                  setForm((old) => {
+                    if (!old) return old;
+                    const route = formatComboRoute(old.route);
+                    return {
+                      ...old,
+                      route,
+                      ...(old.editorNotes
+                        ? {
+                            editorNotes: normalizeComboNoteRanges(
+                              old.route,
+                              route,
+                              old.editorNotes,
+                            ),
+                          }
+                        : {}),
+                    };
+                  });
+                  setFormError("");
+                }}
+                sx={{ justifySelf: "start" }}
+              >
+                Format route
+              </Button>
+            )}
             <SelectField
               label="Screen position"
               value={form.screenPosition}
@@ -1150,6 +1201,11 @@ function PublishDialog({
   };
   const uploadLinkedMp4 = async () => {
     if (!item || !linkedRecording) return;
+    const routeError = comboRouteFormatError(item.route);
+    if (routeError) {
+      setUploadError(`Format the combo route before uploading: ${routeError}`);
+      return;
+    }
     setBusy(true);
     setUploadError("");
     setUploadNotice("");
@@ -1196,12 +1252,22 @@ function PublishDialog({
       setUploadError(
         reason instanceof Error ? reason.message : "Could not upload the MP4 to YouTube.",
       );
+      try {
+        const status = await window.electronAPI!.recordings.getYouTubeUploadStatus({
+          destination: "combos",
+        });
+        setYoutubeConnected(status.connected);
+      } catch {
+        // Keep the upload error visible if status cannot be checked.
+      }
     } finally {
       setBusy(false);
     }
   };
   const prepare = () => {
     if (!item || !form) return;
+    const routeError = comboRouteFormatError(item.route);
+    if (routeError) return setError(routeError);
     if (
       item.local?.publishedId &&
       (!Number.isSafeInteger(item.local.publishedRevision) ||
@@ -1454,14 +1520,24 @@ function PublishDialog({
   );
 }
 
-export function CombosPage({ active }: { active: boolean }) {
+export function CombosPage({
+  active,
+  readOnly = false,
+  webArtwork,
+}: {
+  active: boolean;
+  readOnly?: boolean;
+  webArtwork?: WebArtworkLibrary | null;
+}) {
   const { state: obsState, settings: obsSettings, busy: obsBusy, moveCapture } = useObsRecording();
   const [catalog, setCatalog] = useState<PublishedCatalog | null>(null);
   const catalogRef = useRef(catalog);
   catalogRef.current = catalog;
   const [refreshing, setRefreshing] = useState(false);
   const [catalogError, setCatalogError] = useState("");
-  const [workspace, setWorkspace] = useState<ComboWorkspaceData>(readComboWorkspace);
+  const [workspace, setWorkspace] = useState<ComboWorkspaceData>(() =>
+    readOnly ? emptyComboWorkspace() : readComboWorkspace(),
+  );
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
   const [storageError, setStorageError] = useState("");
@@ -1469,6 +1545,13 @@ export function CombosPage({ active }: { active: boolean }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [picker, setPicker] = useState<"character" | "support" | null>(null);
   const [localDraft, setLocalDraft] = useState<LocalCombo | null>(null);
+  const [routeAudit, setRouteAudit] = useState<
+    | { id: string; source: ComboItem["source"]; route: string; suggested: string; error: string }[]
+    | null
+  >(null);
+  const [routeAuditScope, setRouteAuditScope] = useState<"local" | "all">("local");
+  const [routeAuditCheckedCount, setRouteAuditCheckedCount] = useState(0);
+  const [routeAuditChecking, setRouteAuditChecking] = useState(false);
   const [publishId, setPublishId] = useState<string | null>(null);
   const [upstreamCandidates, setUpstreamCandidates] = useState<ComboCandidate[]>([]);
   const [candidatesLoaded, setCandidatesLoaded] = useState(false);
@@ -1479,7 +1562,10 @@ export function CombosPage({ active }: { active: boolean }) {
   const [candidateAccessDenied, setCandidateAccessDenied] = useState(false);
   const [candidateProgress, setCandidateProgress] = useState<number | null>(null);
   const [candidateError, setCandidateError] = useState("");
+  const [candidateDownloadError, setCandidateDownloadError] = useState("");
+  const [candidateSaving, setCandidateSaving] = useState(false);
   const candidateRefreshIdRef = useRef(0);
+  const candidateDownloadsInFlightRef = useRef(new Map<string, Promise<string>>());
   const candidateCleanupInFlight = useRef(new Set<string>());
   const [candidateCleanupTick, setCandidateCleanupTick] = useState(0);
   const [statusFilter, setStatusFilter] = useState("gameplan");
@@ -1492,7 +1578,7 @@ export function CombosPage({ active }: { active: boolean }) {
     descending: false,
   });
   const [columns, setColumns] = useState<Set<RawColumn>>(
-    () => new Set(rawColumns.map(([id]) => id)),
+    () => new Set((readOnly ? browserRawColumns : rawColumns).map(([id]) => id)),
   );
   const [showColumns, setShowColumns] = useState(false);
   const [tagInput, setTagInput] = useState("");
@@ -1508,7 +1594,9 @@ export function CombosPage({ active }: { active: boolean }) {
   const [recordingsLoaded, setRecordingsLoaded] = useState(false);
   const [recordingsError, setRecordingsError] = useState("");
   const [pendingYouTubeVersion, setPendingYouTubeVersion] = useState(0);
-  const [pendingComboRecording, setPendingComboRecording] = useState(readPendingPageComboRecording);
+  const [pendingComboRecording, setPendingComboRecording] = useState(() =>
+    readOnly ? null : readPendingPageComboRecording(),
+  );
   const pendingComboRecordingRef = useRef(pendingComboRecording);
   const itemByIdRef = useRef(new Map<string, ComboItem>());
   const [comboRecordingBusy, setComboRecordingBusy] = useState(false);
@@ -1526,41 +1614,146 @@ export function CombosPage({ active }: { active: boolean }) {
   } | null>(null);
   const [recordingChangeBusy, setRecordingChangeBusy] = useState(false);
   const [recordingChangeError, setRecordingChangeError] = useState("");
-  const refreshCandidates = useCallback(async (interactive = false) => {
-    const api = window.electronAPI?.comboCandidates;
-    if (!api) return;
-    const refreshId = ++candidateRefreshIdRef.current;
-    setCandidatesLoading(true);
-    setCandidateError("");
-    try {
-      const next = await api.list({ interactive });
-      if (refreshId !== candidateRefreshIdRef.current) return;
-      const publishedCombos = catalogRef.current?.combos ?? [];
-      setUpstreamCandidates(
-        next.filter(
+  const saveFetchedCandidateRecordings = useCallback(
+    async (candidates: ComboCandidate[], refreshId: number) => {
+      const candidateApi = window.electronAPI?.comboCandidates;
+      const recordingApi = window.electronAPI?.recordings;
+      if (!candidateApi || !recordingApi) return;
+      const activeCandidates = candidates.filter(
+        (candidate) => candidate.status === "pending" || candidate.status === "approved",
+      );
+      if (activeCandidates.length === 0) return;
+      try {
+        let library = await recordingApi.list({ analysisScope: "none" });
+        const linkedIds = new Map<string, string>();
+        const missing = activeCandidates.filter((candidate) => {
+          const existing = savedCandidateRecording(
+            candidate,
+            library.recordings,
+            workspaceRef.current.recordingLinks,
+          );
+          if (!existing) return true;
+          linkedIds.set(candidate.id, existing.id);
+          return false;
+        });
+        if (refreshId === candidateRefreshIdRef.current) setCandidateSaving(missing.length > 0);
+        const failures: string[] = [];
+        let nextIndex = 0;
+        const downloadNext = async () => {
+          while (nextIndex < missing.length && refreshId === candidateRefreshIdRef.current) {
+            const candidate = missing[nextIndex++];
+            let pending = candidateDownloadsInFlightRef.current.get(candidate.id);
+            if (!pending) {
+              pending = candidateApi.download({ id: candidate.id, fileSize: candidate.fileSize });
+              candidateDownloadsInFlightRef.current.set(candidate.id, pending);
+              void pending
+                .finally(() => {
+                  if (candidateDownloadsInFlightRef.current.get(candidate.id) === pending)
+                    candidateDownloadsInFlightRef.current.delete(candidate.id);
+                })
+                .catch(() => undefined);
+            }
+            try {
+              linkedIds.set(candidate.id, await pending);
+            } catch (reason) {
+              failures.push(reason instanceof Error ? reason.message : "Download failed.");
+            }
+          }
+        };
+        await Promise.all([downloadNext(), downloadNext()]);
+        if (refreshId !== candidateRefreshIdRef.current) return;
+        if (missing.length > 0) library = await recordingApi.list({ analysisScope: "none" });
+        const available = new Map(library.recordings.map((recording) => [recording.id, recording]));
+        for (const recordingId of linkedIds.values()) {
+          if (!available.has(recordingId))
+            failures.push("A downloaded MP4 did not appear in the recording library.");
+        }
+        const linkedRecordings = [...linkedIds.entries()]
+          .map(([candidateId, recordingId]) => ({
+            candidateId,
+            recording: available.get(recordingId),
+          }))
+          .filter(
+            (entry): entry is { candidateId: string; recording: RecordedVideo } =>
+              entry.recording !== undefined,
+          );
+        if (linkedRecordings.length > 0) {
+          setRecordings((old) => {
+            const next = new Map(old.map((recording) => [recording.id, recording]));
+            for (const { recording } of linkedRecordings) next.set(recording.id, recording);
+            return [...next.values()];
+          });
+          setWorkspace((old) => {
+            const recordingLinks = { ...old.recordingLinks };
+            let changed = false;
+            for (const { candidateId, recording } of linkedRecordings) {
+              const key = `candidate:${candidateId}`;
+              const current = recordingLinks[key];
+              if (current && available.has(current.recordingId)) continue;
+              recordingLinks[key] = { recordingId: recording.id, name: recording.name };
+              changed = true;
+            }
+            return changed ? { ...old, recordingLinks } : old;
+          });
+        }
+        if (failures.length > 0) {
+          setCandidateDownloadError(
+            `Could not save ${failures.length} candidate MP4${failures.length === 1 ? "" : "s"} to the recording library: ${failures[0]} Refresh candidates to retry.`,
+          );
+        }
+      } catch (reason) {
+        if (refreshId === candidateRefreshIdRef.current)
+          setCandidateDownloadError(
+            reason instanceof Error
+              ? reason.message
+              : "Could not sync candidate MP4s to the recording library.",
+          );
+      } finally {
+        if (refreshId === candidateRefreshIdRef.current) setCandidateSaving(false);
+      }
+    },
+    [],
+  );
+  const refreshCandidates = useCallback(
+    async (interactive = false) => {
+      const api = window.electronAPI?.comboCandidates;
+      if (!api) return;
+      const refreshId = ++candidateRefreshIdRef.current;
+      setCandidatesLoading(true);
+      setCandidateSaving(false);
+      setCandidateError("");
+      setCandidateDownloadError("");
+      try {
+        const next = await api.list({ interactive });
+        if (refreshId !== candidateRefreshIdRef.current) return;
+        const publishedCombos = catalogRef.current?.combos ?? [];
+        const visible = next.filter(
           (candidate) =>
             !publishedCombos.some((combo) => candidateMatchesPublishedCombo(candidate, combo)),
-        ),
-      );
-      setCandidatesLoaded(true);
-    } catch (reason) {
-      if (refreshId !== candidateRefreshIdRef.current) return;
-      if (
-        !interactive &&
-        reason instanceof Error &&
-        reason.message.includes("Candidate sign-in required")
-      ) {
-        setUpstreamCandidates([]);
-        setCandidatesLoaded(false);
-        return;
+        );
+        setUpstreamCandidates(visible);
+        setCandidatesLoaded(true);
+        void saveFetchedCandidateRecordings(visible, refreshId);
+      } catch (reason) {
+        if (refreshId !== candidateRefreshIdRef.current) return;
+        if (
+          !interactive &&
+          reason instanceof Error &&
+          reason.message.includes("Candidate sign-in required")
+        ) {
+          setUpstreamCandidates([]);
+          setCandidatesLoaded(false);
+          return;
+        }
+        setCandidateError(
+          reason instanceof Error ? reason.message : "Could not load upstream candidates.",
+        );
+      } finally {
+        if (refreshId === candidateRefreshIdRef.current) setCandidatesLoading(false);
       }
-      setCandidateError(
-        reason instanceof Error ? reason.message : "Could not load upstream candidates.",
-      );
-    } finally {
-      if (refreshId === candidateRefreshIdRef.current) setCandidatesLoading(false);
-    }
-  }, []);
+    },
+    [saveFetchedCandidateRecordings],
+  );
   const enableCandidates = () => {
     if (!window.electronAPI?.comboCandidates) return;
     try {
@@ -1724,7 +1917,7 @@ export function CombosPage({ active }: { active: boolean }) {
     [updatePendingComboRecording],
   );
   useEffect(() => {
-    if (!active || !window.electronAPI?.recordings) return;
+    if (!window.electronAPI?.recordings) return;
     void refreshRecordings();
     return window.electronAPI.recordings.onChanged(() => void refreshRecordings());
   }, [active, refreshRecordings]);
@@ -1742,6 +1935,7 @@ export function CombosPage({ active }: { active: boolean }) {
     });
   }, [refreshRecordings]);
   useEffect(() => {
+    if (readOnly) return;
     try {
       writeComboWorkspace(workspace);
       setStorageError("");
@@ -1750,7 +1944,7 @@ export function CombosPage({ active }: { active: boolean }) {
         "Local storage is unavailable. Keep this page open or your changes may be lost.",
       );
     }
-  }, [workspace]);
+  }, [readOnly, workspace]);
 
   const items = useMemo(
     () =>
@@ -1774,6 +1968,36 @@ export function CombosPage({ active }: { active: boolean }) {
   );
   const itemById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
   itemByIdRef.current = itemById;
+  const recheckRoutes = async () => {
+    if (routeAuditChecking) return;
+    setRouteAuditChecking(true);
+    let owner = false;
+    try {
+      owner = (await window.electronAPI?.catalogPublisher.isOwner()) === true;
+    } catch {
+      // An unavailable or expired owner session must leave the check local-only.
+    }
+    const targets = routeAuditTargets(workspace.localCombos, items, owner);
+    setRouteAuditScope(owner ? "all" : "local");
+    setRouteAuditCheckedCount(targets.length);
+    setRouteAudit(
+      targets.flatMap((item) => {
+        const error = comboRouteFormatError(item.route);
+        return error
+          ? [
+              {
+                id: item.id,
+                source: item.source,
+                route: item.route,
+                suggested: formatComboRoute(item.route),
+                error,
+              },
+            ]
+          : [];
+      }),
+    );
+    setRouteAuditChecking(false);
+  };
   const publicationMatches = useMemo(
     () => candidatePublicationMatches(workspace, catalog?.combos ?? []),
     [workspace.candidateSubmissions, workspace.localCombos, catalog],
@@ -1789,7 +2013,7 @@ export function CombosPage({ active }: { active: boolean }) {
     });
   }, [catalog]);
   useEffect(() => {
-    if (!catalog) return;
+    if (readOnly || !catalog) return;
     const promotions = publicationMatches.filter((match) => match.readyToReplace);
     if (!promotions.length) return;
     const selectedPromotion = promotions.find(({ localId }) => localId === selectedId);
@@ -1814,7 +2038,7 @@ export function CombosPage({ active }: { active: boolean }) {
     });
     setSelectedId((old) => promotions.find(({ localId }) => localId === old)?.published.id ?? old);
     setMessage("Published candidate replaced its submitted local draft.");
-  }, [catalog, publicationMatches, selectedId]);
+  }, [catalog, publicationMatches, readOnly, selectedId]);
   const finalizeUploadedCandidate = useCallback(
     async (candidate: ComboCandidate, recording?: RecordedVideo) => {
       const { workspace: next, targetId } = finishUploadedCandidate(
@@ -1885,6 +2109,7 @@ export function CombosPage({ active }: { active: boolean }) {
     [recordings],
   );
   const linkedYouTubeUrlFor = (comboId: string) => {
+    if (readOnly) return "";
     const recordingId = workspace.recordingLinks[comboId]?.recordingId ?? "";
     return (
       recordingsById.get(recordingId)?.youtubeUrl || pendingYouTubeUploadUrl(recordingId) || ""
@@ -1903,7 +2128,7 @@ export function CombosPage({ active }: { active: boolean }) {
               link,
               recording,
               recordingsLoaded,
-              pendingYouTubeUploadUrl(link?.recordingId ?? "") ?? "",
+              readOnly ? "" : (pendingYouTubeUploadUrl(link?.recordingId ?? "") ?? ""),
               workspace.removedYouTubeVideoIds[item.id] ?? [],
             ),
           ];
@@ -1916,6 +2141,7 @@ export function CombosPage({ active }: { active: boolean }) {
       recordingsById,
       recordingsLoaded,
       pendingYouTubeVersion,
+      readOnly,
     ],
   );
   const gapFor = (id: string): ComboMediaGap => mediaGaps.get(id) ?? null;
@@ -1933,7 +2159,7 @@ export function CombosPage({ active }: { active: boolean }) {
           : old.snapshots,
     }));
   useEffect(() => {
-    if (!catalog) return;
+    if (readOnly || !catalog) return;
     const missing = items.filter(
       (item) =>
         item.source === "Catalog" && workspace.entries[item.id] && !workspace.snapshots[item.id],
@@ -1946,26 +2172,34 @@ export function CombosPage({ active }: { active: boolean }) {
           ...Object.fromEntries(missing.map((item) => [item.id, catalogSnapshot(item)])),
         },
       }));
-  }, [catalog, items, workspace.entries, workspace.snapshots]);
+  }, [catalog, items, readOnly, workspace.entries, workspace.snapshots]);
   const characters = useMemo(
-    () => [...new Set([...roster.map(catalogId), ...items.map((item) => item.characterId)])].sort(),
-    [items],
+    () =>
+      [
+        ...new Set([
+          ...(readOnly ? [] : roster.map(catalogId)),
+          ...items.map((item) => item.characterId),
+        ]),
+      ].sort(),
+    [items, readOnly],
   );
   const preferredItem = items.find((item) => entry(item.id).status === "Using") ?? items[0];
   const character = characters.includes(workspace.characterId)
     ? workspace.characterId
     : (preferredItem?.characterId ?? characters[0] ?? "");
   const supports = useMemo(() => {
-    const mapped = Object.values(
-      supportMap[displayName(character) as keyof typeof supportMap] ?? {},
-    ).map(catalogId);
+    const mapped = readOnly
+      ? []
+      : Object.values(supportMap[displayName(character) as keyof typeof supportMap] ?? {}).map(
+          catalogId,
+        );
     return [
       ...new Set([
         ...mapped,
         ...items.filter((item) => item.characterId === character).map((item) => item.supportId),
       ]),
     ].sort();
-  }, [character, items]);
+  }, [character, items, readOnly]);
   const support = supports.includes(workspace.supportId)
     ? workspace.supportId
     : (items.find((item) => item.characterId === character && entry(item.id).status === "Using")
@@ -1979,7 +2213,14 @@ export function CombosPage({ active }: { active: boolean }) {
   }>({ character: null, support: null });
   useEffect(() => {
     setSelectedPortraits({ character: null, support: null });
-    if (!active || !character || !support || !window.electronAPI?.replays?.resolvePortraits) return;
+    if (
+      !active ||
+      !character ||
+      !support ||
+      webArtwork ||
+      !window.electronAPI?.replays?.resolvePortraits
+    )
+      return;
     let cancelled = false;
     void window.electronAPI.replays
       .resolvePortraits({
@@ -1996,7 +2237,14 @@ export function CombosPage({ active }: { active: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [active, character, support]);
+  }, [active, character, support, webArtwork]);
+  const visibleSelectedPortraits =
+    webArtwork && character && support
+      ? (() => {
+          const portrait = webArtwork.portraitArtwork(displayName(character), displayName(support));
+          return { character: portrait.portraitUrl, support: portrait.supportUrl };
+        })()
+      : selectedPortraits;
   const starters = useMemo(
     () =>
       [
@@ -2028,7 +2276,7 @@ export function CombosPage({ active }: { active: boolean }) {
   const scopedForView = candidateOnly
     ? scoped.filter((item) => item.candidate && isActiveCandidate(item.candidate))
     : scoped;
-  const newCombos = scopedForView
+  const newCombos = (readOnly ? [] : scopedForView)
     .filter((item) => !entry(item.id).status && item.candidate?.status !== "rejected")
     .sort(
       (left, right) =>
@@ -2040,13 +2288,21 @@ export function CombosPage({ active }: { active: boolean }) {
   const tracked = scopedForView.filter((item) => entry(item.id).status);
   const gameplanTags = [...new Set(tracked.flatMap((item) => entry(item.id).tags))].sort();
   const effectiveTagFilter = gameplanTags.includes(tagFilter) ? tagFilter : "all";
-  const shown = tracked.filter(
-    (item) =>
-      (statusFilter === "gameplan"
-        ? entry(item.id).status !== "Dismissed"
-        : statusFilter === "all" || entry(item.id).status === statusFilter) &&
-      (effectiveTagFilter === "all" || entry(item.id).tags.includes(effectiveTagFilter)),
-  );
+  const shown = readOnly
+    ? [...scoped].sort(
+        (left, right) =>
+          Number(Boolean(right.published?.editorPickReason)) -
+            Number(Boolean(left.published?.editorPickReason)) ||
+          left.name.localeCompare(right.name) ||
+          left.route.localeCompare(right.route),
+      )
+    : tracked.filter(
+        (item) =>
+          (statusFilter === "gameplan"
+            ? entry(item.id).status !== "Dismissed"
+            : statusFilter === "all" || entry(item.id).status === statusFilter) &&
+          (effectiveTagFilter === "all" || entry(item.id).tags.includes(effectiveTagFilter)),
+      );
   const showNewCombos = ["gameplan", "all"].includes(statusFilter) && effectiveTagFilter === "all";
   const positionColumns = comboScreenPositions.map((position) => ({
     position,
@@ -2542,6 +2798,11 @@ export function CombosPage({ active }: { active: boolean }) {
     }
   };
   const submitCandidate = async (item: ComboItem) => {
+    const routeError = comboRouteFormatError(item.route);
+    if (routeError) {
+      setCandidateError(`Format the combo route before submitting: ${routeError}`);
+      return;
+    }
     const api = window.electronAPI?.comboCandidates;
     const link = workspace.recordingLinks[item.id];
     const recording = recordingsById.get(link?.recordingId ?? "");
@@ -2649,6 +2910,8 @@ export function CombosPage({ active }: { active: boolean }) {
     );
   const imageOptions = picker === "character" ? characters : supports;
 
+  const visibleRawColumns = readOnly ? browserRawColumns : rawColumns;
+
   return (
     <Stack spacing={2} sx={{ pb: 5, textAlign: "left" }}>
       <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center" }}>
@@ -2660,20 +2923,17 @@ export function CombosPage({ active }: { active: boolean }) {
           }}
           aria-label="Combo views"
         >
-          <Tab value="gameplan" label="My gameplan" />
+          <Tab value="gameplan" label={readOnly ? "Browse by starter" : "My gameplan"} />
           <Tab value="raw" label="Raw" />
         </Tabs>
         <Stack direction="row" spacing={1}>
-          {window.electronAPI?.comboCandidates && (
-            <Button
-              size="small"
-              onClick={() => {
-                enableCandidates();
-                setRaw({ ...emptyRaw(), source: "Candidate" });
-                setTab("raw");
-              }}
-              disabled={candidatesLoading}
-            >
+          {!readOnly && (
+            <Button size="small" onClick={() => void recheckRoutes()} disabled={routeAuditChecking}>
+              {routeAuditChecking ? "Checking routes…" : "Recheck route formats"}
+            </Button>
+          )}
+          {!readOnly && window.electronAPI?.comboCandidates && (
+            <Button size="small" onClick={enableCandidates} disabled={candidatesLoading}>
               {candidatesLoading
                 ? "Loading candidates…"
                 : candidatesLoaded
@@ -2764,6 +3024,10 @@ export function CombosPage({ active }: { active: boolean }) {
           {candidateError}
         </Alert>
       )}
+      {candidateSaving && (
+        <Alert severity="info">Saving candidate MP4s to the recording library…</Alert>
+      )}
+      {candidateDownloadError && <Alert severity="error">{candidateDownloadError}</Alert>}
       {selectedPublicationConflict && (
         <Alert
           severity="info"
@@ -2799,6 +3063,9 @@ export function CombosPage({ active }: { active: boolean }) {
           {catalog ? " Showing saved catalog data." : ""}
         </Alert>
       )}
+      {readOnly && catalog && catalog.combos.length === 0 && (
+        <Alert severity="info">No published combos are available yet.</Alert>
+      )}
       {message && (
         <Alert severity="info" onClose={() => setMessage("")}>
           {message}
@@ -2831,8 +3098,8 @@ export function CombosPage({ active }: { active: boolean }) {
               <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
                 {(
                   [
-                    ["character", character, selectedPortraits.character],
-                    ["support", support, selectedPortraits.support],
+                    ["character", character, visibleSelectedPortraits.character],
+                    ["support", support, visibleSelectedPortraits.support],
                   ] as const
                 ).map(([kind, id, portrait]) => {
                   const localTotal =
@@ -2958,7 +3225,9 @@ export function CombosPage({ active }: { active: boolean }) {
                   </Box>
                 ) : (
                   <Typography color="text.secondary">
-                    No starters for this pairing yet. Add a local combo to begin.
+                    {readOnly
+                      ? "No published combos for this pairing yet. Choose another character or support."
+                      : "No starters for this pairing yet. Add a local combo to begin."}
                   </Typography>
                 )}
               </Paper>
@@ -3008,41 +3277,45 @@ export function CombosPage({ active }: { active: boolean }) {
                         My local combos ({workspace.localCombos.length})
                       </Button>
                     )}
-                    <Button variant="contained" onClick={openCreate}>
-                      + Add my combo
-                    </Button>
+                    {!readOnly && (
+                      <Button variant="contained" onClick={openCreate}>
+                        + Add my combo
+                      </Button>
+                    )}
                   </Box>
                 </Stack>
-                <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap" }}>
-                  {[
-                    ["gameplan", "Gameplan"],
-                    ["all", "All saved"],
-                    ...comboStatuses.map((status): [string, string] => [status, status]),
-                  ].map(([value, label]) => (
-                    <Chip
-                      key={value}
-                      label={label}
-                      clickable
-                      color={statusFilter === value ? "primary" : "default"}
-                      onClick={() => setStatusFilter(value)}
-                    />
-                  ))}
-                  {window.electronAPI?.comboCandidates && (
-                    <Chip
-                      label="Candidate"
-                      clickable
-                      title="Show upstream candidates with the selected personal status"
-                      color={candidateOnly ? "secondary" : "default"}
-                      variant={candidateOnly ? "filled" : "outlined"}
-                      onClick={() => {
-                        const next = !candidateOnly;
-                        setCandidateOnly(next);
-                        if (next && !candidatesLoaded && !candidatesLoading) enableCandidates();
-                      }}
-                    />
-                  )}
-                </Stack>
-                {gameplanTags.length > 0 && (
+                {!readOnly && (
+                  <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap" }}>
+                    {[
+                      ["gameplan", "Gameplan"],
+                      ["all", "All saved"],
+                      ...comboStatuses.map((status): [string, string] => [status, status]),
+                    ].map(([value, label]) => (
+                      <Chip
+                        key={value}
+                        label={label}
+                        clickable
+                        color={statusFilter === value ? "primary" : "default"}
+                        onClick={() => setStatusFilter(value)}
+                      />
+                    ))}
+                    {window.electronAPI?.comboCandidates && (
+                      <Chip
+                        label="Candidate"
+                        clickable
+                        title="Show upstream candidates with the selected personal status"
+                        color={candidateOnly ? "secondary" : "default"}
+                        variant={candidateOnly ? "filled" : "outlined"}
+                        onClick={() => {
+                          const next = !candidateOnly;
+                          setCandidateOnly(next);
+                          if (next && !candidatesLoaded && !candidatesLoading) enableCandidates();
+                        }}
+                      />
+                    )}
+                  </Stack>
+                )}
+                {!readOnly && gameplanTags.length > 0 && (
                   <Stack
                     direction="row"
                     spacing={0.5}
@@ -3119,7 +3392,9 @@ export function CombosPage({ active }: { active: boolean }) {
                           : "No active upstream candidates for this starter and pairing."
                         : scoped.length > 0
                           ? "No routes match the current status or tag filter."
-                          : "No routes for this starter yet. Add a local combo or browse Raw."}
+                          : readOnly
+                            ? "No published routes for this starter yet."
+                            : "No routes for this starter yet. Add a local combo or browse Raw."}
                     </Alert>
                   )}
                 {starter && (
@@ -3158,7 +3433,7 @@ export function CombosPage({ active }: { active: boolean }) {
                         <Stack spacing={1}>
                           {combos.length === 0 && newPositionCombos.length === 0 && (
                             <Paper variant="outlined" sx={{ p: 1.5, color: "text.secondary" }}>
-                              No saved combos here.
+                              {readOnly ? "No published combos here." : "No saved combos here."}
                             </Paper>
                           )}
                           {combos.map((item) => {
@@ -3269,7 +3544,7 @@ export function CombosPage({ active }: { active: boolean }) {
                                       alignItems: "end",
                                     }}
                                   >
-                                    <Chip size="small" label={personal.status} />
+                                    {!readOnly && <Chip size="small" label={personal.status} />}
                                     <Chip
                                       size="small"
                                       label={`Difficulty ${effectiveDifficulty(item, personal) ?? "—"}`}
@@ -3458,6 +3733,7 @@ export function CombosPage({ active }: { active: boolean }) {
               </Stack>
             </Paper>
             <ComboDetail
+              readOnly={readOnly}
               item={scopeSelected}
               mediaGap={scopeSelected ? gapFor(scopeSelected.id) : null}
               recordingLink={scopeSelected ? workspace.recordingLinks[scopeSelected.id] : undefined}
@@ -3540,9 +3816,13 @@ export function CombosPage({ active }: { active: boolean }) {
                 <Typography variant="h6">
                   All combos · {filtered.length} of {items.length}
                 </Typography>
-                <Button variant="contained" onClick={openCreate}>
-                  + Add my combo
-                </Button>
+                {!readOnly && (
+                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+                    <Button variant="contained" onClick={openCreate}>
+                      + Add my combo
+                    </Button>
+                  </Box>
+                )}
               </Stack>
               <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
                 <TextField
@@ -3551,22 +3831,24 @@ export function CombosPage({ active }: { active: boolean }) {
                   value={raw.search}
                   onChange={(e) => updateRaw("search", e.target.value)}
                 />
-                <SelectField
-                  label="Source"
-                  value={raw.source}
-                  options={[
-                    ["all", "All"],
-                    ["Catalog", "Catalog"],
-                    ["Candidate", "Candidate"],
-                    ["Local", "Local"],
-                    ["Unavailable", "Unavailable"],
-                  ]}
-                  onChange={(v) => {
-                    updateRaw("source", v);
-                    if (v === "Candidate" && !candidatesLoaded && !candidatesLoading)
-                      enableCandidates();
-                  }}
-                />
+                {!readOnly && (
+                  <SelectField
+                    label="Source"
+                    value={raw.source}
+                    options={[
+                      ["all", "All"],
+                      ["Catalog", "Catalog"],
+                      ["Candidate", "Candidate"],
+                      ["Local", "Local"],
+                      ["Unavailable", "Unavailable"],
+                    ]}
+                    onChange={(v) => {
+                      updateRaw("source", v);
+                      if (v === "Candidate" && !candidatesLoaded && !candidatesLoading)
+                        enableCandidates();
+                    }}
+                  />
+                )}
                 <SelectField
                   label="Character"
                   value={raw.character}
@@ -3613,16 +3895,18 @@ export function CombosPage({ active }: { active: boolean }) {
                   ]}
                   onChange={(v) => updateRaw("position", v)}
                 />
-                <SelectField
-                  label="Status"
-                  value={raw.status}
-                  options={[
-                    ["all", "All"],
-                    ["", "Blank"],
-                    ...comboStatuses.map((v): [string, string] => [v, v]),
-                  ]}
-                  onChange={(v) => updateRaw("status", v)}
-                />
+                {!readOnly && (
+                  <SelectField
+                    label="Status"
+                    value={raw.status}
+                    options={[
+                      ["all", "All"],
+                      ["", "Blank"],
+                      ...comboStatuses.map((v): [string, string] => [v, v]),
+                    ]}
+                    onChange={(v) => updateRaw("status", v)}
+                  />
+                )}
                 <SelectField
                   label="Hitconfirm"
                   value={raw.hitconfirm}
@@ -3718,7 +4002,7 @@ export function CombosPage({ active }: { active: boolean }) {
               )}
               {showColumns && (
                 <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap" }}>
-                  {rawColumns.map(([id, label]) => (
+                  {visibleRawColumns.map(([id, label]) => (
                     <Chip
                       key={id}
                       label={label}
@@ -3756,7 +4040,7 @@ export function CombosPage({ active }: { active: boolean }) {
                 >
                   <thead>
                     <tr>
-                      {rawColumns
+                      {visibleRawColumns
                         .filter(([id]) => columns.has(id))
                         .map(([id, label]) => (
                           <th key={id}>
@@ -3793,7 +4077,7 @@ export function CombosPage({ active }: { active: boolean }) {
                           background: selectedId === item.id ? "rgba(144,202,249,.12)" : undefined,
                         }}
                       >
-                        {rawColumns
+                        {visibleRawColumns
                           .filter(([id]) => columns.has(id))
                           .map(([id]) => (
                             <td key={id}>
@@ -3826,6 +4110,7 @@ export function CombosPage({ active }: { active: boolean }) {
             }}
           >
             <ComboDetail
+              readOnly={readOnly}
               item={selected}
               mediaGap={selected ? gapFor(selected.id) : null}
               recordingLink={selected ? workspace.recordingLinks[selected.id] : undefined}
@@ -3887,7 +4172,7 @@ export function CombosPage({ active }: { active: boolean }) {
                 selected?.local?.publishedId && itemById.get(selected.local.publishedId)?.published,
               )}
             />
-            {selected && comparison.length > 0 && (
+            {!readOnly && selected && comparison.length > 0 && (
               <Paper variant="outlined" sx={{ p: 2 }}>
                 <Typography variant="h6">Compare with my current route</Typography>
                 <SelectField
@@ -3936,6 +4221,7 @@ export function CombosPage({ active }: { active: boolean }) {
         kind={picker ?? "character"}
         options={imageOptions}
         character={character}
+        webArtwork={webArtwork}
         localCount={(id) =>
           picker === "support"
             ? countLocalCombos(workspace.localCombos, character, id)
@@ -3960,6 +4246,65 @@ export function CombosPage({ active }: { active: boolean }) {
           setPicker(null);
         }}
       />
+      <Dialog
+        open={routeAudit !== null}
+        onClose={() => setRouteAudit(null)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>Combo route format check</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1.5}>
+            <Typography variant="body2" color="text.secondary">
+              Checked {routeAuditCheckedCount} {routeAuditScope === "all" ? "loaded" : "local"}
+              combos. Shared combos are included only for the signed-in catalog owner. Existing
+              routes were not changed. Use one space between moves; keep ~ attached to stance
+              followups. Inputs are uppercase except j.
+            </Typography>
+            {routeAudit?.length === 0 && (
+              <Alert severity="success">All checked routes match.</Alert>
+            )}
+            {routeAudit?.map((issue) => (
+              <Paper key={`${issue.source}:${issue.id}`} variant="outlined" sx={{ p: 1.5 }}>
+                <Stack spacing={1}>
+                  <Typography variant="subtitle2">
+                    {issue.source} · {issue.id}
+                  </Typography>
+                  <Typography variant="body2" color="error.main">
+                    {issue.error}
+                  </Typography>
+                  <Typography variant="body2" sx={{ overflowWrap: "anywhere" }}>
+                    Current: {issue.route}
+                  </Typography>
+                  {issue.suggested !== issue.route && (
+                    <Typography variant="body2" sx={{ overflowWrap: "anywhere" }}>
+                      Suggested: {issue.suggested}
+                    </Typography>
+                  )}
+                  <Button
+                    size="small"
+                    sx={{ alignSelf: "flex-start" }}
+                    onClick={() => {
+                      setRaw(emptyRaw());
+                      setTab("raw");
+                      setSelectedId(issue.id);
+                      setRouteAudit(null);
+                    }}
+                  >
+                    Review combo
+                  </Button>
+                </Stack>
+              </Paper>
+            ))}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => void recheckRoutes()} disabled={routeAuditChecking}>
+            {routeAuditChecking ? "Checking…" : "Recheck"}
+          </Button>
+          <Button onClick={() => setRouteAudit(null)}>Close</Button>
+        </DialogActions>
+      </Dialog>
       <LocalComboDialog
         draft={localDraft}
         personal={localDraft?.id ? entry(localDraft.id) : emptyPersonalEntry()}
@@ -4131,6 +4476,7 @@ export function CombosPage({ active }: { active: boolean }) {
 }
 
 function ComboDetail({
+  readOnly = false,
   item,
   mediaGap,
   recordingLink,
@@ -4167,6 +4513,7 @@ function ComboDetail({
   latestCatalogRevision,
   canMerge,
 }: {
+  readOnly?: boolean;
   item: ComboItem | null;
   mediaGap: ComboMediaGap;
   recordingLink?: { recordingId: string; name: string };
@@ -4268,11 +4615,13 @@ function ComboDetail({
         : "Editor name"
       : "";
   const recording = linkedRecording && isLocalMp4(linkedRecording) ? linkedRecording : null;
-  const displayedRecording = recording ?? candidateRecording;
-  const recordingToOpen = linkedRecording ?? displayedRecording;
-  const candidateVideoShownAbove = Boolean(
-    candidateRecording && displayedRecording?.id === candidateRecording.id,
-  );
+  const displayedRecording = item.candidate ? candidateRecording : recording;
+  const recordingToOpen = displayedRecording ?? (item.candidate ? null : linkedRecording);
+  const candidatePreviewUrl =
+    item.candidate && isActiveCandidate(item.candidate)
+      ? `labatar-media://candidate/${item.candidate.id}`
+      : null;
+  const videoUrl = displayedRecording?.url ?? candidatePreviewUrl;
   const hasVideoControls = Boolean(
     showLocalVideoActions || recordingToOpen || recordingLink || removedYouTubeVideoIds.length,
   );
@@ -4347,73 +4696,78 @@ function ComboDetail({
   return (
     <Paper variant="outlined" sx={{ p: 2, minWidth: 0 }}>
       <Stack spacing={2}>
-        {(item.local ||
-          item.published ||
-          candidateSubmission ||
-          (recording && recordingApiAvailable && window.electronAPI?.comboCandidates)) && (
-          <Stack spacing={1}>
-            <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
-              {item.published && (
-                <Button size="small" variant="outlined" onClick={onStagePublished}>
-                  Edit catalog combo locally
-                </Button>
-              )}
-              {item.local && (
-                <>
-                  <Button size="small" variant="outlined" onClick={onEdit}>
-                    Edit combo data
+        {!readOnly &&
+          (item.local ||
+            item.published ||
+            candidateSubmission ||
+            (recording && recordingApiAvailable && window.electronAPI?.comboCandidates)) && (
+            <Stack spacing={1}>
+              <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
+                {item.published && (
+                  <Button size="small" variant="outlined" onClick={onStagePublished}>
+                    Edit catalog combo locally
                   </Button>
-                  <Button size="small" color="error" onClick={onDelete}>
-                    Delete local combo
+                )}
+                {item.local && (
+                  <>
+                    <Button size="small" variant="outlined" onClick={onEdit}>
+                      Edit combo data
+                    </Button>
+                    <Button size="small" color="error" onClick={onDelete}>
+                      Delete local combo
+                    </Button>
+                  </>
+                )}
+                {recording && recordingApiAvailable && window.electronAPI?.comboCandidates && (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={onSubmitCandidate}
+                    disabled={candidateSubmitting || !candidateAvailable}
+                  >
+                    {candidateSubmitting
+                      ? `Submitting${candidateProgress === null ? "…" : ` ${candidateProgress}%`}`
+                      : candidateSubmission
+                        ? "Submit another candidate"
+                        : "Submit as candidate"}
                   </Button>
-                </>
-              )}
-              {recording && recordingApiAvailable && window.electronAPI?.comboCandidates && (
-                <Button
-                  size="small"
-                  variant="outlined"
-                  onClick={onSubmitCandidate}
-                  disabled={candidateSubmitting || !candidateAvailable}
-                >
-                  {candidateSubmitting
-                    ? `Submitting${candidateProgress === null ? "…" : ` ${candidateProgress}%`}`
-                    : candidateSubmission
-                      ? "Submit another candidate"
-                      : "Submit as candidate"}
-                </Button>
+                )}
+              </Stack>
+              {candidateSubmission && (
+                <Typography variant="caption" color="text.secondary">
+                  Submitted as candidate on{" "}
+                  {new Date(candidateSubmission.submittedAt).toLocaleString()}.
+                </Typography>
               )}
             </Stack>
-            {candidateSubmission && (
-              <Typography variant="caption" color="text.secondary">
-                Submitted as candidate on{" "}
-                {new Date(candidateSubmission.submittedAt).toLocaleString()}.
-              </Typography>
-            )}
-          </Stack>
-        )}
+          )}
         <Paper variant="outlined" sx={{ p: 1.5 }}>
           <Stack spacing={1.5}>
             <Typography variant="subtitle2">Video</Typography>
-            {hasVideoControls && videoControls}
-            {(displayedRecording || recordingLink) && (
+            {!readOnly && hasVideoControls && videoControls}
+            {(videoUrl || recordingLink) && (
               <Box>
                 <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                  Local MP4
+                  {displayedRecording ? "Local MP4" : "Candidate MP4"}
                 </Typography>
                 {recordingLink && !recording && (
                   <Typography variant="body2" sx={{ overflowWrap: "anywhere" }}>
                     Saved recording link: {recordingLink.name || recordingLink.recordingId}
                   </Typography>
                 )}
-                {displayedRecording && (
+                {videoUrl && (
                   <>
                     <Typography variant="body2" sx={{ overflowWrap: "anywhere" }}>
-                      {displayedRecording.name}
+                      {displayedRecording?.name ?? item.candidate?.fileName}
                     </Typography>
                     <Box
                       component="video"
-                      key={displayedRecording.id}
-                      src={displayedRecording.url}
+                      key={`${videoUrl}:${displayedRecording?.modifiedAt ?? 0}`}
+                      src={
+                        displayedRecording
+                          ? `${videoUrl}?v=${displayedRecording.modifiedAt}`
+                          : videoUrl
+                      }
                       controls
                       preload="metadata"
                       sx={{ width: "100%", maxHeight: 360, bgcolor: "black" }}
@@ -4441,11 +4795,23 @@ function ComboDetail({
               </Box>
             )}
             {youtubeVideo?.videoId && (
-              <Typography variant="subtitle2">
-                {youtubeVideo.source === "Catalog"
-                  ? "Catalog YouTube video"
-                  : `${youtubeVideo.source} YouTube video`}
-              </Typography>
+              <Stack direction="row" sx={{ alignItems: "center", justifyContent: "space-between" }}>
+                <Typography variant="subtitle2">
+                  {youtubeVideo.source === "Catalog"
+                    ? "Catalog YouTube video"
+                    : `${youtubeVideo.source} YouTube video`}
+                </Typography>
+                {readOnly && (
+                  <Button
+                    size="small"
+                    href={`https://www.youtube.com/watch?v=${youtubeVideo.videoId}&t=${youtubeVideo.startSeconds}s`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Watch on YouTube
+                  </Button>
+                )}
+              </Stack>
             )}
             {youtubeVideo?.videoId ? (
               youtubeError ? (
@@ -4456,15 +4822,17 @@ function ComboDetail({
                       <Button size="small" onClick={() => setFailedYouTube(null)}>
                         Retry
                       </Button>
-                      <Button
-                        size="small"
-                        onClick={() => {
-                          onRemoveYouTubeVideo(youtubeVideo.videoId!);
-                          setFailedYouTube(null);
-                        }}
-                      >
-                        Remove YouTube link
-                      </Button>
+                      {!readOnly && (
+                        <Button
+                          size="small"
+                          onClick={() => {
+                            onRemoveYouTubeVideo(youtubeVideo.videoId!);
+                            setFailedYouTube(null);
+                          }}
+                        >
+                          Remove YouTube link
+                        </Button>
+                      )}
                     </Stack>
                   </Stack>
                 </Alert>
@@ -4496,7 +4864,6 @@ function ComboDetail({
                 candidate={item.candidate}
                 onChanged={onCandidateChanged}
                 savedRecording={candidateRecording}
-                savedVideoShownAbove={candidateVideoShownAbove}
                 onRecordingSaved={(recording) =>
                   onCandidateRecordingSaved(item.candidate!, recording)
                 }
@@ -4623,118 +4990,122 @@ function ComboDetail({
             )}
           </Stack>
         </Paper>
-        <Paper variant="outlined" sx={{ p: 1.5 }}>
-          <Stack spacing={2}>
-            <Typography variant="subtitle2">Edit my data</Typography>
-            <TextField
-              size="small"
-              label="My name"
-              value={personal.name}
-              onChange={(event) => updateEntry(item.id, { name: event.target.value })}
-              helperText={
-                editorName ? `Editor name: ${editorName}` : "Leave blank to use the combo name"
-              }
-            />
-            <Box
-              sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 1 }}
-            >
-              <SelectField
-                label="Status"
-                value={personal.status}
-                width={0}
-                options={[
-                  ["", "Blank / not tracked"],
-                  ...comboStatuses.map((status): [string, string] => [status, status]),
-                ]}
-                onChange={(value) => updateEntry(item.id, { status: value as ComboStatus })}
-              />
-              <SelectField
-                label="Role"
-                value={personal.role}
-                width={0}
-                options={[
-                  ["", "Not set"],
-                  ["Autopilot", "Autopilot"],
-                  ["Situational", "Situational"],
-                ]}
-                onChange={(value) => updateEntry(item.id, { role: value as ComboRole })}
-              />
-              <SelectField
-                label="My difficulty"
-                value={String(personal.difficulty ?? "")}
-                width={0}
-                options={[
-                  ["", `Editor: ${editorDifficulty ?? "unrated"}`],
-                  ...[1, 2, 3, 4, 5].map((n): [string, string] => [String(n), String(n)]),
-                ]}
-                onChange={(value) =>
-                  updateEntry(item.id, { difficulty: value ? Number(value) : null })
+        {!readOnly && (
+          <Paper variant="outlined" sx={{ p: 1.5 }}>
+            <Stack spacing={2}>
+              <Typography variant="subtitle2">Edit my data</Typography>
+              <TextField
+                size="small"
+                label="My name"
+                value={personal.name}
+                onChange={(event) => updateEntry(item.id, { name: event.target.value })}
+                helperText={
+                  editorName ? `Editor name: ${editorName}` : "Leave blank to use the combo name"
                 }
               />
-              <TextField
-                size="small"
-                label="When I use it"
-                value={personal.condition}
-                onChange={(e) => updateEntry(item.id, { condition: e.target.value })}
-                sx={{ gridColumn: { sm: "span 2" } }}
-              />
-              {personal.status === "Dismissed" && (
+              <Box
+                sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 1 }}
+              >
+                <SelectField
+                  label="Status"
+                  value={personal.status}
+                  width={0}
+                  options={[
+                    ["", "Blank / not tracked"],
+                    ...comboStatuses.map((status): [string, string] => [status, status]),
+                  ]}
+                  onChange={(value) => updateEntry(item.id, { status: value as ComboStatus })}
+                />
+                <SelectField
+                  label="Role"
+                  value={personal.role}
+                  width={0}
+                  options={[
+                    ["", "Not set"],
+                    ["Autopilot", "Autopilot"],
+                    ["Situational", "Situational"],
+                  ]}
+                  onChange={(value) => updateEntry(item.id, { role: value as ComboRole })}
+                />
+                <SelectField
+                  label="My difficulty"
+                  value={String(personal.difficulty ?? "")}
+                  width={0}
+                  options={[
+                    ["", `Editor: ${editorDifficulty ?? "unrated"}`],
+                    ...[1, 2, 3, 4, 5].map((n): [string, string] => [String(n), String(n)]),
+                  ]}
+                  onChange={(value) =>
+                    updateEntry(item.id, { difficulty: value ? Number(value) : null })
+                  }
+                />
                 <TextField
                   size="small"
-                  label="Reason for dismissal (optional)"
-                  value={personal.dismissalReason}
-                  onChange={(e) => updateEntry(item.id, { dismissalReason: e.target.value })}
+                  label="When I use it"
+                  value={personal.condition}
+                  onChange={(e) => updateEntry(item.id, { condition: e.target.value })}
                   sx={{ gridColumn: { sm: "span 2" } }}
                 />
-              )}
-              <TextField
-                size="small"
-                label="Personal note"
-                multiline
-                minRows={2}
-                value={personal.note}
-                onChange={(e) => updateEntry(item.id, { note: e.target.value })}
-                sx={{ gridColumn: { sm: "span 2" } }}
-              />
-            </Box>
-            <Box>
-              <Typography variant="caption" color="text.secondary">
-                My tags
-              </Typography>
-              <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap", mb: 1 }}>
-                {personal.tags.map((tag) => (
-                  <Chip
-                    key={tag}
+                {personal.status === "Dismissed" && (
+                  <TextField
                     size="small"
-                    label={`#${tag}`}
-                    onDelete={() =>
-                      updateEntry(item.id, { tags: personal.tags.filter((value) => value !== tag) })
-                    }
+                    label="Reason for dismissal (optional)"
+                    value={personal.dismissalReason}
+                    onChange={(e) => updateEntry(item.id, { dismissalReason: e.target.value })}
+                    sx={{ gridColumn: { sm: "span 2" } }}
                   />
-                ))}
-              </Stack>
-              <Stack direction="row" spacing={1}>
+                )}
                 <TextField
                   size="small"
-                  label="Add tag"
-                  value={tagInput}
-                  onChange={(e) => setTagInput(e.target.value)}
+                  label="Personal note"
+                  multiline
+                  minRows={2}
+                  value={personal.note}
+                  onChange={(e) => updateEntry(item.id, { note: e.target.value })}
+                  sx={{ gridColumn: { sm: "span 2" } }}
                 />
-                <Button
-                  onClick={() => {
-                    const tag = tagInput.trim().replace(/^#/, "").toLowerCase();
-                    if (tag && !personal.tags.includes(tag))
-                      updateEntry(item.id, { tags: [...personal.tags, tag] });
-                    setTagInput("");
-                  }}
-                >
-                  Add
-                </Button>
-              </Stack>
-            </Box>
-          </Stack>
-        </Paper>
-        {(!item.candidate || item.local || item.published) && (
+              </Box>
+              <Box>
+                <Typography variant="caption" color="text.secondary">
+                  My tags
+                </Typography>
+                <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap", mb: 1 }}>
+                  {personal.tags.map((tag) => (
+                    <Chip
+                      key={tag}
+                      size="small"
+                      label={`#${tag}`}
+                      onDelete={() =>
+                        updateEntry(item.id, {
+                          tags: personal.tags.filter((value) => value !== tag),
+                        })
+                      }
+                    />
+                  ))}
+                </Stack>
+                <Stack direction="row" spacing={1}>
+                  <TextField
+                    size="small"
+                    label="Add tag"
+                    value={tagInput}
+                    onChange={(e) => setTagInput(e.target.value)}
+                  />
+                  <Button
+                    onClick={() => {
+                      const tag = tagInput.trim().replace(/^#/, "").toLowerCase();
+                      if (tag && !personal.tags.includes(tag))
+                        updateEntry(item.id, { tags: [...personal.tags, tag] });
+                      setTagInput("");
+                    }}
+                  >
+                    Add
+                  </Button>
+                </Stack>
+              </Box>
+            </Stack>
+          </Paper>
+        )}
+        {!readOnly && (!item.candidate || item.local || item.published) && (
           <Paper variant="outlined" sx={{ p: 1.5 }}>
             <Stack spacing={1.5}>
               <Typography variant="subtitle2">Editor / catalog data</Typography>

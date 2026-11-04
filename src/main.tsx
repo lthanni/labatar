@@ -48,6 +48,7 @@ import { RecordingViewer } from "./RecordingViewer";
 import { TechSection } from "./TechSection";
 import { CombosPage } from "./CombosPage";
 import { ArtworkPanel } from "./ArtworkPanel";
+import { GettingStartedDialog, type TourStep } from "./GettingStartedDialog";
 import {
   GuidesDialog,
   allGuideEntryIds,
@@ -333,6 +334,7 @@ declare global {
         publishCombo: (
           request: import("./publish-combo-draft").PublishComboDraft,
         ) => Promise<{ cancelled: true } | { cancelled: false; id: string; revision: number }>;
+        isOwner: () => Promise<boolean>;
       };
       comboCandidates: {
         status: () => Promise<{ available: boolean }>;
@@ -349,6 +351,11 @@ declare global {
           interactive?: boolean;
         }) => Promise<import("./combo-candidates").ComboCandidate[]>;
         approve: (request: { id: string }) => Promise<import("./combo-candidates").ComboCandidate>;
+        edit: (request: {
+          id: string;
+          combo: import("./combo-candidates").CandidateCombo;
+          updatedAt: string;
+        }) => Promise<import("./combo-candidates").ComboCandidate>;
         reject: (request: {
           id: string;
           reason: string;
@@ -1074,6 +1081,13 @@ function App() {
   } | null>(null);
   const youtubeReviewRequestId = useRef(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [tourOpen, setTourOpen] = useState(
+    () =>
+      localStorage.getItem("labatar-getting-started-v1") !== "done" &&
+      localStorage.getItem("avatar-app-last-tab-v2") === null &&
+      localStorage.getItem("avatar-app-last-tab") === null,
+  );
+  const [tourStepIndex, setTourStepIndex] = useState(0);
   const [guidesOpen, setGuidesOpen] = useState(false);
   const [guideSection, setGuideSection] = useState<GuideSection>("matches");
   const [readGuideEntryIds, setReadGuideEntryIds] = useState<Set<string>>(() => {
@@ -1112,6 +1126,11 @@ function App() {
   const [artworkStatusError, setArtworkStatusError] = useState(false);
   const [artworkPopupDismissed, setArtworkPopupDismissed] = useState(false);
   const [artworkStatusToken, setArtworkStatusToken] = useState(0);
+  const autoArtworkAttempts = useRef(new Set<string>());
+  const autoArtworkActive = useRef(false);
+  const [autoArtworkImporting, setAutoArtworkImporting] = useState(false);
+  const [autoArtworkMessage, setAutoArtworkMessage] = useState<string | null>(null);
+  const [autoArtworkError, setAutoArtworkError] = useState<string | null>(null);
   const recordingsTabIndex = 1;
   const captureTabIndex = 2;
   const nerdProcessingTabIndex = 3;
@@ -1187,6 +1206,114 @@ function App() {
       combos: current.combos || nextTab === combosTabIndex,
     }));
     localStorage.setItem(tabStorageKey, String(nextTab));
+  };
+  const tourSteps: TourStep[] = [
+    {
+      title: "Welcome",
+      purpose:
+        "Labatar brings your replays, recordings, and combo notes together. This short tour shows where to start and what each area does.",
+      how: [
+        "Use Next to move through the app's main areas. Each tab opens behind this window as you reach it.",
+        "Use the Open button on a step to try that feature. Restart the tour anytime from Getting started in the header.",
+      ],
+    },
+    {
+      title: "Set up the game and OBS",
+      purpose:
+        "Settings tells Labatar where to find the game and how to connect to OBS for recording.",
+      how: [
+        "Open the gear icon, then choose the game installation folder under Game folder. Labatar scans it for replays and artwork.",
+        "In the OBS section, connect OBS and check the recording setup before using the recording controls in the header.",
+      ],
+      settingsSection: "game",
+      exploreLabel: "Open settings",
+    },
+    {
+      title: "Match history",
+      purpose:
+        "Browse your sets and games, inspect results, and find the replay you want to watch again.",
+      how: [
+        "Use Import replays if your files are outside the selected game folder. Filter by date or player to narrow the list.",
+        "Open a set to see its games. Right-click a row to show its files, export it, or prepare its replay for in-game playback.",
+      ],
+      tab: 0,
+      guideSection: "matches",
+      exploreLabel: "Open Match history",
+    },
+    ...(recordingTabAvailable
+      ? [
+          {
+            title: "Recordings",
+            purpose:
+              "Watch and organize videos captured through OBS, including clips linked to matches.",
+            how: [
+              "Use the header recording controls to start a manual recording or automatic match recording after connecting OBS.",
+              "Choose a video in Recordings to play it. Use Matches and Other to find it, then right-click a recording for file and management actions.",
+            ],
+            tab: recordingsTabIndex,
+            guideSection: "recording" as const,
+            exploreLabel: "Open Recordings",
+          },
+        ]
+      : []),
+    {
+      title: "Combos",
+      purpose: "Find routes for your character and keep a personal gameplan of combos to practice.",
+      how: [
+        "Choose My gameplan to browse combos by character, support, and starter. Select a combo to see its route and notes.",
+        "Use Raw for a searchable, filterable table. Your personal entries and linked recordings live alongside catalog combos.",
+      ],
+      tab: combosTabIndex,
+      exploreLabel: "Open Combos",
+    },
+    ...(developerTabsAvailable
+      ? [
+          {
+            title: "Dev-only capture",
+            purpose: "Capture move takes for frame measurements during development.",
+            how: [
+              "Choose a character and support, then arm a move card before recording a take.",
+              "Use the header controls or F9 to record. Review the take before accepting its measurements.",
+            ],
+            tab: captureTabIndex,
+            exploreLabel: "Open Dev-only capture",
+          },
+          {
+            title: "Nerd processing",
+            purpose: "Inspect recording analysis and tune processing for development work.",
+            how: [
+              "Select a recording from the list and run analysis to inspect its detected events and measurements.",
+              "Use the processing configuration controls to adjust detection when reviewing results against the video.",
+            ],
+            tab: nerdProcessingTabIndex,
+            exploreLabel: "Open Nerd processing",
+          },
+          {
+            title: "Tech editor",
+            purpose: "Review and edit character moves, frame data, and pressure notes.",
+            how: [
+              "Choose a character and support to load their move data.",
+              "Select a move to inspect its values and notes; use recordings as evidence when editing measured data.",
+            ],
+            tab: techTabIndex,
+            exploreLabel: "Open Tech editor",
+          },
+        ]
+      : []),
+  ];
+  const closeTour = () => {
+    localStorage.setItem("labatar-getting-started-v1", "done");
+    setTourOpen(false);
+  };
+  const changeTourStep = (index: number) => {
+    setTourStepIndex(index);
+    const nextTab = tourSteps[index]?.tab;
+    if (nextTab !== undefined) changeTab(nextTab);
+  };
+  const exploreTourStep = (step: TourStep) => {
+    closeTour();
+    if (step.tab !== undefined) changeTab(step.tab);
+    if (step.settingsSection) openSettings(step.settingsSection);
   };
   const finishReplayImport = ({ importedCount }: { importedCount: number }) => {
     setReplayImportMessage({
@@ -1458,6 +1585,49 @@ function App() {
     refreshRecordings();
   };
 
+  useEffect(() => {
+    const artwork = window.electronAPI?.artwork;
+    if (!artwork) return;
+    return artwork.onProgress((progress) => {
+      if (autoArtworkActive.current) setAutoArtworkMessage(progress.message);
+    });
+  }, []);
+
+  useEffect(() => {
+    const artwork = window.electronAPI?.artwork;
+    const folder = gameFolderStatus?.folder;
+    if (
+      !artwork ||
+      !folder ||
+      gameFolderStatus.issue ||
+      !artworkStatus?.missing.length ||
+      autoArtworkActive.current ||
+      autoArtworkAttempts.current.has(folder)
+    ) {
+      return;
+    }
+    autoArtworkAttempts.current.add(folder);
+    autoArtworkActive.current = true;
+    setAutoArtworkImporting(true);
+    setAutoArtworkMessage("Checking the game PAK files...");
+    setAutoArtworkError(null);
+    void artwork
+      .extract()
+      .then(() => {
+        window.dispatchEvent(new Event("labatar-artwork-imported"));
+        artworkImported();
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("Artwork extraction cancelled.")) setAutoArtworkError(message);
+      })
+      .finally(() => {
+        autoArtworkActive.current = false;
+        setAutoArtworkImporting(false);
+        setAutoArtworkMessage(null);
+      });
+  }, [artworkStatus?.missing.length, autoArtworkImporting, gameFolderStatus]);
+
   const previousRecordingActive = useRef(false);
   useEffect(() => {
     if (previousRecordingActive.current && !obsState.recording.active) refreshRecordings();
@@ -1598,6 +1768,19 @@ function App() {
               {replayImportMessage.text}
             </Alert>
           )}
+          {autoArtworkImporting && (
+            <Alert severity="info">
+              {autoArtworkMessage ?? "Importing missing game artwork..."}
+            </Alert>
+          )}
+          {!settingsOpen && autoArtworkError && (
+            <Alert severity="warning" onClose={() => setAutoArtworkError(null)}>
+              Could not import game artwork: {autoArtworkError}
+              <Button size="small" color="inherit" onClick={() => openSettings("artwork")}>
+                Open artwork settings
+              </Button>
+            </Alert>
+          )}
           {!settingsOpen &&
             (gameFolderStatus?.issue || replayScanError) &&
             !folderPopupDismissed && (
@@ -1612,6 +1795,8 @@ function App() {
             artworkTabAvailable &&
             artworkStatus !== null &&
             artworkStatus.missing.length > 0 &&
+            !autoArtworkImporting &&
+            !autoArtworkError &&
             !artworkPopupDismissed && (
               <Alert severity="info" onClose={() => setArtworkPopupDismissed(true)}>
                 {artworkStatus.missing.length} artwork image
@@ -1658,6 +1843,16 @@ function App() {
               Import replays
             </Button>
           )}
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => {
+              setTourStepIndex(0);
+              setTourOpen(true);
+            }}
+          >
+            Getting started
+          </Button>
           <Tooltip title={unreadGuideCount ? `${unreadGuideCount} unread guide entries` : "Guides"}>
             <Button
               size="small"
@@ -1692,6 +1887,18 @@ function App() {
           <ObsRecordingControls onOpenSettings={() => openSettings("obs")} />
         </Stack>
       </Box>
+      <GettingStartedDialog
+        open={tourOpen}
+        steps={tourSteps}
+        stepIndex={tourStepIndex}
+        onStepChange={changeTourStep}
+        onExplore={exploreTourStep}
+        onOpenGuide={(section) => {
+          closeTour();
+          openGuide(section);
+        }}
+        onClose={closeTour}
+      />
       <GuidesDialog
         open={guidesOpen}
         section={guideSection}
@@ -1915,7 +2122,7 @@ function App() {
                 </Box>
               </AccordionSummary>
               <AccordionDetails>
-                <ArtworkPanel onImported={artworkImported} />
+                <ArtworkPanel onImported={artworkImported} autoImporting={autoArtworkImporting} />
               </AccordionDetails>
             </Accordion>
           )}

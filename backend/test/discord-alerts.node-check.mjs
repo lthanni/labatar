@@ -102,11 +102,32 @@ void test("the test alert rejects an invalid webhook and reports Discord errors"
 });
 
 void test("candidate alert keeps a long route within Discord's message limit", () => {
+  const content = candidateAlert(
+    {
+      id: "candidate-id",
+      combo: {
+        characterId: "aang",
+        supportId: "katara",
+        damage: "302",
+        route: "5B > ".repeat(400),
+      },
+    },
+    "uploader@example.com",
+  );
+  assert.ok(content.length < 2000);
+  assert.match(
+    content,
+    /^New combo candidate from uploader@example\.com ready for review: candidate ID: candidate-id\n/,
+  );
+  assert.match(content, /aang \/ katara \(302\):/);
+  assert.equal(content.split("\n").length, 2);
+  assert.match(content, /\.\.\./);
+});
+
+void test("candidate alert identifies older uploads without a saved submitter", () => {
   const content = candidateAlert({
     id: "candidate-id",
-    combo: { characterId: "aang", supportId: "katara", route: "5B > ".repeat(400) },
+    combo: { characterId: "aang", supportId: "katara", damage: "302", route: "5B" },
   });
-  assert.ok(content.length < 2000);
-  assert.match(content, /Candidate ID: candidate-id/);
-  assert.match(content, /\.\.\./);
+  assert.match(content, /^New combo candidate from unknown submitter ready for review:/);
 });

@@ -261,6 +261,12 @@ function createYouTubeUploadService({ app, safeStorage, shell }) {
     });
     const data = await response.json();
     if (!response.ok || !data.access_token) {
+      if (data?.error === "invalid_grant") {
+        await fsp.rm(tokenPaths[destination], { force: true });
+        throw new Error(
+          `The ${destination === "combos" ? "Labatar (combos)" : "sets"} YouTube connection expired or was revoked. Reconnect that account in Labatar, then retry the upload.`,
+        );
+      }
       throw tokenError(data, "YouTube authorization expired. Reconnect your account.");
     }
     const updated = {

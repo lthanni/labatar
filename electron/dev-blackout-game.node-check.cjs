@@ -105,6 +105,23 @@ void test("reuses verified original backups across blackout sessions", async (t)
   );
 });
 
+void test("keeps separate verified backups after approved game files change", async (t) => {
+  const setup = await fixture(t);
+  const first = await prepareSession(setup);
+  const firstBackup = first.files[0].backup;
+  const firstHash = await sha256(firstBackup);
+  assert.equal(await restoreSession(setup.backupRoot, async () => false), true);
+
+  const changedPath = path.join(setup.gameRoot, "data_packages", "hud.pak");
+  await fs.writeFile(changedPath, "updated original hud.pak");
+  setup.expectedOriginals["hud.pak"] = await sha256(changedPath);
+  const second = await prepareSession(setup);
+  assert.notEqual(second.backupDir, first.backupDir);
+  assert.equal(await sha256(firstBackup), firstHash);
+  assert.equal(await sha256(second.files[0].backup), setup.expectedOriginals["hud.pak"]);
+  assert.equal(await restoreSession(setup.backupRoot, async () => false), true);
+});
+
 void test("recognizes matching blackout assets without a launcher session", async (t) => {
   const setup = await fixture(t);
   assert.equal(await verifyInstalledAssets(setup), false);

@@ -113,13 +113,16 @@ export function savedCandidateRecording(
     `Imported Combos/candidate-${candidate.id}.mp4`,
   ];
   const usable = (recording: RecordedVideo) =>
-    recording.mediaKind === "local" &&
-    /\.mp4$/i.test(recording.name) &&
-    recording.size === candidate.fileSize;
+    recording.mediaKind === "local" && /\.mp4$/i.test(recording.name);
   return (
     recordings.find((recording) => recording.id === linkedId && usable(recording)) ??
     downloadedIds
-      .map((id) => recordings.find((recording) => recording.id === id && usable(recording)))
+      .map((id) =>
+        recordings.find(
+          (recording) =>
+            recording.id === id && usable(recording) && recording.size === candidate.fileSize,
+        ),
+      )
       .find((recording) => recording !== undefined) ??
     null
   );
@@ -190,14 +193,31 @@ export function candidateMatchesItem(item: ComboItem, candidate: ComboCandidate)
 export function mergeCandidateItems(
   items: ComboItem[],
   candidates: ComboCandidate[],
-  submissions: Record<string, { id: string }>,
+  submissions: Record<string, { id: string; draftSignature?: string }>,
 ): ComboItem[] {
   const activeCandidates = candidates.filter((candidate) => candidate.status !== "uploaded");
   const candidateById = new Map(activeCandidates.map((candidate) => [candidate.id, candidate]));
   const mergedIds = new Set<string>();
   const merged = items.map((item) => {
-    const candidate = candidateById.get(submissions[item.id]?.id ?? "");
-    if (!candidate || !candidateMatchesItem(item, candidate)) return item;
+    const submission = submissions[item.id];
+    const candidate = candidateById.get(submission?.id ?? "");
+    if (!candidate) return item;
+    if (!candidateMatchesItem(item, candidate)) {
+      if (
+        !submission.draftSignature ||
+        submission.draftSignature !== JSON.stringify(candidateComboFromItem(item))
+      ) {
+        return item;
+      }
+      mergedIds.add(candidate.id);
+      return {
+        ...candidateItem(candidate),
+        id: item.id,
+        source: item.source,
+        local: item.local,
+        published: item.published,
+      };
+    }
     mergedIds.add(candidate.id);
     return { ...item, candidate };
   });
@@ -254,16 +274,22 @@ export function finishUploadedCandidate(
   const submittedId = Object.entries(workspace.candidateSubmissions).find(
     ([, submission]) => submission.id === candidate.id,
   )?.[0];
-  const submittedItem = items.find(
-    (item) => item.id === submittedId && candidateMatchesItem(item, candidate),
-  );
+  const submittedItem = items.find((item) => item.id === submittedId);
   let targetId = candidateLocalId;
   let local: LocalCombo;
   if (existingCandidateLocal) {
-    local = { ...existingCandidateLocal, youtubeUrl: candidate.youtubeUrl };
+    local = {
+      ...existingCandidateLocal,
+      ...localComboFromUploadedCandidate(candidate, targetId),
+      name: existingCandidateLocal.name,
+    };
   } else if (submittedItem?.local) {
     targetId = submittedItem.id;
-    local = { ...submittedItem.local, youtubeUrl: candidate.youtubeUrl };
+    local = {
+      ...submittedItem.local,
+      ...localComboFromUploadedCandidate(candidate, targetId),
+      name: submittedItem.local.name,
+    };
   } else if (submittedItem?.published) {
     const revision = localRevisionDraft(submittedItem, targetId);
     local = {
@@ -285,7 +311,7 @@ export function finishUploadedCandidate(
   delete entries[candidateItemId];
   const recordingLinks = { ...workspace.recordingLinks };
   const preservedRecording = recordingLink ?? recordingLinks[candidateItemId];
-  if (preservedRecording && !recordingLinks[targetId]) {
+  if (preservedRecording) {
     recordingLinks[targetId] = preservedRecording;
   }
   delete recordingLinks[candidateItemId];
