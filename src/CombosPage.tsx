@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import {
   Alert,
   Box,
@@ -24,7 +33,6 @@ import {
 import supportMap from "../electron/support-map.json";
 import { ComboRouteText } from "./ComboRouteText";
 import { ComboInputInspector } from "./ComboInputInspector";
-import { RecordingViewer } from "./RecordingViewer";
 import { ComboRecordButton } from "./ComboRecordButton";
 import {
   comboScreenPositions,
@@ -104,6 +112,10 @@ import {
   savePendingYouTubeUpload,
 } from "./youtube-pending-uploads";
 import { YouTubeRecordingPlayer, youtubeVideoId } from "./YouTubeRecordingPlayer";
+
+const RecordingViewer = lazy(async () => ({
+  default: (await import("./RecordingViewer")).RecordingViewer,
+}));
 
 const names: Record<string, string> = {
   "avatar-aang": "Avatar Aang",
@@ -5330,16 +5342,18 @@ function ComboDetail({
             {(videoUrl || recordingLink) && (
               <Box>
                 {displayedRecording && recordingApiAvailable ? (
-                  <RecordingViewer
-                    key={displayedRecording.id}
-                    active={active}
-                    refreshToken={displayedRecording.modifiedAt}
-                    mode="recordings"
-                    panelOnly
-                    embeddedCombo
-                    selectedRecordingId={displayedRecording.id}
-                    onPlaybackTimeMs={setLocalVideoTimeMs}
-                  />
+                  <Suspense fallback={<CircularProgress size={26} />}>
+                    <RecordingViewer
+                      key={displayedRecording.id}
+                      active={active}
+                      refreshToken={displayedRecording.modifiedAt}
+                      mode="recordings"
+                      panelOnly
+                      embeddedCombo
+                      selectedRecordingId={displayedRecording.id}
+                      onPlaybackTimeMs={setLocalVideoTimeMs}
+                    />
+                  </Suspense>
                 ) : (
                   videoUrl && (
                     <Box

@@ -148,6 +148,75 @@ describe("browser replay scanning", () => {
     });
   });
 
+  it("continues past a selected replay that becomes unreadable", async () => {
+    const missing = new Blob(["old replay"]);
+    Object.defineProperty(missing, "arrayBuffer", {
+      value: async () => {
+        throw new DOMException("The file is gone.", "NotFoundError");
+      },
+    });
+    const result = await rescanReplayFolder({
+      name: "replays",
+      files: [
+        { relativePath: "replays/missing.dlr", file: missing },
+        { relativePath: "replays/available.dlr", file: replay({ ReplayInfo_P1Name: "A" }) },
+      ],
+    });
+    expect(result.games.map((game) => game.id)).toEqual(["replays/available.dlr"]);
+    expect(result.skippedCount).toBe(1);
+    expect(result.skippedExamples).toEqual(["replays/missing.dlr"]);
+  });
+
+  it("skips an inaccessible directory entry but fails when the selected root is inaccessible", async () => {
+    const directory = {
+      name: "game",
+      values: async function* () {
+        yield {
+          kind: "file",
+          name: "missing.dlr",
+          getFile: async () => {
+            throw new DOMException("The file is gone.", "NotFoundError");
+          },
+        };
+        yield {
+          kind: "file",
+          name: "available.dlr",
+          getFile: async () => replay({ ReplayInfo_P1Name: "A" }),
+        };
+        yield {
+          kind: "directory",
+          name: "blocked",
+          values: async function* () {
+            yield {
+              kind: "file",
+              name: "inside.dlr",
+              getFile: async () => replay({ ReplayInfo_P1Name: "B" }),
+            };
+            throw new DOMException("Folder access denied.", "NotAllowedError");
+          },
+        };
+      },
+    } as unknown as FileSystemDirectoryHandle;
+    const result = await rescanReplayFolder({ name: "game", directory, files: [] });
+    expect(result.games.map((game) => game.id)).toEqual(["available.dlr", "blocked/inside.dlr"]);
+    expect(result.skippedExamples).toEqual(["missing.dlr", "blocked"]);
+
+    const inaccessibleRoot = {
+      name: "game",
+      values: async function* () {
+        yield {
+          kind: "file",
+          name: "available.dlr",
+          getFile: async () => replay({ ReplayInfo_P1Name: "A" }),
+        };
+        throw new DOMException("Folder access denied.", "NotAllowedError");
+      },
+    } as unknown as FileSystemDirectoryHandle;
+    await expect(
+      rescanReplayFolder({ name: "game", directory: inaccessibleRoot, files: [] }),
+    ).rejects.toMatchObject({ name: "NotAllowedError" });
+  });
+
   it("associates optional ratings logs by replay filename", async () => {
     const log = new Blob([
       "SetNewMatch: Player 1: Aang (SteamID: 1) Glicko: [R: 100: D: 2: Vol: 0.4]\n" +

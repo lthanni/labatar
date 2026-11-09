@@ -131,6 +131,28 @@ function isAbort(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+function scanErrorMessage(error: unknown) {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (
+    error instanceof DOMException &&
+    ["NotFoundError", "NotReadableError", "NotAllowedError", "SecurityError"].includes(error.name)
+  ) {
+    return `Could not read the selected folder: ${detail} Try choosing its replays folder below, then add logs and data_packages separately.`;
+  }
+  return `Could not scan the folder: ${detail}`;
+}
+
+function SkippedFilesAlert({ result }: { result: ReplayScanResult | null }) {
+  if (!result?.skippedCount) return null;
+  return (
+    <Alert severity="warning" sx={{ mb: 1.5 }}>
+      Skipped {result.skippedCount} file{result.skippedCount === 1 ? " or folder" : "s or folders"}{" "}
+      the browser could not read. Match history may be incomplete. Select the folder again to retry.
+      {result.skippedExamples.length > 0 && ` Examples: ${result.skippedExamples.join(", ")}.`}
+    </Alert>
+  );
+}
+
 function WebApp() {
   const [view, setView] = useState<"history" | "combos">("history");
   const [folder, setFolder] = useState<ReplayFolderSelection | null>(null);
@@ -235,11 +257,7 @@ function WebApp() {
       }
     } catch (scanError) {
       if (runNumber.current === currentRun) {
-        setError(
-          isAbort(scanError)
-            ? "Scan cancelled."
-            : `Could not scan the folder: ${scanError instanceof Error ? scanError.message : String(scanError)}`,
-        );
+        setError(isAbort(scanError) ? "Scan cancelled." : scanErrorMessage(scanError));
       }
     } finally {
       if (runNumber.current === currentRun) {
@@ -414,6 +432,7 @@ function WebApp() {
               {error}
             </Alert>
           )}
+          <SkippedFilesAlert result={result} />
           {artworkIssue && (
             <Alert severity="warning" sx={{ mb: 1.5 }}>
               {artworkIssue}
@@ -554,6 +573,7 @@ function WebApp() {
           {error}
         </Alert>
       )}
+      <SkippedFilesAlert result={result} />
       {artworkIssue && (
         <Alert severity="warning" sx={{ mb: 1.5 }}>
           {artworkIssue}
@@ -561,7 +581,8 @@ function WebApp() {
       )}
       {folder && result && result.games.length === 0 && !scanning && (
         <Alert severity="warning" sx={{ mb: 1.5 }}>
-          No `.dlr` replays were found. Select the game installation folder or its replays folder.
+          No readable `.dlr` replays were found. Select the game installation folder or its replays
+          folder.
         </Alert>
       )}
       {result && result.games.length > 0 && (

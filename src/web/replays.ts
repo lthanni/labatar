@@ -58,6 +58,8 @@ export type ReplayScanResult = {
   playerCounts: Record<string, number>;
   duplicateCount: number;
   files: ReplayInputFile[];
+  skippedCount: number;
+  skippedExamples: string[];
 };
 export type ReplayScanOptions = {
   signal?: AbortSignal;
@@ -77,6 +79,13 @@ const supportMap = supportMapJson as Record<string, Record<string, string>>;
 
 function abortIfNeeded(signal?: AbortSignal) {
   if (signal?.aborted) throw new DOMException("Replay scan cancelled.", "AbortError");
+}
+
+function isInaccessibleFileError(error: unknown) {
+  if (typeof error !== "object" || error === null || !("name" in error)) return false;
+  return ["NotFoundError", "NotReadableError", "NotAllowedError", "SecurityError"].includes(
+    String(error.name),
+  );
 }
 
 function isRelevant(path: string) {
@@ -107,28 +116,42 @@ async function walkDirectory(
   prefix = "",
   signal?: AbortSignal,
   onDiscovered?: (count: number) => void,
+  onSkipped?: (path: string) => void,
   count = { value: 0 },
+  nested = false,
 ): Promise<ReplayInputFile[]> {
   const files: ReplayInputFile[] = [];
-  for await (const entry of directory.values()) {
-    abortIfNeeded(signal);
-    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (entry.kind === "directory") {
-      files.push(
-        ...(await walkDirectory(
-          entry as FileSystemDirectoryHandle,
-          relativePath,
-          signal,
-          onDiscovered,
-          count,
-        )),
-      );
-    } else if (isRelevant(relativePath)) {
-      const file = await (entry as FileSystemFileHandle).getFile();
-      files.push({ relativePath, file });
-      count.value += 1;
-      if (count.value % 20 === 0) onDiscovered?.(count.value);
+  try {
+    for await (const entry of directory.values()) {
+      abortIfNeeded(signal);
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.kind === "directory") {
+        files.push(
+          ...(await walkDirectory(
+            entry as FileSystemDirectoryHandle,
+            relativePath,
+            signal,
+            onDiscovered,
+            onSkipped,
+            count,
+            true,
+          )),
+        );
+      } else if (isRelevant(relativePath)) {
+        try {
+          const file = await (entry as FileSystemFileHandle).getFile();
+          files.push({ relativePath, file });
+          count.value += 1;
+          if (count.value % 20 === 0) onDiscovered?.(count.value);
+        } catch (error) {
+          if (!isInaccessibleFileError(error)) throw error;
+          onSkipped?.(relativePath);
+        }
+      }
     }
+  } catch (error) {
+    if (!nested || !isInaccessibleFileError(error)) throw error;
+    onSkipped?.(prefix);
   }
   return files;
 }
@@ -475,6 +498,12 @@ export async function rescanReplayFolder(
   options: ReplayScanOptions = {},
 ): Promise<ReplayScanResult> {
   abortIfNeeded(options.signal);
+  const skippedExamples: string[] = [];
+  let skippedCount = 0;
+  const recordSkipped = (path: string) => {
+    skippedCount += 1;
+    if (skippedExamples.length < 3) skippedExamples.push(path);
+  };
   options.onProgress?.({ phase: "discovery", completed: 0, total: 0 });
   let files: ReplayInputFile[];
   if (selection.subfolders) {
@@ -483,21 +512,33 @@ export async function rescanReplayFolder(
       const source = selection.subfolders[kind];
       if (!source) continue;
       source.files = source.directory
-        ? await walkDirectory(source.directory, kind, options.signal, (completed) => {
-            options.onProgress?.({
-              phase: "discovery",
-              completed: files.length + completed,
-              total: 0,
-            });
-          })
+        ? await walkDirectory(
+            source.directory,
+            kind,
+            options.signal,
+            (completed) => {
+              options.onProgress?.({
+                phase: "discovery",
+                completed: files.length + completed,
+                total: 0,
+              });
+            },
+            recordSkipped,
+          )
         : [...source.files];
       files.push(...source.files);
     }
   } else {
     files = selection.directory
-      ? await walkDirectory(selection.directory, "", options.signal, (completed) => {
-          options.onProgress?.({ phase: "discovery", completed, total: 0 });
-        })
+      ? await walkDirectory(
+          selection.directory,
+          "",
+          options.signal,
+          (completed) => {
+            options.onProgress?.({ phase: "discovery", completed, total: 0 });
+          },
+          recordSkipped,
+        )
       : [...selection.files];
   }
   files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
@@ -517,7 +558,15 @@ export async function rescanReplayFolder(
   for (let index = 0; index < replayFiles.length; index += 1) {
     abortIfNeeded(options.signal);
     const input = replayFiles[index];
-    const bytes = new Uint8Array(await input.file.arrayBuffer());
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(await input.file.arrayBuffer());
+    } catch (error) {
+      if (!isInaccessibleFileError(error)) throw error;
+      recordSkipped(input.relativePath);
+      options.onProgress?.({ phase: "scanning", completed: index + 1, total: replayFiles.length });
+      continue;
+    }
     const fields = decodeAsciiFields(bytes);
     const fileName = input.relativePath.split("/").pop() ?? input.relativePath;
     const player1 = cleanName(fields.ReplayInfo_P1Name ?? "Player 1");
@@ -574,5 +623,5 @@ export async function rescanReplayFolder(
     playerCounts[game.player1] = (playerCounts[game.player1] ?? 0) + 1;
     playerCounts[game.player2] = (playerCounts[game.player2] ?? 0) + 1;
   }
-  return { games, playerCounts, duplicateCount, files };
+  return { games, playerCounts, duplicateCount, files, skippedCount, skippedExamples };
 }
