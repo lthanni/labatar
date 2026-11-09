@@ -1,4 +1,5 @@
 import { candidateAlert, sendDiscordAlert } from "./discord-alerts.mjs";
+import { validateProcessedComboInput } from "./processed-combo-input.mjs";
 
 const privateHeaders = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
 const partSize = 8 * 1024 * 1024;
@@ -29,7 +30,7 @@ async function bodyJson(request) {
   if (!/^application\/json(?:;|$)/i.test(request.headers.get("Content-Type") ?? "")) {
     throw new Error("Content-Type must be application/json.");
   }
-  const bytes = await boundedBytes(request, 128 * 1024);
+  const bytes = await boundedBytes(request, 512 * 1024);
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
@@ -79,11 +80,16 @@ function newToken() {
 }
 
 function candidateView(row) {
-  const { originCandidateId, ...combo } = JSON.parse(row.combo_payload);
+  const { originCandidateId, processedInput, inputFacing, ...combo } = JSON.parse(
+    row.combo_payload,
+  );
+  delete combo.editorPickReason;
+  delete combo.editorPickContext;
   return {
     id: row.id,
     originCandidateId: originCandidateId ?? row.id,
     combo,
+    ...(processedInput ? { processedInput, inputFacing } : {}),
     fileName: row.file_name,
     fileSize: row.file_size,
     status: isApproved(row) ? "approved" : row.status,
@@ -98,6 +104,25 @@ function candidateView(row) {
 
 async function candidate(db, id) {
   return one(db, "SELECT * FROM combo_candidates WHERE id = ?", id);
+}
+
+/** Find the latest structured capture for a candidate lineage before queue cleanup. */
+export async function processedInputForCandidate(db, originCandidateId) {
+  const rows = await db
+    .prepare(`
+      SELECT combo_payload FROM combo_candidates
+      WHERE id = ? OR json_extract(combo_payload, '$.originCandidateId') = ?
+      ORDER BY created_at DESC
+    `)
+    .bind(originCandidateId, originCandidateId)
+    .all();
+  for (const row of rows.results ?? []) {
+    const payload = JSON.parse(row.combo_payload);
+    if (payload.processedInput && ["right", "left"].includes(payload.inputFacing)) {
+      return { processedInput: payload.processedInput, inputFacing: payload.inputFacing };
+    }
+  }
+  return null;
 }
 
 function sameComboIdentity(candidateCombo, publishedCombo) {
@@ -160,7 +185,15 @@ async function createCandidate(request, env, validateRecord, submitterEmail) {
       throw new Error("Invalid submission.");
     if (
       Object.keys(input).some(
-        (key) => !["combo", "fileName", "fileSize", "originCandidateId"].includes(key),
+        (key) =>
+          ![
+            "combo",
+            "fileName",
+            "fileSize",
+            "originCandidateId",
+            "processedInput",
+            "inputFacing",
+          ].includes(key),
       )
     ) {
       throw new Error("Unexpected submission field.");
@@ -170,6 +203,17 @@ async function createCandidate(request, env, validateRecord, submitterEmail) {
       !candidateIdPattern.test(input.originCandidateId)
     ) {
       throw new Error("originCandidateId must be a candidate UUID.");
+    }
+    if (input.processedInput !== undefined) {
+      validateProcessedComboInput(input.processedInput);
+      if (!["right", "left"].includes(input.inputFacing))
+        throw new Error("Choose a facing for the processed combo inputs.");
+      const route = input.processedInput.routes[input.inputFacing];
+      if (!route || (input.combo?.route !== undefined && input.combo.route !== route))
+        throw new Error("The processed input route must match the submitted combo route.");
+      input.combo = { ...input.combo, route };
+    } else if (input.inputFacing !== undefined) {
+      throw new Error("Input facing requires processed combo inputs.");
     }
     input.combo = validateCandidateCombo(input.combo, validateRecord);
     if (
@@ -222,7 +266,13 @@ async function createCandidate(request, env, validateRecord, submitterEmail) {
     `)
       .bind(
         id,
-        JSON.stringify({ ...input.combo, originCandidateId: input.originCandidateId ?? id }),
+        JSON.stringify({
+          ...input.combo,
+          originCandidateId: input.originCandidateId ?? id,
+          ...(input.processedInput
+            ? { processedInput: input.processedInput, inputFacing: input.inputFacing }
+            : {}),
+        }),
         submitterEmail,
         input.fileName,
         input.fileSize,
@@ -386,6 +436,9 @@ async function editCandidate(request, env, id, validateRecord) {
   const payload = JSON.stringify({
     ...nextCombo,
     originCandidateId: current.originCandidateId ?? row.id,
+    ...(current.processedInput
+      ? { processedInput: current.processedInput, inputFacing: current.inputFacing }
+      : {}),
   });
   if (payload === row.combo_payload) return json(candidateView(row));
   const now = new Date(Math.max(Date.now(), Date.parse(row.updated_at) + 1)).toISOString();

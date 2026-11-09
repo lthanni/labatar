@@ -1,7 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
-import NewReleasesIcon from "@mui/icons-material/NewReleases";
 import SettingsIcon from "@mui/icons-material/Settings";
 import discordSymbol from "./discord-symbol.svg";
 import {
@@ -48,15 +47,16 @@ import { RecordingViewer } from "./RecordingViewer";
 import { TechSection } from "./TechSection";
 import { CombosPage } from "./CombosPage";
 import { ArtworkPanel } from "./ArtworkPanel";
-import { GettingStartedDialog, type TourStep } from "./GettingStartedDialog";
-import {
-  GuidesDialog,
-  allGuideEntryIds,
-  type GuideEntryId,
-  type GuideSection,
-} from "./GuidesDialog";
+import { GettingStartedGuide, type GuideStep } from "./GettingStartedDialog";
+import obsToolsMenu from "./assets/obs-guide/tools-menu.png";
+import obsServerSettings from "./assets/obs-guide/server-settings-sanitized.png";
 import type { ObsSettings, ObsSourceToggleKey, ObsState, RecordingMetadata } from "./obs-types";
-import type { RecordedVideo, RecordingTags } from "./recording-types";
+import type {
+  ComboInputCapture,
+  ProcessedComboInput,
+  RecordedVideo,
+  RecordingTags,
+} from "./recording-types";
 import type { DevBlackoutStatus } from "./dev-blackout-types";
 import type { RecordingAnalysis } from "./recording-analysis-types";
 import type { ReplayStagingPreview, ReplayStagingStatus } from "./replay-staging-types";
@@ -155,6 +155,9 @@ declare global {
           setup: { profileName: string; recordDirectory: string };
           fileNameBase?: string;
         }) => Promise<{ sessionId: string; startedAt: string; metadata: null }>;
+        startComboRecording: (request: {
+          setup: { profileName: string; recordDirectory: string };
+        }) => Promise<{ sessionId: string; startedAt: string; metadata: null }>;
         stopRecording: () => Promise<{
           outputPath: string | null;
           manifestPath: string | null;
@@ -177,13 +180,11 @@ declare global {
           games: ReplayRow[];
           playerCounts: Record<string, number>;
           duplicateCount: number;
-          interruptedMatchIds?: string[];
         } | null>;
         scanFolder: (folder: string) => Promise<{
           games: ReplayRow[];
           playerCounts: Record<string, number>;
           duplicateCount: number;
-          interruptedMatchIds?: string[];
         }>;
         resolvePortraits: (request: {
           pairs: Array<{ character: string; support: string }>;
@@ -220,6 +221,23 @@ declare global {
           folder: string;
           recordings: RecordedVideo[];
         }>;
+        getOriginalComboInputs: (request: {
+          recordingId: string;
+        }) => Promise<ComboInputCapture | null>;
+        reprocessComboInputs: (request: { recordingId: string }) => Promise<ProcessedComboInput>;
+        setComboInputEdit: (request: {
+          recordingId: string;
+          timeMs: number;
+          physicalButton: string;
+          edit: {
+            notation?: string;
+            separator?: " " | "~";
+            positionAfter?: "grounded" | "airborne";
+            togglePosition?: true;
+            charged?: true;
+          } | null;
+          deferProcessing?: boolean;
+        }) => Promise<ProcessedComboInput | { deferred: true }>;
         importComboMp4: () => Promise<string | null>;
         getChapters: (request: {
           recordingId: string;
@@ -243,6 +261,7 @@ declare global {
           startTime: number;
           endTime: number;
         }) => Promise<RecordedVideo>;
+        renderComboInputs: (request: { recordingId: string }) => Promise<RecordedVideo>;
         trimClip: (request: {
           recordingId: string;
           startTime: number;
@@ -334,6 +353,10 @@ declare global {
         publishCombo: (
           request: import("./publish-combo-draft").PublishComboDraft,
         ) => Promise<{ cancelled: true } | { cancelled: false; id: string; revision: number }>;
+        unpublishCombo: (request: {
+          id: string;
+          expectedRevision: number;
+        }) => Promise<{ cancelled: true } | { cancelled: false; id: string; revision: number }>;
         isOwner: () => Promise<boolean>;
       };
       comboCandidates: {
@@ -343,7 +366,8 @@ declare global {
           recordingId: string;
           combo: import("./combo-candidates").CandidateCombo;
           originCandidateId?: string;
-        }) => Promise<{ id: string }>;
+          inputFacing?: "right" | "left";
+        }) => Promise<{ id: string; processedInputIncluded: boolean }>;
         onUploadProgress: (
           listener: (progress: { uploadedBytes: number; totalBytes: number }) => void,
         ) => () => void;
@@ -756,7 +780,6 @@ function ReplayAnalysis({
   gameFolderRefreshToken,
   onScanError,
   onReplaysChanged,
-  onOpenGuide,
 }: {
   active: boolean;
   recordingsRefreshToken: number;
@@ -764,12 +787,10 @@ function ReplayAnalysis({
   gameFolderRefreshToken: number;
   onScanError: (message: string | null) => void;
   onReplaysChanged: () => void;
-  onOpenGuide: (section: GuideSection) => void;
 }) {
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [replayFolder, setReplayFolder] = useState<string | null>(null);
   const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
-  const [interruptedMatchIds, setInterruptedMatchIds] = useState<string[]>([]);
   const [overridePlayer, setOverridePlayer] = useState<string | null>(null);
   const [rankedOnly, setRankedOnly] = useState(false);
   const [rankAffectingOnly, setRankAffectingOnly] = useState(false);
@@ -810,12 +831,7 @@ function ReplayAnalysis({
   const [isGridPending, startGridTransition] = useTransition();
   const lastLoadedFolder = useRef<string | null>(null);
   const onData = useCallback(
-    (
-      nextGames: ReplayRow[],
-      counts: Record<string, number>,
-      folder: string,
-      nextInterruptedMatchIds: string[] = [],
-    ) => {
+    (nextGames: ReplayRow[], counts: Record<string, number>, folder: string) => {
       const folderChanged = lastLoadedFolder.current !== folder;
       lastLoadedFolder.current = folder;
       startGridTransition(() => {
@@ -831,7 +847,6 @@ function ReplayAnalysis({
             : stableGames;
         });
         setReplayFolder(folder);
-        setInterruptedMatchIds(nextInterruptedMatchIds);
         setPlayerCounts((currentCounts) => {
           const currentKeys = Object.keys(currentCounts);
           const nextKeys = Object.keys(counts);
@@ -884,7 +899,7 @@ function ReplayAnalysis({
           if (progressTimer !== null) window.clearTimeout(progressTimer);
           setScanLoading(false);
           onScanError(null);
-          onData(cached.games, cached.playerCounts, gameFolder, cached.interruptedMatchIds);
+          onData(cached.games, cached.playerCounts, gameFolder);
         })
         .catch(() => undefined);
     }
@@ -900,7 +915,7 @@ function ReplayAnalysis({
         if (progressTimer !== null) window.clearTimeout(progressTimer);
         setScanLoading(false);
         onScanError(null);
-        onData(result.games, result.playerCounts, gameFolder, result.interruptedMatchIds);
+        onData(result.games, result.playerCounts, gameFolder);
         const scannedCount = result.games.length + result.duplicateCount;
         setScanProgress({ completed: scannedCount, total: scannedCount, phase: "scanning" });
       })
@@ -1048,7 +1063,6 @@ function ReplayAnalysis({
       )}
       <AvatarGrid
         rowData={relevantGames}
-        interruptedMatchIds={interruptedMatchIds}
         replayFolder={replayFolder}
         active={active}
         recordingsRefreshToken={recordingsRefreshToken}
@@ -1062,7 +1076,6 @@ function ReplayAnalysis({
         invalidDateRange={invalidDateRange}
         onSummaryChange={onSummaryChange}
         onReplaysChanged={onReplaysChanged}
-        onOpenGuide={onOpenGuide}
       />
     </Box>
   );
@@ -1087,22 +1100,6 @@ function App() {
       localStorage.getItem("avatar-app-last-tab-v2") === null &&
       localStorage.getItem("avatar-app-last-tab") === null,
   );
-  const [tourStepIndex, setTourStepIndex] = useState(0);
-  const [guidesOpen, setGuidesOpen] = useState(false);
-  const [guideSection, setGuideSection] = useState<GuideSection>("matches");
-  const [readGuideEntryIds, setReadGuideEntryIds] = useState<Set<string>>(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem("labatar-guide-read-v1") ?? "[]");
-      return new Set(
-        Array.isArray(stored)
-          ? stored.filter((value): value is string => typeof value === "string")
-          : [],
-      );
-    } catch {
-      return new Set();
-    }
-  });
-  const unreadGuideCount = allGuideEntryIds.filter((id) => !readGuideEntryIds.has(id)).length;
   const [settingsSection, setSettingsSection] = useState<"game" | "artwork" | "obs" | null>("obs");
   const [gameFolderStatus, setGameFolderStatus] = useState<{
     folder: string | null;
@@ -1207,114 +1204,145 @@ function App() {
     }));
     localStorage.setItem(tabStorageKey, String(nextTab));
   };
-  const tourSteps: TourStep[] = [
+  const tourSteps: GuideStep[] = [
     {
-      title: "Welcome",
-      purpose:
-        "Labatar brings your replays, recordings, and combo notes together. This short tour shows where to start and what each area does.",
-      how: [
-        "Use Next to move through the app's main areas. Each tab opens behind this window as you reach it.",
-        "Use the Open button on a step to try that feature. Restart the tour anytime from Getting started in the header.",
+      section: "OBS",
+      title: "Connect OBS",
+      instruction:
+        "In OBS, open Tools > WebSocket Server Settings and enable the server and authentication. Click Show Connect Info to reveal the Server Password, then enter it here, match the port, and click Connect. If this button says Disconnect, you are already connected.",
+      why: "Labatar uses the OBS connection to start and stop real MP4 recordings from the app.",
+      images: [
+        {
+          src: obsToolsMenu,
+          alt: "OBS Tools menu with WebSocket Server Settings highlighted.",
+          caption: "OBS Tools menu",
+        },
+        {
+          src: obsServerSettings,
+          alt: "OBS WebSocket Server Settings with Enable WebSocket server and Enable Authentication checked; private connection fields removed.",
+          caption: "Server settings · Show Connect Info",
+        },
       ],
+      anchor: "obs-connect",
+      fallbackAnchor: "settings-button",
+      fallbackInstruction:
+        "Open Settings > OBS. In OBS, Show Connect Info under WebSocket Server Settings reveals the password to enter here before connecting.",
+      settingsSection: "obs",
     },
     {
-      title: "Set up the game and OBS",
-      purpose:
-        "Settings tells Labatar where to find the game and how to connect to OBS for recording.",
-      how: [
-        "Open the gear icon, then choose the game installation folder under Game folder. Labatar scans it for replays and artwork.",
-        "In the OBS section, connect OBS and check the recording setup before using the recording controls in the header.",
-      ],
-      settingsSection: "game",
-      exploreLabel: "Open settings",
+      section: "OBS",
+      title: "Apply the recording setup",
+      instruction:
+        "Click Apply Labatar OBS setup. This prepares the Labatar profile, recording directory, and scenes. Confirm the panel reports 60 fps before recording.",
+      why: "The recorded video and controller inputs need a consistent capture setup to stay useful together.",
+      anchor: "obs-apply-setup",
+      fallbackAnchor: "obs-connect",
+      fallbackInstruction:
+        "Open Settings and connect OBS first. Apply Labatar OBS setup appears once the connection is ready.",
+      settingsSection: "obs",
     },
     {
-      title: "Match history",
-      purpose:
-        "Browse your sets and games, inspect results, and find the replay you want to watch again.",
-      how: [
-        "Use Import replays if your files are outside the selected game folder. Filter by date or player to narrow the list.",
-        "Open a set to see its games. Right-click a row to show its files, export it, or prepare its replay for in-game playback.",
-      ],
-      tab: 0,
-      guideSection: "matches",
-      exploreLabel: "Open Match history",
-    },
-    ...(recordingTabAvailable
-      ? [
-          {
-            title: "Recordings",
-            purpose:
-              "Watch and organize videos captured through OBS, including clips linked to matches.",
-            how: [
-              "Use the header recording controls to start a manual recording or automatic match recording after connecting OBS.",
-              "Choose a video in Recordings to play it. Use Matches and Other to find it, then right-click a recording for file and management actions.",
-            ],
-            tab: recordingsTabIndex,
-            guideSection: "recording" as const,
-            exploreLabel: "Open Recordings",
-          },
-        ]
-      : []),
-    {
-      title: "Combos",
-      purpose: "Find routes for your character and keep a personal gameplan of combos to practice.",
-      how: [
-        "Choose My gameplan to browse combos by character, support, and starter. Select a combo to see its route and notes.",
-        "Use Raw for a searchable, filterable table. Your personal entries and linked recordings live alongside catalog combos.",
-      ],
+      section: "Record a combo",
+      title: "Choose your pairing",
+      instruction:
+        "Choose the Character and Support portraits for the combo you are about to play. These choices label the new local combo.",
+      anchor: "combo-pairing",
+      fallbackAnchor: "combo-record",
+      fallbackInstruction: "Open My gameplan in Combos to choose a Character and Support.",
       tab: combosTabIndex,
-      exploreLabel: "Open Combos",
     },
-    ...(developerTabsAvailable
-      ? [
-          {
-            title: "Dev-only capture",
-            purpose: "Capture move takes for frame measurements during development.",
-            how: [
-              "Choose a character and support, then arm a move card before recording a take.",
-              "Use the header controls or F9 to record. Review the take before accepting its measurements.",
-            ],
-            tab: captureTabIndex,
-            exploreLabel: "Open Dev-only capture",
-          },
-          {
-            title: "Nerd processing",
-            purpose: "Inspect recording analysis and tune processing for development work.",
-            how: [
-              "Select a recording from the list and run analysis to inspect its detected events and measurements.",
-              "Use the processing configuration controls to adjust detection when reviewing results against the video.",
-            ],
-            tab: nerdProcessingTabIndex,
-            exploreLabel: "Open Nerd processing",
-          },
-          {
-            title: "Tech editor",
-            purpose: "Review and edit character moves, frame data, and pressure notes.",
-            how: [
-              "Choose a character and support to load their move data.",
-              "Select a move to inspect its values and notes; use recordings as evidence when editing measured data.",
-            ],
-            tab: techTabIndex,
-            exploreLabel: "Open Tech editor",
-          },
-        ]
-      : []),
+    {
+      section: "Record a combo",
+      title: "Record local combo",
+      instruction:
+        "Click + Record local combo, then play the combo in game. Labatar records a real OBS video and inputs from the first connected Xbox-compatible controller.",
+      why: "This creates a local draft while recording. A saved MP4 is the evidence needed before you can submit it as a candidate.",
+      anchor: "combo-record",
+      fallbackAnchor: "combo-pairing",
+      tab: combosTabIndex,
+    },
+    {
+      section: "Record a combo",
+      title: "Stop and save",
+      instruction:
+        "After a good attempt, click Stop combo recording here or press F9. Wait for the MP4 to save and link to the combo. The route fills from its recorded inputs without trimming.",
+      anchor: "combo-record",
+      tab: combosTabIndex,
+    },
+    {
+      section: "Record a combo",
+      title: "Review the route",
+      instruction:
+        "Open the recorded combo and review its suggested route against the video. Correct inputs or facing where needed. Trim only if you want the route from a shorter part of the recording.",
+      why: "Controller inputs alone cannot tell whether an attack connected or which way the character faced after a side switch.",
+      anchor: "combo-route",
+      fallbackAnchor: "combo-record",
+      fallbackInstruction:
+        "Select your saved combo to review its route. If it is still recording, stop and wait for the MP4 to save.",
+      tab: combosTabIndex,
+    },
+    {
+      section: "Submit a candidate",
+      title: "Complete the combo details",
+      instruction:
+        "Click Edit combo data. Check the route, fill in damage, choose the screen position, then save and close the editor. Keep the saved MP4 linked to this combo.",
+      why: "A candidate contains the video and catalog-facing combo details. Personal practice tracking stays on your device.",
+      anchor: "combo-edit-data",
+      fallbackAnchor: "combo-record",
+      fallbackInstruction:
+        "Select a recorded local combo to reveal Edit combo data. It needs a linked MP4 before submission.",
+      tab: combosTabIndex,
+    },
+    {
+      section: "Submit a candidate",
+      title: "Upload for review",
+      instruction:
+        "Click Submit as candidate, then confirm the MP4 and combo details you are sending. Combo upload access is required; the app offers Request upload access if your account needs it.",
+      why: "Submission sends the real MP4 and catalog-facing fields to a review queue. It does not publish the combo to the public catalog.",
+      anchor: "combo-submit-candidate",
+      fallbackAnchor: "combo-edit-data",
+      fallbackInstruction:
+        "Select a combo with a saved local MP4 to reveal Submit as candidate. Finish its route and details first.",
+      tab: combosTabIndex,
+    },
+    {
+      section: "Submit a candidate",
+      title: "What happens after upload",
+      instruction:
+        "Use Upstream candidates to load the review queue, then use the Candidate filter or Raw view to find your submission. An editor can review the MP4 and details; YouTube upload and public catalog publication happen later as separate steps.",
+      why: "A local file path works only on your PC. The queue receives a review copy, then YouTube can provide a shareable video for the public catalog after the combo is verified.",
+      anchor: "combo-upstream-candidates",
+      fallbackAnchor: "combo-submit-candidate",
+      tab: combosTabIndex,
+    },
   ];
+  const tourStepForTab = (currentTab: number) => {
+    const index = tourSteps.findIndex((step) => step.tab === currentTab);
+    return index >= 0 ? index : 0;
+  };
+  const [tourStepIndex, setTourStepIndex] = useState(() => tourStepForTab(tab));
   const closeTour = () => {
     localStorage.setItem("labatar-getting-started-v1", "done");
     setTourOpen(false);
   };
   const changeTourStep = (index: number) => {
     setTourStepIndex(index);
-    const nextTab = tourSteps[index]?.tab;
+    const step = tourSteps[index];
+    const nextTab = step?.tab;
     if (nextTab !== undefined) changeTab(nextTab);
+    if (step?.settingsSection) {
+      setSettingsSection(step.settingsSection);
+      setSettingsOpen(true);
+    } else {
+      setSettingsOpen(false);
+    }
   };
-  const exploreTourStep = (step: TourStep) => {
-    closeTour();
-    if (step.tab !== undefined) changeTab(step.tab);
-    if (step.settingsSection) openSettings(step.settingsSection);
-  };
+  useEffect(() => {
+    if (tourOpen && tourSteps[tourStepIndex]?.settingsSection) {
+      setSettingsSection("obs");
+      setSettingsOpen(true);
+    }
+  }, [tourOpen, tourStepIndex]);
   const finishReplayImport = ({ importedCount }: { importedCount: number }) => {
     setReplayImportMessage({
       severity: "success",
@@ -1549,17 +1577,6 @@ function App() {
   const openSettings = (section: "game" | "artwork" | "obs") => {
     setSettingsSection(section);
     setSettingsOpen(true);
-  };
-  const openGuide = (section: GuideSection) => {
-    setGuideSection(section);
-    setGuidesOpen(true);
-  };
-  const confirmGuideRead = (id: GuideEntryId) => {
-    if (readGuideEntryIds.has(id)) return;
-    const next = new Set(readGuideEntryIds);
-    next.add(id);
-    localStorage.setItem("labatar-guide-read-v1", JSON.stringify([...next]));
-    setReadGuideEntryIds(next);
   };
 
   const chooseGameFolder = async () => {
@@ -1812,6 +1829,7 @@ function App() {
       <Box
         sx={{
           mb: 2,
+          flexShrink: 0,
           display: "grid",
           gridTemplateColumns: { xs: "minmax(0, 1fr)", lg: "minmax(0, 1fr) auto minmax(0, 1fr)" },
           alignItems: "center",
@@ -1846,35 +1864,21 @@ function App() {
           <Button
             size="small"
             variant="outlined"
+            data-guide-anchor="guide-launcher"
             onClick={() => {
-              setTourStepIndex(0);
+              setTourStepIndex(tourStepForTab(tab));
               setTourOpen(true);
             }}
           >
             Getting started
           </Button>
-          <Tooltip title={unreadGuideCount ? `${unreadGuideCount} unread guide entries` : "Guides"}>
-            <Button
-              size="small"
-              variant="outlined"
-              onClick={() => openGuide(tab === 0 ? "matches" : "recording")}
-              aria-label={
-                unreadGuideCount ? `Guides, ${unreadGuideCount} unread entries` : "Guides"
-              }
-              startIcon={
-                unreadGuideCount ? (
-                  <NewReleasesIcon
-                    fontSize="small"
-                    sx={{ color: "#111", bgcolor: "#ffd54f", borderRadius: "50%", p: 0.25 }}
-                  />
-                ) : undefined
-              }
-            >
-              Guides
-            </Button>
-          </Tooltip>
           <Tooltip title="Settings">
-            <IconButton size="small" aria-label="Settings" onClick={() => openSettings("obs")}>
+            <IconButton
+              size="small"
+              aria-label="Settings"
+              data-guide-anchor="settings-button"
+              onClick={() => openSettings("obs")}
+            >
               <SettingsIcon fontSize="small" />
             </IconButton>
           </Tooltip>
@@ -1887,25 +1891,12 @@ function App() {
           <ObsRecordingControls onOpenSettings={() => openSettings("obs")} />
         </Stack>
       </Box>
-      <GettingStartedDialog
+      <GettingStartedGuide
         open={tourOpen}
         steps={tourSteps}
         stepIndex={tourStepIndex}
         onStepChange={changeTourStep}
-        onExplore={exploreTourStep}
-        onOpenGuide={(section) => {
-          closeTour();
-          openGuide(section);
-        }}
         onClose={closeTour}
-      />
-      <GuidesDialog
-        open={guidesOpen}
-        section={guideSection}
-        readEntryIds={readGuideEntryIds}
-        onSectionChange={setGuideSection}
-        onConfirmRead={confirmGuideRead}
-        onClose={() => setGuidesOpen(false)}
       />
       {(recordingWork.some((work) => work.phase !== "ready") ||
         reviewableYouTubeUploads.length > 0) && (
@@ -2044,6 +2035,7 @@ function App() {
       <Dialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
+        disableEnforceFocus={tourOpen}
         maxWidth="md"
         fullWidth
         keepMounted
@@ -2134,7 +2126,7 @@ function App() {
               <Typography>OBS</Typography>
             </AccordionSummary>
             <AccordionDetails>
-              <ObsRecordingPanel onOpenGuide={() => openGuide("recording")} />
+              <ObsRecordingPanel />
             </AccordionDetails>
           </Accordion>
         </DialogContent>
@@ -2148,7 +2140,9 @@ function App() {
             display: tab === 0 ? "flex" : "none",
             flex: "1 1 auto",
             minHeight: 0,
+            minWidth: 0,
             flexDirection: "column",
+            overflowY: "auto",
           }}
         >
           <ReplayAnalysis
@@ -2161,7 +2155,6 @@ function App() {
               setGameFolderRefreshToken((current) => current + 1);
               refreshRecordings();
             }}
-            onOpenGuide={openGuide}
           />
         </Box>
       )}
@@ -2185,7 +2178,14 @@ function App() {
         </Box>
       )}
       {developerTabsAvailable && mountedTabs.capture && (
-        <Box sx={{ display: tab === captureTabIndex ? "block" : "none" }}>
+        <Box
+          sx={{
+            display: tab === captureTabIndex ? "block" : "none",
+            flex: "1 1 auto",
+            minHeight: 0,
+            overflowY: "auto",
+          }}
+        >
           <MoveCapturePanel
             active={tab === captureTabIndex}
             blackoutStatus={blackoutStatus}
@@ -2212,12 +2212,26 @@ function App() {
         </Box>
       )}
       {mountedTabs.combos && (
-        <Box sx={{ display: tab === combosTabIndex ? "block" : "none" }}>
-          <CombosPage active={tab === combosTabIndex} />
+        <Box
+          sx={{
+            display: tab === combosTabIndex ? "block" : "none",
+            flex: "1 1 auto",
+            minHeight: 0,
+            overflowY: "auto",
+          }}
+        >
+          <CombosPage active={tab === combosTabIndex} guideStep={tourOpen ? tourStepIndex : null} />
         </Box>
       )}
       {developerTabsAvailable && mountedTabs.tech && (
-        <Box sx={{ display: tab === techTabIndex ? "block" : "none" }}>
+        <Box
+          sx={{
+            display: tab === techTabIndex ? "block" : "none",
+            flex: "1 1 auto",
+            minHeight: 0,
+            overflowY: "auto",
+          }}
+        >
           <TechSection />
         </Box>
       )}
@@ -2298,7 +2312,7 @@ createRoot(root).render(
           backgroundColor: "background.default",
         }}
       >
-        <Box sx={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", p: 2 }}>
+        <Box sx={{ flex: "1 1 auto", minHeight: 0, overflow: "hidden", p: 2 }}>
           <AgGridProvider modules={agGridModules}>
             <ObsRecordingProvider>
               <App />

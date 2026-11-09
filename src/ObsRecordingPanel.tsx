@@ -24,7 +24,7 @@ type CaptureState = {
   autoClipManualChapters: boolean;
 };
 
-export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) {
+export function ObsRecordingPanel() {
   const {
     state,
     settings,
@@ -229,9 +229,6 @@ export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) 
           </Typography>
         </Box>
         <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexShrink: 0 }}>
-          <Button size="small" onClick={onOpenGuide}>
-            Recording guide
-          </Button>
           <Typography
             variant="caption"
             color={recording ? "error.main" : connected ? "success.main" : "text.secondary"}
@@ -268,8 +265,8 @@ export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) 
           </Alert>
         )}
         <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 2 }}>
-          In OBS, enable the WebSocket server under Tools: WebSocket Server Settings. The default
-          port is 4455; use the password configured there.
+          In OBS, open Tools &gt; WebSocket Server Settings and enable the server. Click Show
+          Connect Info to reveal the Server Password for this connection. The default port is 4455.
         </Typography>
 
         <Stack spacing={1.5}>
@@ -326,6 +323,7 @@ export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) 
             />
             <Button
               variant={connected ? "outlined" : "contained"}
+              data-guide-anchor="obs-connect"
               onClick={() => void (connected ? disconnect() : connect())}
               disabled={busy || recording || state.status === "connecting"}
             >
@@ -537,6 +535,7 @@ export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) 
                 />
                 <Button
                   variant="contained"
+                  data-guide-anchor="obs-apply-setup"
                   onClick={() => void setupScenes()}
                   disabled={busy || recording}
                 >
@@ -554,9 +553,9 @@ export function ObsRecordingPanel({ onOpenGuide }: { onOpenGuide: () => void }) 
                 Capture frame rate: {configuredFps ? `${configuredFps} fps` : "unknown"}
                 {recordingFpsMismatch ? " (Labatar requires 60 fps)" : ""}
               </Typography>
-              <Typography variant="caption" color="warning.main">
-                Applying the setup manages the Labatar scene collection and removes extra scenes,
-                sources, and scene items from it.
+              <Typography variant="caption" color="text.secondary">
+                Applying the setup creates or updates Labatar-named OBS entries. Other profiles,
+                collections, scenes, sources, and scene items are kept.
               </Typography>
               {expectedProfileMissing && (
                 <Alert severity="warning">

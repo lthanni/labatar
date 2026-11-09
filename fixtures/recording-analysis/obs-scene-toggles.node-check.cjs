@@ -2,11 +2,21 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   inputNames,
+  isLabatarOwnedName,
   legacySceneToggles,
   sceneTogglesFromItems,
   updateSceneToggles,
   disableAutomaticPressureFramebar,
 } = require("../../electron/obs-scene-toggles.cjs");
+
+void test("recognizes only Labatar-named OBS entries as managed", () => {
+  for (const name of ["Labatar", "Labatar Recording", "Labatar - Game"]) {
+    assert.equal(isLabatarOwnedName(name), true);
+  }
+  for (const name of ["Desktop", "Game", "Labatarized", "labatar Recording", null, 42]) {
+    assert.equal(isLabatarOwnedName(name), false);
+  }
+});
 
 void test("adopts each legacy scene's visible sources", () => {
   assert.deepEqual(legacySceneToggles("Labatar - Game Only"), {

@@ -96,6 +96,15 @@ describe("published catalog", () => {
     ).toBe(2);
   });
 
+  it("drops retired pick fields from a saved catalog snapshot", () => {
+    const catalog = parsePublishedCatalog({
+      fetchedAt: 1,
+      moves: [],
+      combos: [{ ...combo, editorPickReason: "Old pick", editorPickContext: "Midscreen" }],
+    });
+    expect(catalog.combos[0]).toEqual(combo);
+  });
+
   it("preserves a candidate ID for matching the submitter's local draft", () => {
     const sourceCandidateId = "12345678-1234-1234-1234-123456789abc";
     expect(isPublishedCombo({ ...combo, sourceCandidateId })).toBe(true);

@@ -23,7 +23,6 @@ const { autoUpdater } = require("electron-updater");
 const { OBSWebSocket } = require("obs-websocket-js");
 const ffmpegStaticPath = require("ffmpeg-static");
 const { MatchLogWatcher } = require("./match-watcher.cjs");
-const { createInterruptedMatchScanner } = require("./interrupted-match-scanner.cjs");
 const { createUnnamedRecordChapter } = require("./record-chapter.cjs");
 const {
   addGameChaptersToMp4,
@@ -31,6 +30,11 @@ const {
   probeChapters,
 } = require("./game-chapters.cjs");
 const { buildClipExportFfmpegArgs } = require("./clip-export.cjs");
+const {
+  buildComboInputOverlayAss,
+  buildComboInputVideoFilter,
+  probeVideoDimensions,
+} = require("./combo-input-overlay.cjs");
 const { buildFastTrimFfmpegArgs, probeFastTrimStart } = require("./clip-fast-trim.cjs");
 const {
   mapChaptersToTrim,
@@ -45,7 +49,7 @@ const { normalizeYouTubeVideoUrl, readYouTubeVideoUrl } = require("./recording-y
 const { replaceLocalRecordingWithYouTube } = require("./youtube-recording-replacement.cjs");
 const { createYouTubeUploadService } = require("./youtube-upload.cjs");
 const { requireYouTubeUploadAccess } = require("./youtube-access.cjs");
-const { publishCombo, isCatalogOwner } = require("./catalog-publisher.cjs");
+const { publishCombo, unpublishCombo, isCatalogOwner } = require("./catalog-publisher.cjs");
 const {
   candidateServiceStatus,
   requestComboUploadAccess,
@@ -80,6 +84,23 @@ const { createMoveCatalogStore } = require("./move-catalog.cjs");
 const { validateCapturedMoveTake } = require("./move-take-validation.cjs");
 const { createAutomaticMoveRunner } = require("./automatic-move-runner.cjs");
 const { createTrainingInputClient } = require("./training-input-client.cjs");
+const { startComboInputClient } = require("./combo-input-client.cjs");
+const {
+  createComboInputCapture,
+  playerOnePadBindings,
+  trimComboInputCapture,
+} = require("./combo-input-timeline.cjs");
+const {
+  comboInputEditsPath,
+  ensureOriginalComboInput,
+  ensureProcessedComboInput,
+  originalComboInputPath,
+  pressEditKey,
+  processComboInputCapture,
+  processedComboInputPath,
+  readComboInputEdits,
+  writeComboInputEdits,
+} = require("./combo-input-processing.cjs");
 const {
   gameRunning: blackoutGameRunning,
   waitForStableGame: waitForBlackoutGame,
@@ -281,6 +302,7 @@ const {
   sceneName: labatarGameSceneName,
   inputNames: labatarInputNames,
   toggleKeys: labatarToggleKeys,
+  isLabatarOwnedName,
   legacySceneToggles,
   sceneTogglesFromItems,
   updateSceneToggles,
@@ -391,6 +413,7 @@ function logRecordingDiagnostic(event, details = {}) {
 
 function getObsSettings() {
   const saved = readSettings().obs ?? {};
+  const savedProfileName = typeof saved.profileName === "string" ? saved.profileName.trim() : null;
   const savedRecordDirectory =
     typeof saved.recordDirectory === "string" && saved.recordDirectory.trim()
       ? saved.recordDirectory.trim()
@@ -406,10 +429,7 @@ function getObsSettings() {
   return {
     host: typeof saved.host === "string" && saved.host.trim() ? saved.host.trim() : "127.0.0.1",
     port: Number.isInteger(Number(saved.port)) ? Number(saved.port) : 4455,
-    profileName:
-      typeof saved.profileName === "string" && saved.profileName.trim()
-        ? saved.profileName.trim()
-        : defaultObsProfileName,
+    profileName: isLabatarOwnedName(savedProfileName) ? savedProfileName : defaultObsProfileName,
     recordDirectory,
   };
 }
@@ -449,6 +469,7 @@ function publicObsState() {
       source: activeObsRecording?.source ?? null,
       metadata: activeObsRecording?.metadata ?? null,
       startedAt: activeObsRecording?.startedAt ?? null,
+      purpose: activeObsRecording?.comboInput ? "combo" : null,
     },
   };
 }
@@ -508,8 +529,13 @@ function invalidatePreparedObsProfile() {
 
 function getObsProfileTarget(request = {}) {
   const settings = getObsSettings();
+  const profileName =
+    String(request.profileName ?? settings.profileName).trim() || settings.profileName;
+  if (!isLabatarOwnedName(profileName)) {
+    throw new Error("The OBS profile name must begin with Labatar.");
+  }
   return {
-    profileName: String(request.profileName ?? settings.profileName).trim() || settings.profileName,
+    profileName,
     recordDirectory:
       String(request.recordDirectory ?? settings.recordDirectory).trim() ||
       settings.recordDirectory,
@@ -1392,6 +1418,27 @@ function finalizeObsRecording(outputPath, reason) {
 async function finalizeObsRecordingOnce(outputPath, reason) {
   const recording = activeObsRecording;
   activeObsRecording = null;
+  let comboInputCapture = null;
+  if (recording.comboInput) {
+    const input = recording.comboInput;
+    input.endAtMs ??= Date.now();
+    if (input.pauseStartMs !== null) {
+      input.pauses.push({ startMs: input.pauseStartMs, endMs: input.endAtMs });
+      input.pauseStartMs = null;
+    }
+    await input.client.stop().catch((error) => {
+      input.stopError = obsErrorMessage(error);
+    });
+    comboInputCapture = createComboInputCapture({
+      rawStates: input.rawStates,
+      startAtMs: input.startAtMs ?? Date.parse(recording.startedAt),
+      endAtMs: input.endAtMs,
+      pauses: input.pauses,
+      bindings: input.bindings,
+      deviceIndex: input.client.deviceIndex,
+      interrupted: Boolean(input.client.failure || input.stopError),
+    });
+  }
   const noGameStartedName = noGameStartedRecordingBaseName(recording);
   setRecordingWork("obs-save", {
     title: "Saving recording",
@@ -1502,6 +1549,8 @@ async function finalizeObsRecordingOnce(outputPath, reason) {
             replays: recording.replays ?? [],
             capture,
             moveTake: recording.moveTake ?? null,
+            comboInputCapture,
+            comboInputRawStartMs: comboInputCapture ? 0 : null,
             obs: {
               version: obsState.obsVersion,
               webSocketVersion: obsState.obsWebSocketVersion,
@@ -1521,6 +1570,15 @@ async function finalizeObsRecordingOnce(outputPath, reason) {
       manifestPath = recording.manifestPath;
       if (recording.moveTake) {
         await archiveEarlierPendingMoveTakes(namedOutputPath, recording.moveTake);
+      }
+      if (comboInputCapture) {
+        await ensureOriginalComboInput(namedOutputPath, comboInputCapture);
+        await processComboInputs(namedOutputPath, comboInputCapture, 0).catch((error) => {
+          logRecordingDiagnostic("combo-input-processing-failed", {
+            videoPath: namedOutputPath,
+            error: obsErrorMessage(error),
+          });
+        });
       }
     } catch (error) {
       manifestError = obsErrorMessage(error);
@@ -1857,6 +1915,7 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
     fallbackMatchId: options.fallbackMatchId ?? null,
     videoSettings: obsState.videoSettings ? { ...obsState.videoSettings } : null,
     moveTake,
+    comboInput: options.comboInput ?? null,
   };
   sendMoveCaptureState();
   try {
@@ -1870,6 +1929,9 @@ async function startObsRecording(metadata, setup = {}, options = {}) {
     // its output. A lobby can end in the same game-log batch, so wait before
     // allowing its stop handler to run.
     await waitForObsRecordingState(client, true);
+    if (activeObsRecording?.comboInput && activeObsRecording.comboInput.startAtMs === null) {
+      activeObsRecording.comboInput.startAtMs = Date.now();
+    }
     logRecordingDiagnostic("obs-start-record-complete", {
       source,
       matchId: metadata?.matchId ?? null,
@@ -1919,6 +1981,45 @@ async function startManualObsRecording(setup = {}, fileNameBase = null) {
   const moveTake = publicArmedMoveCapture();
   if (moveTake) await requireDevBlackoutCapture(moveTake.characterId);
   return startObsRecording(null, setup, { manual: true, moveTake, fileNameBase });
+}
+
+async function startComboObsRecording(setup = {}) {
+  getObsClient();
+  if (automaticMoveRunIsOpen())
+    throw new Error("Finish or cancel the automatic move capture pass first.");
+  if (obsState.automation.enabled)
+    throw new Error("Stop automatic match recording before recording a combo.");
+  if (publicArmedMoveCapture())
+    throw new Error("Disarm the move take before recording a combo lab session.");
+  if (obsState.recording.active || activeObsRecording)
+    throw new Error("Stop the current OBS recording first.");
+  const gameRoot = getReplayFolder();
+  const configPath = gameRoot ? path.join(gameRoot, "data", "button_config.ini") : null;
+  const bindings = configPath
+    ? playerOnePadBindings(await fs.promises.readFile(configPath, "utf8").catch(() => ""))
+    : {};
+  const rawStates = [];
+  const client = await startComboInputClient({ onState: (state) => rawStates.push(state) });
+  const comboInput = {
+    client,
+    rawStates,
+    bindings,
+    startAtMs: null,
+    endAtMs: null,
+    pauseStartMs: null,
+    pauses: [],
+  };
+  try {
+    return await startObsRecording(null, setup, {
+      manual: true,
+      fileNameBase: `Combo lab ${new Date().toISOString().replace(/[:.]/g, "-")}`,
+      tags: { match: [], lab: ["new-combos"], combo: true, pressure: false },
+      comboInput,
+    });
+  } catch (error) {
+    await client.stop().catch(() => undefined);
+    throw error;
+  }
 }
 
 async function waitForObsRecordingState(client, expectedActive, timeoutMs = 5000) {
@@ -2350,6 +2451,20 @@ async function connectToObs(request = {}) {
   obsClient = client;
   client.on("RecordStateChanged", (recordStatus) => {
     if (obsClient !== client) return;
+    if (activeObsRecording?.comboInput) {
+      const input = activeObsRecording.comboInput;
+      const now = Date.now();
+      if (recordStatus.outputState === "OBS_WEBSOCKET_OUTPUT_STARTED") {
+        input.startAtMs ??= now;
+      } else if (recordStatus.outputState === "OBS_WEBSOCKET_OUTPUT_PAUSED") {
+        input.pauseStartMs ??= now;
+      } else if (recordStatus.outputState === "OBS_WEBSOCKET_OUTPUT_STOPPED") {
+        input.endAtMs ??= now;
+      } else if (input.pauseStartMs !== null && recordStatus.outputActive) {
+        input.pauses.push({ startMs: input.pauseStartMs, endMs: now });
+        input.pauseStartMs = null;
+      }
+    }
     if (recordStatus.outputState === "OBS_WEBSOCKET_OUTPUT_STARTED") {
       setCaptureState({ chapterLastAddedAt: null });
     }
@@ -2695,16 +2810,11 @@ async function setupLabatarObsScenes(request = {}) {
     desktopAudio: desktopAudioInputName,
     microphone: micInputName,
   } = labatarInputNames;
-  const managedInputNames = new Set([
-    gameInputName,
-    ...(separateGameAudio ? [gameAudioInputName] : []),
-    desktopAudioInputName,
-    micInputName,
-  ]);
   const sceneList = await client.call("GetSceneList");
   const existingSceneNames = new Set((sceneList.scenes ?? []).map((scene) => scene.sceneName));
   const selectedSceneName =
-    current.sceneCollections?.currentSceneCollectionName === labatarSceneCollectionName
+    current.sceneCollections?.currentSceneCollectionName === labatarSceneCollectionName &&
+    isLabatarOwnedName(current.currentScene?.sceneName)
       ? current.currentScene?.sceneName
       : null;
   let desiredToggles = legacySceneToggles(selectedSceneName ?? "Labatar - Game Only");
@@ -2726,11 +2836,6 @@ async function setupLabatarObsScenes(request = {}) {
   }
   if (obsState.automation.enabled) desiredToggles.pressureFramebar = false;
   await client.call("SetCurrentProgramScene", { sceneName: gameScene });
-  for (const scene of sceneList.scenes ?? []) {
-    if (scene.sceneName !== gameScene) {
-      await client.call("RemoveScene", { sceneName: scene.sceneName });
-    }
-  }
 
   async function ensureInput(sceneName, inputName, inputKind, inputSettings) {
     const inputList = await client.call("GetInputList");
@@ -2791,24 +2896,6 @@ async function setupLabatarObsScenes(request = {}) {
     };
   }
 
-  const existingInputs = await client.call("GetInputList");
-  for (const input of existingInputs.inputs ?? []) {
-    const inputKind = input.inputKind ?? input.unversionedInputKind;
-    const expectedKind =
-      input.inputName === gameInputName
-        ? "game_capture"
-        : input.inputName === gameAudioInputName
-          ? "wasapi_process_output_capture"
-          : input.inputName === desktopAudioInputName
-            ? "wasapi_output_capture"
-            : input.inputName === micInputName
-              ? "wasapi_input_capture"
-              : null;
-    if (!managedInputNames.has(input.inputName) || inputKind !== expectedKind) {
-      await client.call("RemoveInput", { inputName: input.inputName });
-    }
-  }
-
   await ensureInput(gameScene, gameInputName, "game_capture", gameCaptureSettings);
   await ensureLabatarVideoSettings(client, version);
   const outputResolution = await resizeOutputToSourceSize(gameScene, gameInputName);
@@ -2832,17 +2919,19 @@ async function setupLabatarObsScenes(request = {}) {
   // the full game image; the upper item contains only the P2 framebar.
   let pressureItems =
     (await client.call("GetSceneItemList", { sceneName: gameScene })).sceneItems ?? [];
-  const desiredInputNames = new Set(managedInputNames);
-  for (const item of pressureItems) {
-    if (!desiredInputNames.has(item.sourceName)) {
-      await client.call("RemoveSceneItem", {
-        sceneName: gameScene,
-        sceneItemId: item.sceneItemId,
-      });
+  if (!separateGameAudio) {
+    // An older Labatar setup may still have a separate game-audio item.
+    // Keep the source but mute its item while the game capture supplies audio.
+    for (const item of pressureItems.filter((item) => item.sourceName === gameAudioInputName)) {
+      if (item.sceneItemEnabled) {
+        await client.call("SetSceneItemEnabled", {
+          sceneName: gameScene,
+          sceneItemId: item.sceneItemId,
+          sceneItemEnabled: false,
+        });
+      }
     }
   }
-  pressureItems =
-    (await client.call("GetSceneItemList", { sceneName: gameScene })).sceneItems ?? [];
   let gameItems = pressureGameItems(pressureItems, gameInputName);
   if (gameItems.length === 1) {
     await client.call("CreateSceneItem", {
@@ -2855,9 +2944,10 @@ async function setupLabatarObsScenes(request = {}) {
     (await client.call("GetSceneItemList", { sceneName: gameScene })).sceneItems ?? [];
   gameItems = pressureGameItems(pressureItems, gameInputName);
   for (const extra of gameItems.slice(2)) {
-    await client.call("RemoveSceneItem", {
+    await client.call("SetSceneItemEnabled", {
       sceneName: gameScene,
       sceneItemId: extra.sceneItemId,
+      sceneItemEnabled: false,
     });
   }
   const [baseItem, overlayItem] = gameItems;
@@ -2892,9 +2982,10 @@ async function setupLabatarObsScenes(request = {}) {
   for (const inputName of audioNames) {
     const matching = pressureItems.filter((item) => item.sourceName === inputName);
     for (const extra of matching.slice(1)) {
-      await client.call("RemoveSceneItem", {
+      await client.call("SetSceneItemEnabled", {
         sceneName: gameScene,
         sceneItemId: extra.sceneItemId,
+        sceneItemEnabled: false,
       });
     }
     if (matching[0]) audioItems.push(matching[0]);
@@ -3928,6 +4019,9 @@ ipcMain.handle("obs:start-recording", async (_, request) => {
 ipcMain.handle("obs:start-manual-recording", async (_, request) => {
   return startManualObsRecording(request?.setup ?? {}, request?.fileNameBase);
 });
+ipcMain.handle("obs:start-combo-recording", async (_, request) => {
+  return startComboObsRecording(request?.setup ?? {});
+});
 ipcMain.handle("obs:stop-recording", async () => {
   if (automaticMoveRunIsOpen()) {
     throw new Error("Pause or cancel the automatic move capture pass to stop its recording.");
@@ -4130,7 +4224,6 @@ async function findLogFiles(folder) {
 
 async function readReplayRatingsFromLog(logFile) {
   const ratingsByReplayName = new Map();
-  const interruptedScanner = createInterruptedMatchScanner();
   let pendingRatings = null;
   const pendingVolatility = {};
   const pendingCharacters = {};
@@ -4138,7 +4231,6 @@ async function readReplayRatingsFromLog(logFile) {
   const input = fs.createReadStream(logFile, { encoding: "latin1" });
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
   for await (const line of lines) {
-    interruptedScanner.processLine(line);
     const glicko = parseSetNewMatchGlicko(line);
     if (glicko) {
       if (glicko.player === "player1") {
@@ -4177,34 +4269,29 @@ async function readReplayRatingsFromLog(logFile) {
       pendingMmrChange = null;
     }
   }
-  return { ratings: ratingsByReplayName, interruptions: interruptedScanner.finish() };
+  return ratingsByReplayName;
 }
 
 async function readReplayRatings(folder, onProgress, cache) {
   const logFiles = await findLogFiles(folder);
   const ratingsByReplayName = new Map();
-  const interruptedMatchIds = new Set();
   const currentLogKeys = new Set();
   for (const [index, logFile] of logFiles.entries()) {
     const cacheKey = path.resolve(logFile).toLowerCase();
     currentLogKeys.add(cacheKey);
     let ratings = null;
-    let interruptions = [];
     try {
       const stat = await fs.promises.stat(logFile);
       const fingerprint = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
       const cached = cache?.ratingLogs.get(cacheKey);
-      if (cached?.fingerprint === fingerprint && Array.isArray(cached.interruptions)) {
+      if (cached?.fingerprint === fingerprint) {
         ratings = cached.ratings;
-        interruptions = cached.interruptions;
         cache.ratingLogs.delete(cacheKey);
         cache.ratingLogs.set(cacheKey, cached);
       } else {
-        const scanned = await readReplayRatingsFromLog(logFile);
-        ratings = scanned.ratings;
-        interruptions = scanned.interruptions;
+        ratings = await readReplayRatingsFromLog(logFile);
         if (cache) {
-          cache.ratingLogs.set(cacheKey, { fingerprint, ratings, interruptions });
+          cache.ratingLogs.set(cacheKey, { fingerprint, ratings });
           cache.dirty = true;
         }
       }
@@ -4214,7 +4301,6 @@ async function readReplayRatings(folder, onProgress, cache) {
     for (const [replayName, replayRatings] of ratings ?? []) {
       ratingsByReplayName.set(replayName, replayRatings);
     }
-    for (const matchId of interruptions) interruptedMatchIds.add(matchId);
     onProgress?.(index + 1, logFiles.length);
   }
   if (cache) {
@@ -4229,7 +4315,7 @@ async function readReplayRatings(folder, onProgress, cache) {
       cache.dirty = true;
     }
   }
-  return { ratingsByReplayName, interruptedMatchIds: [...interruptedMatchIds] };
+  return ratingsByReplayName;
 }
 
 async function parseReplayFile(
@@ -4570,6 +4656,21 @@ function recordingManifestPathForVideo(videoPath) {
   return path.join(path.dirname(videoPath), `${path.basename(videoPath)}.labatar.json`);
 }
 
+function comboInputRawOffset(manifest, localStartMs = 0) {
+  if (!manifest?.comboInputCapture) return null;
+  const base = Number.isFinite(manifest.comboInputRawStartMs)
+    ? manifest.comboInputRawStartMs
+    : !manifest.clip && !manifest.comboInputTrimmed
+      ? 0
+      : null;
+  return base === null ? null : base + Math.round(localStartMs);
+}
+
+async function processComboInputs(videoPath, capture, rawStartMs, options = {}) {
+  if (!capture) return null;
+  return ensureProcessedComboInput(videoPath, capture, rawStartMs, options);
+}
+
 function resolveFfmpegPath() {
   if (typeof ffmpegStaticPath !== "string" || !ffmpegStaticPath) {
     throw new Error("The bundled FFmpeg encoder is unavailable.");
@@ -4578,9 +4679,9 @@ function resolveFfmpegPath() {
   return fs.existsSync(unpackedPath) ? unpackedPath : ffmpegStaticPath;
 }
 
-function runFfmpeg(args) {
+function runFfmpeg(args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(resolveFfmpegPath(), args, { windowsHide: true });
+    const child = spawn(resolveFfmpegPath(), args, { windowsHide: true, ...options });
     let errorOutput = "";
     child.stderr.on("data", (chunk) => {
       errorOutput += chunk.toString();
@@ -4781,24 +4882,51 @@ const clipExportSourceCounts = new Map();
 async function exportRecordingClip(request = {}, options = {}) {
   const recordingId = String(request.recordingId ?? "");
   const sourcePath = resolveRecordingPath(recordingId);
-  if (clipTrimJobs.has(sourcePath)) {
-    throw new Error("Wait for this clip's trim to finish before exporting from it.");
+  const lockedPaths = [...new Set([sourcePath, options.inputEditSourcePath].filter(Boolean))];
+  if (lockedPaths.some((filePath) => clipTrimJobs.has(filePath))) {
+    throw new Error("Wait for recording or input editing to finish before exporting.");
   }
-  clipExportSourceCounts.set(sourcePath, (clipExportSourceCounts.get(sourcePath) ?? 0) + 1);
+  for (const filePath of lockedPaths) {
+    clipExportSourceCounts.set(filePath, (clipExportSourceCounts.get(filePath) ?? 0) + 1);
+  }
   try {
     return await exportRecordingClipFromSource(request, options, sourcePath);
   } finally {
-    const remaining = (clipExportSourceCounts.get(sourcePath) ?? 1) - 1;
-    if (remaining > 0) clipExportSourceCounts.set(sourcePath, remaining);
-    else clipExportSourceCounts.delete(sourcePath);
+    for (const filePath of lockedPaths) {
+      const remaining = (clipExportSourceCounts.get(filePath) ?? 1) - 1;
+      if (remaining > 0) clipExportSourceCounts.set(filePath, remaining);
+      else clipExportSourceCounts.delete(filePath);
+    }
   }
 }
 
 async function exportRecordingClipFromSource(request, options, sourcePath) {
   const sourceStat = await fs.promises.stat(sourcePath).catch(() => null);
   if (!sourceStat?.isFile()) throw new Error("The source recording no longer exists.");
+  const sourceManifestContent = await fs.promises
+    .readFile(recordingManifestPathForVideo(sourcePath), "utf8")
+    .catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+  const sourceManifest = sourceManifestContent ? JSON.parse(sourceManifestContent) : null;
+  if (options.inputOverlay && sourceManifest?.inputOverlayRendered === true) {
+    throw new Error(
+      "This video already has an input overlay. Render again from its source recording.",
+    );
+  }
+  if (
+    sourceManifest?.comboInputCapture &&
+    !sourceManifest.clip &&
+    !sourceManifest.comboInputTrimmed
+  ) {
+    await ensureOriginalComboInput(sourcePath, sourceManifest.comboInputCapture);
+  }
 
   const fast = request.mode === "fast";
+  if (options.inputOverlay && fast) {
+    throw new Error("Rendering an input overlay requires precise export.");
+  }
   if (request.mode !== undefined && request.mode !== "fast" && request.mode !== "precise") {
     throw new Error("Unknown export mode.");
   }
@@ -4838,11 +4966,45 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
     "recording",
   );
   const rangeLabel = `${clipTimeForFilename(actualStart)} to ${clipTimeForFilename(endTime)}`;
-  const baseName = `${sourceStem} - ${Number.isFinite(options.manualChapterStartMs) ? "F10 clip" : "clip"} ${rangeLabel}`;
+  const baseName = `${sourceStem} - ${options.inputOverlay ? "inputs" : Number.isFinite(options.manualChapterStartMs) ? "F10 clip" : "clip"} ${rangeLabel}`;
   const outputPath = await availableRecordingPath(folder, baseName);
   const duration = endTime - startTime;
+  const subtitlePath = options.inputOverlay
+    ? path.join(folder, `.labatar-input-overlay-${randomUUID()}.ass`)
+    : null;
+  const inputEditSourcePath = options.inputEditSourcePath ?? sourcePath;
+  let overlayProcessed = null;
 
   try {
+    if (subtitlePath) {
+      if (!sourceManifest?.comboInputCapture) {
+        throw new Error("This recording has no captured combo inputs to render.");
+      }
+      overlayProcessed = options.inputEditSourcePath
+        ? processComboInputCapture(
+            sourceManifest.comboInputCapture,
+            new Date().toISOString(),
+            comboInputRawOffset(sourceManifest),
+            await readComboInputEdits(inputEditSourcePath),
+          )
+        : await ensureProcessedComboInput(
+            sourcePath,
+            sourceManifest.comboInputCapture,
+            comboInputRawOffset(sourceManifest),
+          );
+      const subtitle = buildComboInputOverlayAss(
+        overlayProcessed,
+        sourceManifest.comboInputCapture,
+        duration * 1000,
+      );
+      await fs.promises.writeFile(subtitlePath, subtitle, { encoding: "utf8", flag: "wx" });
+    }
+    let videoFilter = null;
+    if (subtitlePath) {
+      // Probe the source file rather than trusting sidecar dimensions after earlier trims.
+      const { width, height } = await probeVideoDimensions(resolveFfmpegPath(), sourcePath);
+      videoFilter = buildComboInputVideoFilter(width, height, path.basename(subtitlePath));
+    }
     await runFfmpeg(
       fast
         ? buildFastTrimFfmpegArgs({
@@ -4852,7 +5014,14 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
             creationTime,
             outputPath,
           })
-        : buildClipExportFfmpegArgs({ sourcePath, startTime, duration, outputPath }),
+        : buildClipExportFfmpegArgs({
+            sourcePath,
+            startTime,
+            duration,
+            outputPath,
+            ...(videoFilter ? { videoFilter } : {}),
+          }),
+      subtitlePath ? { cwd: folder } : {},
     );
     if (fast) {
       const exportedProbe = await probeChapters(resolveFfmpegPath(), outputPath);
@@ -4863,6 +5032,8 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
   } catch (error) {
     await fs.promises.rm(outputPath, { force: true }).catch(() => undefined);
     throw error;
+  } finally {
+    if (subtitlePath) await fs.promises.rm(subtitlePath, { force: true }).catch(() => undefined);
   }
 
   const outputId = path.relative(folder, outputPath).split(path.sep).join("/");
@@ -4877,6 +5048,7 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
       : {}),
   };
   const manifestPath = recordingManifestPathForVideo(outputPath);
+  const clipInputRawStartMs = comboInputRawOffset(sourceManifest, actualStart * 1000);
   try {
     await fs.promises.writeFile(
       manifestPath,
@@ -4888,20 +5060,54 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
           metadata: null,
           games: [],
           replays: [],
-          tags: { match: [], lab: [], combo: false, pressure: false },
+          tags: {
+            match: [],
+            lab: [],
+            combo: Boolean(sourceManifest?.comboInputCapture),
+            pressure: false,
+          },
           clip,
+          inputOverlayRendered: options.inputOverlay === true,
+          ...(overlayProcessed
+            ? { inputOverlayEditsSha256: overlayProcessed.source.editsSha256 }
+            : {}),
+          comboInputRawStartMs: clipInputRawStartMs,
+          comboInputCapture: trimComboInputCapture(
+            sourceManifest?.comboInputCapture,
+            actualStart,
+            endTime,
+          ),
         },
         null,
         2,
       ),
       "utf8",
     );
+    await fs.promises
+      .copyFile(comboInputEditsPath(inputEditSourcePath), comboInputEditsPath(outputPath))
+      .catch((error) => {
+        if (error?.code !== "ENOENT") throw error;
+      });
   } catch (error) {
     await fs.promises.rm(outputPath, { force: true }).catch(() => undefined);
+    await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined);
+    await fs.promises.rm(comboInputEditsPath(outputPath), { force: true }).catch(() => undefined);
     throw new Error(
       `Clip was encoded but its metadata could not be saved: ${obsErrorMessage(error)}`,
     );
   }
+
+  const processedComboInput = await processComboInputs(
+    outputPath,
+    trimComboInputCapture(sourceManifest?.comboInputCapture, actualStart, endTime),
+    clipInputRawStartMs,
+  ).catch((error) => {
+    logRecordingDiagnostic("combo-input-processing-failed", {
+      videoPath: outputPath,
+      error: obsErrorMessage(error),
+    });
+    return null;
+  });
 
   const stat = await fs.promises.stat(outputPath);
   return {
@@ -4913,10 +5119,24 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
     metadata: null,
     games: [],
     replays: [],
-    tags: { match: [], lab: [], combo: false, pressure: false },
+    tags: {
+      match: [],
+      lab: [],
+      combo: Boolean(sourceManifest?.comboInputCapture),
+      pressure: false,
+    },
     replayPath: null,
     replayFileName: null,
     clip,
+    inputOverlayRendered: options.inputOverlay === true,
+    inputOverlayEditsSha256: overlayProcessed?.source.editsSha256 ?? null,
+    comboInputCapture: trimComboInputCapture(
+      sourceManifest?.comboInputCapture,
+      actualStart,
+      endTime,
+    ),
+    comboInputRawStartMs: clipInputRawStartMs,
+    processedComboInput,
   };
 }
 
@@ -5072,6 +5292,22 @@ async function trimRecordingClip(request = {}) {
       );
     }
     const nextManifest = validateRange(actualStart);
+    if (manifest.comboInputCapture) {
+      if (!manifest.clip && !manifest.comboInputTrimmed) {
+        await ensureOriginalComboInput(videoPath, manifest.comboInputCapture);
+      }
+      nextManifest.comboInputCapture = trimComboInputCapture(
+        manifest.comboInputCapture,
+        actualStart,
+        endTime,
+      );
+      nextManifest.comboInputRawStartMs = comboInputRawOffset(manifest, actualStart * 1000);
+      nextManifest.comboInputTrimmed = true;
+      nextManifest.tags = {
+        ...normalizeRecordingTags(manifest.tags),
+        combo: true,
+      };
+    }
     tempFolder = await fs.promises.mkdtemp(path.join(path.dirname(videoPath), ".labatar-trim-"));
     const items = [];
     const sourcePaths = await findRecordingFiles(folder);
@@ -5248,6 +5484,19 @@ async function trimRecordingClip(request = {}) {
     await updateLinkedClips();
 
     await replaceTrimmedFiles(items);
+    if (nextManifest.comboInputCapture) {
+      await processComboInputs(
+        videoPath,
+        nextManifest.comboInputCapture,
+        comboInputRawOffset(nextManifest),
+        { force: true },
+      ).catch((error) => {
+        logRecordingDiagnostic("combo-input-processing-after-trim-failed", {
+          videoPath,
+          error: obsErrorMessage(error),
+        });
+      });
+    }
     return { recording: await getRecordedVideoForPath(videoPath), actualStartTime: actualStart };
   } catch (error) {
     preserveTempFolder = error?.preserveTempFolder === true;
@@ -5347,6 +5596,7 @@ async function processManualChapterClips(videoPath) {
 async function renameRecording(request = {}, updateManifest = null) {
   const recordingId = String(request.recordingId ?? "");
   const currentPath = resolveRecordingPath(recordingId);
+  if (clipTrimJobs.has(currentPath)) throw new Error("Wait for the clip trim to finish.");
   const currentStat = await fs.promises.stat(currentPath).catch(() => null);
   const manifestPath = recordingManifestPathForVideo(currentPath);
   const hasManifest = await fs.promises
@@ -5395,8 +5645,11 @@ async function renameRecording(request = {}, updateManifest = null) {
   const nextName = path.basename(availableTargetPath);
   const targetManifestPath = recordingManifestPathForVideo(availableTargetPath);
 
+  if (clipTrimJobs.has(currentPath)) throw new Error("Wait for the clip trim to finish.");
   if (!youtubeOnly) await fs.promises.rename(currentPath, availableTargetPath);
   let updatedLinkedManifests = [];
+  let renamedOriginalComboInput = false;
+  let renamedComboInputEdits = false;
   try {
     if (hasManifest) {
       await fs.promises.rename(manifestPath, targetManifestPath);
@@ -5405,7 +5658,37 @@ async function renameRecording(request = {}, updateManifest = null) {
       await fs.promises.writeFile(targetManifestPath, JSON.stringify(manifest, null, 2), "utf8");
     }
     updatedLinkedManifests = await updateLinkedClipManifests(folder, previousId, nextId, nextName);
+    if (manifest?.comboInputCapture) {
+      try {
+        await fs.promises.rename(
+          originalComboInputPath(currentPath),
+          originalComboInputPath(availableTargetPath),
+        );
+        renamedOriginalComboInput = true;
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      try {
+        await fs.promises.rename(
+          comboInputEditsPath(currentPath),
+          comboInputEditsPath(availableTargetPath),
+        );
+        renamedComboInputEdits = true;
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+    }
   } catch (error) {
+    if (renamedComboInputEdits) {
+      await fs.promises
+        .rename(comboInputEditsPath(availableTargetPath), comboInputEditsPath(currentPath))
+        .catch(() => undefined);
+    }
+    if (renamedOriginalComboInput) {
+      await fs.promises
+        .rename(originalComboInputPath(availableTargetPath), originalComboInputPath(currentPath))
+        .catch(() => undefined);
+    }
     for (const { manifestPath, originalContent } of updatedLinkedManifests.reverse()) {
       await fs.promises.writeFile(manifestPath, originalContent, "utf8").catch(() => undefined);
     }
@@ -5416,6 +5699,19 @@ async function renameRecording(request = {}, updateManifest = null) {
       await fs.promises.rename(targetManifestPath, manifestPath).catch(() => undefined);
     }
     throw new Error(`The recording was not fully renamed: ${obsErrorMessage(error)}`);
+  }
+  if (manifest?.comboInputCapture) {
+    await ensureProcessedComboInput(
+      availableTargetPath,
+      manifest.comboInputCapture,
+      comboInputRawOffset(manifest),
+    ).catch((error) => {
+      logRecordingDiagnostic("combo-input-processing-failed", {
+        videoPath: availableTargetPath,
+        error: obsErrorMessage(error),
+      });
+    });
+    await fs.promises.rm(processedComboInputPath(currentPath), { force: true });
   }
   return getRecordedVideoForPath(availableTargetPath, folder);
 }
@@ -5528,6 +5824,9 @@ async function deleteRecording(request = {}) {
 
   if (currentStat?.isFile()) await fs.promises.rm(currentPath, { force: true });
   await fs.promises.rm(recordingManifestPathForVideo(currentPath), { force: true });
+  await fs.promises.rm(originalComboInputPath(currentPath), { force: true });
+  await fs.promises.rm(processedComboInputPath(currentPath), { force: true });
+  await fs.promises.rm(comboInputEditsPath(currentPath), { force: true });
   return { id: recordingId };
 }
 
@@ -6074,6 +6373,33 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
   try {
     const content = await fs.promises.readFile(recordingManifestPathForVideo(videoPath), "utf8");
     const manifest = JSON.parse(content);
+    const comboInputCapture =
+      manifest?.comboInputCapture?.schemaVersion === 1 &&
+      Array.isArray(manifest.comboInputCapture.states)
+        ? manifest.comboInputCapture
+        : null;
+    const comboInputRawStartMs = comboInputRawOffset(manifest);
+    let processedComboInput = null;
+    if (comboInputCapture) {
+      try {
+        processedComboInput = await ensureProcessedComboInput(
+          videoPath,
+          comboInputCapture,
+          comboInputRawStartMs,
+        );
+      } catch (error) {
+        logRecordingDiagnostic("combo-input-processing-failed", {
+          videoPath,
+          error: obsErrorMessage(error),
+        });
+      }
+    }
+    const originalComboInputAvailable = comboInputCapture
+      ? await fs.promises.access(originalComboInputPath(videoPath)).then(
+          () => true,
+          () => false,
+        )
+      : false;
     const clip = manifest?.clip;
     const startTime = Number(clip?.startTime);
     const endTime = Number(clip?.endTime);
@@ -6143,6 +6469,15 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
           ? manifest.youtubeMedia.durationMs
           : null,
       moveTake,
+      comboInputCapture,
+      comboInputRawStartMs,
+      processedComboInput,
+      inputOverlayRendered: manifest?.inputOverlayRendered === true,
+      inputOverlayEditsSha256:
+        typeof manifest?.inputOverlayEditsSha256 === "string"
+          ? manifest.inputOverlayEditsSha256
+          : null,
+      originalComboInputAvailable,
       clip:
         typeof clip?.sourceRecordingId === "string" &&
         clip.sourceRecordingId.trim() &&
@@ -6178,6 +6513,11 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
       youtubeUrl: null,
       youtubeDurationMs: null,
       moveTake: null,
+      comboInputCapture: null,
+      comboInputRawStartMs: null,
+      processedComboInput: null,
+      inputOverlayRendered: false,
+      originalComboInputAvailable: false,
       clip: null,
     };
   }
@@ -6273,7 +6613,7 @@ async function loadReplayScanCache(folder) {
         cache.ratingLogs = new Map(
           stored.ratingLogs.map(([key, entry]) => [
             key,
-            { ...entry, ratings: new Map(entry.ratings) },
+            { fingerprint: entry.fingerprint, ratings: new Map(entry.ratings) },
           ]),
         );
         cache.snapshot = stored.snapshot;
@@ -6303,7 +6643,6 @@ async function saveReplayScanCache(cache) {
       {
         fingerprint: entry.fingerprint,
         ratings: [...entry.ratings],
-        interruptions: entry.interruptions,
       },
     ]),
     snapshot: cache.snapshot,
@@ -6366,7 +6705,7 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
     const seenReplayIds = new Set();
     let duplicateCount = 0;
     event.sender.send("replays:scan-progress", { completed: 0, total: 0, phase: "logs" });
-    const { ratingsByReplayName, interruptedMatchIds } = await readReplayRatings(
+    const ratingsByReplayName = await readReplayRatings(
       resolvedFolder,
       (completed, logTotal) => {
         event.sender.send("replays:scan-progress", {
@@ -6431,7 +6770,7 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
       playerCounts[game.player1] = (playerCounts[game.player1] ?? 0) + 1;
       playerCounts[game.player2] = (playerCounts[game.player2] ?? 0) + 1;
     }
-    const result = { games, playerCounts, duplicateCount, interruptedMatchIds };
+    const result = { games, playerCounts, duplicateCount };
     if (JSON.stringify(scanCache.snapshot) !== JSON.stringify(result)) scanCache.dirty = true;
     scanCache.snapshot = result;
     await saveReplayScanCache(scanCache).catch((error) => {
@@ -6577,6 +6916,127 @@ ipcMain.handle("recordings:list", async (_, request) => {
   }
   recordings.sort((left, right) => right.modifiedAt - left.modifiedAt);
   return { folder, recordings };
+});
+
+ipcMain.handle("recordings:get-original-combo-inputs", async (_, request) => {
+  const videoPath = resolveRecordingPath(String(request?.recordingId ?? ""));
+  const rawPath = originalComboInputPath(videoPath);
+  const stat = await fs.promises.lstat(rawPath).catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!stat) return null;
+  if (!stat.isFile() || stat.size > 64 * 1024 * 1024) {
+    throw new Error("The preserved combo input file is invalid.");
+  }
+  const capture = JSON.parse(await fs.promises.readFile(rawPath, "utf8"));
+  if (capture?.schemaVersion !== 1 || !Array.isArray(capture.states)) {
+    throw new Error("The preserved combo input file is invalid.");
+  }
+  return capture;
+});
+
+ipcMain.handle("recordings:reprocess-combo-inputs", async (_, request) => {
+  const videoPath = resolveRecordingPath(String(request?.recordingId ?? ""));
+  if (path.extname(videoPath).toLowerCase() !== ".mp4") {
+    throw new Error("Only local MP4 recordings have combo inputs.");
+  }
+  if (
+    clipTrimJobs.has(videoPath) ||
+    clipExportSourceCounts.has(videoPath) ||
+    gameChapterJobs.has(videoPath) ||
+    manualChapterClipJobs.has(videoPath)
+  ) {
+    throw new Error("Wait for recording or chapter processing to finish.");
+  }
+  clipTrimJobs.add(videoPath);
+  try {
+    const videoStat = await fs.promises.lstat(videoPath);
+    const manifestPath = recordingManifestPathForVideo(videoPath);
+    const manifestStat = await fs.promises.lstat(manifestPath);
+    if (!videoStat.isFile() || !manifestStat.isFile()) {
+      throw new Error("The recording and its metadata must be regular files.");
+    }
+    const manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+    const capture = manifest?.comboInputCapture;
+    if (capture?.schemaVersion !== 1 || !Array.isArray(capture.states)) {
+      throw new Error("This recording has no raw combo input timeline to process.");
+    }
+    const processed = await processComboInputs(videoPath, capture, comboInputRawOffset(manifest), {
+      force: true,
+    });
+    if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+    return processed;
+  } finally {
+    clipTrimJobs.delete(videoPath);
+  }
+});
+
+ipcMain.handle("recordings:set-combo-input-edit", async (_, request) => {
+  const videoPath = resolveRecordingPath(String(request?.recordingId ?? ""));
+  if (path.extname(videoPath).toLowerCase() !== ".mp4") {
+    throw new Error("Only local MP4 recordings have combo inputs.");
+  }
+  if (
+    clipTrimJobs.has(videoPath) ||
+    clipExportSourceCounts.has(videoPath) ||
+    gameChapterJobs.has(videoPath) ||
+    manualChapterClipJobs.has(videoPath)
+  ) {
+    throw new Error("Wait for recording or chapter processing to finish.");
+  }
+  clipTrimJobs.add(videoPath);
+  try {
+    const manifestPath = recordingManifestPathForVideo(videoPath);
+    const [videoStat, manifestStat] = await Promise.all([
+      fs.promises.lstat(videoPath),
+      fs.promises.lstat(manifestPath),
+    ]);
+    if (!videoStat.isFile() || !manifestStat.isFile()) {
+      throw new Error("The recording and its metadata must be regular files.");
+    }
+    const manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+    const capture = manifest?.comboInputCapture;
+    if (capture?.schemaVersion !== 1 || !Array.isArray(capture.states)) {
+      throw new Error("This recording has no raw combo input timeline to process.");
+    }
+    const rawStartMs = comboInputRawOffset(manifest);
+    const timeMs = Number(request?.timeMs);
+    const physicalButton = String(request?.physicalButton ?? "");
+    const states = capture.states;
+    if (
+      !Number.isSafeInteger(timeMs) ||
+      timeMs < 0 ||
+      !/^[A-Za-z0-9]+$/.test(physicalButton) ||
+      !states.some(
+        (state, index) =>
+          index > 0 &&
+          state.timeMs === timeMs &&
+          state.buttons?.includes(physicalButton) &&
+          !states[index - 1].buttons?.includes(physicalButton),
+      )
+    ) {
+      throw new Error("Choose a button press in this recording.");
+    }
+    const edit = request?.edit;
+    if (edit !== null && (typeof edit !== "object" || Array.isArray(edit))) {
+      throw new Error("The input edit is invalid.");
+    }
+    const edits = await readComboInputEdits(videoPath);
+    const key = pressEditKey(rawStartMs + timeMs, physicalButton);
+    const nextEdits = { schemaVersion: 1, presses: { ...edits.presses } };
+    if (edit === null || !Object.keys(edit).length) delete nextEdits.presses[key];
+    else nextEdits.presses[key] = edit;
+    await writeComboInputEdits(videoPath, nextEdits);
+    if (request?.deferProcessing === true) return { deferred: true };
+    const updated = await processComboInputs(videoPath, capture, rawStartMs, {
+      force: true,
+    });
+    if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+    return updated;
+  } finally {
+    clipTrimJobs.delete(videoPath);
+  }
 });
 
 ipcMain.handle("recordings:import-combo-mp4", async () => {
@@ -7134,6 +7594,69 @@ async function handleClipExport(request, mode) {
 }
 ipcMain.handle("recordings:export-clip", (_, request) => handleClipExport(request, "precise"));
 ipcMain.handle("recordings:export-clip-fast", (_, request) => handleClipExport(request, "fast"));
+ipcMain.handle("recordings:render-combo-inputs", async (_, request) => {
+  const recordingId = String(request?.recordingId ?? "");
+  const selectedPath = resolveRecordingPath(recordingId);
+  const selectedManifest = JSON.parse(
+    await fs.promises.readFile(recordingManifestPathForVideo(selectedPath), "utf8"),
+  );
+  let sourceRecordingId = recordingId;
+  let videoPath = selectedPath;
+  const options = { inputOverlay: true };
+  if (selectedManifest?.inputOverlayRendered === true) {
+    sourceRecordingId = selectedManifest.clip?.sourceRecordingId;
+    if (typeof sourceRecordingId !== "string" || !sourceRecordingId) {
+      throw new Error("The original video for this annotated recording is unknown.");
+    }
+    videoPath = resolveRecordingPath(sourceRecordingId);
+    const sourceManifest = JSON.parse(
+      await fs.promises.readFile(recordingManifestPathForVideo(videoPath), "utf8"),
+    );
+    if (
+      !sourceManifest?.comboInputCapture ||
+      sourceManifest.inputOverlayRendered === true ||
+      !selectedManifest.comboInputCapture ||
+      !Number.isFinite(selectedManifest.clip?.startTime) ||
+      Math.abs(selectedManifest.clip.startTime) > 0.01 ||
+      !Number.isFinite(selectedManifest.clip?.endTime) ||
+      comboInputRawOffset(sourceManifest) !== comboInputRawOffset(selectedManifest)
+    ) {
+      throw new Error("The original video and edited input track no longer share a timeline.");
+    }
+    options.inputEditSourcePath = selectedPath;
+  }
+  const workId = `combo-input-render:${randomUUID()}`;
+  setRecordingWork(workId, {
+    title: "Rendering combo inputs",
+    fileName: path.basename(videoPath),
+    detail: "Encoding a new video with the input overlay",
+  });
+  try {
+    const probe = await probeChapters(resolveFfmpegPath(), videoPath);
+    if (!Number.isFinite(probe.durationMs) || probe.durationMs <= 0) {
+      throw new Error("The recording duration could not be read.");
+    }
+    if (
+      options.inputEditSourcePath &&
+      Math.abs(probe.durationMs / 1000 - Number(selectedManifest.clip?.endTime)) > 0.15
+    ) {
+      throw new Error("The original video duration changed since this overlay was rendered.");
+    }
+    const rendered = await exportRecordingClip(
+      {
+        recordingId: sourceRecordingId,
+        startTime: 0,
+        endTime: probe.durationMs / 1000,
+        mode: "precise",
+      },
+      options,
+    );
+    if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+    return rendered;
+  } finally {
+    clearRecordingWork(workId);
+  }
+});
 ipcMain.handle("recordings:trim-clip", async (_, request) => {
   const workId = `clip-trim:${randomUUID()}`;
   let fileName = "Recording";
@@ -7553,16 +8076,41 @@ ipcMain.handle("catalog:publish-combo", async (event, request) => {
     throw error;
   }
 });
+ipcMain.handle("catalog:unpublish-combo", async (event, request) => {
+  const startedAt = Date.now();
+  try {
+    const result = await unpublishCombo(request, BrowserWindow.fromWebContents(event.sender), () =>
+      startupDiagnostic("catalog-unpublish-connection-reset"),
+    );
+    startupDiagnostic("catalog-unpublish-complete", { durationMs: Date.now() - startedAt });
+    return result;
+  } catch (error) {
+    startupDiagnostic("catalog-unpublish-failed", {
+      durationMs: Date.now() - startedAt,
+      error: obsErrorMessage(error),
+    });
+    throw error;
+  }
+});
 ipcMain.handle("catalog:is-owner", () => isCatalogOwner());
 ipcMain.handle("combo-candidates:status", () => candidateServiceStatus());
 ipcMain.handle("combo-candidates:request-upload-access", () => requestComboUploadAccess());
 ipcMain.handle("combo-candidates:submit", async (event, request) => {
   const recordingPath = resolveRecordingPath(String(request?.recordingId ?? ""));
+  const { processedComboInput } = await readRecordingManifest(recordingPath, "none");
+  const inputFacing = request?.inputFacing === "left" ? "left" : "right";
+  const processedInput =
+    processedComboInput?.routes?.[inputFacing] === String(request?.combo?.route ?? "").trim() &&
+    Buffer.byteLength(JSON.stringify(processedComboInput), "utf8") <= 480 * 1024
+      ? processedComboInput
+      : null;
   return submitComboCandidate({
     recordingPath,
     parent: BrowserWindow.fromWebContents(event.sender),
     combo: request?.combo,
     originCandidateId: request?.originCandidateId,
+    processedInput,
+    inputFacing,
     onProgress: (progress) => {
       if (!event.sender.isDestroyed())
         event.sender.send("combo-candidates:upload-progress", progress);

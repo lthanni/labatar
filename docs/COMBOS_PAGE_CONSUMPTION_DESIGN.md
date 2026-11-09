@@ -51,9 +51,9 @@ Raw handles discovery with starter, position, counterhit, hitconfirm, resource, 
 
 **Use instead** in Raw marks the selected candidate Using and the chosen current route Retired together, with Undo. It keeps the retired route and personal note. In the mockup the replacement takes over the old route's role and use condition; the player can edit those fields afterward. The eventual workflow should make that transfer visible before committing. An unlisted old route can be saved manually, but numeric comparisons remain unknown unless its data is entered.
 
-### Beginners and editor picks
+### Beginners
 
-An empty gameplan offers local creation and points the player to Raw, where editor picks have a short reason and can be saved. There is no separate beginner page or forced learning order. **Recommended** is an editor's judgment with a reason; computed sorts say **Highest damage**, **Lowest cost**, and so on. Editorial guidance and personal status are independent.
+An empty gameplan offers local creation and points the player to Raw, where routes can be reviewed and saved. There is no separate beginner page or forced learning order. Computed sorts say **Highest damage**, **Lowest cost**, and so on. Personal status is independent of those sorts.
 
 ## Local combos and editor submission
 
@@ -69,7 +69,7 @@ The standalone mockup cannot authenticate or write to this backend. Its **Previe
 
 ## Raw
 
-Raw opens with every published and locally saved combo and no filters or recommendation sort applied. A wide table shows character, support, starter, combo name, optional personal name, source, position, damage, effective difficulty, pips, flow, counterhit, hitconfirm status, route, editor pick, personal status, dismissal reason when currently Dismissed, and personal tags where available. Selecting a row opens details and actions without leaving Raw.
+Raw opens with every published and locally saved combo and no filters or recommendation sort applied. A wide table shows character, support, starter, combo name, optional personal name, source, position, damage, effective difficulty, pips, flow, counterhit, hitconfirm status, route, personal status, dismissal reason when currently Dismissed, and personal tags where available. Selecting a row opens details and actions without leaving Raw.
 
 Power-user controls include text search, source and other facets, numeric limits, an effective difficulty limit, column sorting, a column chooser, applied-filter summary, result count, and clear-all. Filters compose, and the table must make unknown values distinct from false or zero. Sorting and filtering difficulty use the player's rating when present and otherwise the editor's rating; the difficulty limit excludes combos unrated by both. The player can filter routes with no status, Saved for later, or Dismissed; bookmark or dismiss a route with no status; reconsider a dismissed one; tag a tracked combo; or choose a current route to replace from a selected row. Raw should not hide data merely because a combo lacks editorial metadata, is local, or was personally dismissed.
 
@@ -82,7 +82,7 @@ Raw's default scope is all characters, supports, and starters. My gameplan can r
 | "What am I using after 5B?"            | My gameplan → select 5B → review Autopilot and Situational routes marked Using |
 | "I want to replace this 5B route."     | Raw → filter to 5B → select a candidate → choose a Using route → Use instead   |
 | "I need a fullscreen confirm from 5B." | Raw → set starter, position, hitconfirm, and resource filters                  |
-| "I just started this character."       | My gameplan empty state → Raw → review editor picks → save a few as Learning   |
+| "I just started this character."       | My gameplan empty state → Raw → review routes → save a few as Learning         |
 | "Show me literally everything."        | Raw → clear filters → sort and inspect the full table                          |
 | "This only works on a high hit."       | Save or select combo → set Situational and record the high-hit condition       |
 | "I use this for whiff punishes."       | Save or select combo → add personal `whiff punish` tag                         |
@@ -91,12 +91,11 @@ Two more journeys: “Maybe later, but not in practice yet” goes from Raw to *
 
 ## Data contracts
 
-The published catalog includes combo ID, character, support, route, move IDs, position, damage, resource costs, mechanics, notes, and video reference. The updated source also supports an optional editor name, difficulty rating, and editor-pick reason and context. Existing records with no editor name keep an empty name and remain unrated. The earlier table derived a starter and filtered starter, position, damage, pips, flow, and counterhit.
+The published catalog includes combo ID, character, support, route, move IDs, position, damage, resource costs, mechanics, notes, and video reference. The updated source also supports an optional editor name and difficulty rating. Existing records with no editor name keep an empty name and remain unrated. The earlier table derived a starter and filtered starter, position, damage, pips, flow, and counterhit.
 
 Add separate data for:
 
-- **Editor picks:** combo ID, situation/context, recommendation reason, optional learning priority, and review metadata. This belongs with editor-controlled published data.
-- **Editor execution difficulty:** optional integer from 1 to 5 on the published combo. It is editor-controlled and distinct from editor picks and player ratings.
+- **Editor execution difficulty:** optional integer from 1 to 5 on the published combo. It is editor-controlled and distinct from player ratings.
 - **Local combos:** stable local ID, character, support, starter, local name, route, position, damage, resource costs, hitconfirm and counterhit facts, and optional public-submission draft fields. Keep these distinct from catalog records and preserve them across reloads. A published match should be linked explicitly rather than inferred from route text.
 - **Personal tracking entries:** catalog or local combo ID, optional status, optional private name override, optional private execution difficulty from 1 to 5, optional role (`Autopilot` or `Situational`), explicit use condition or position coverage, freeform personal tags, personal note, optional dismissal reason, and a display snapshot in case a published combo disappears. No status produces a blank status cell even when a private difficulty rating exists; Dismissed has an explicit status. This belongs in local personal storage first, with a path to sync later. Do not enforce one Autopilot per starter; multiple routes may cover different positions.
 - **Searchable facts:** explicit hitconfirm `yes` / `no` / `unknown` and clearly named position semantics. Add reliability or outcome filters only after those terms have editorial definitions.
@@ -118,7 +117,7 @@ Publishing currently emits a hitconfirm mechanic only when the local field is tr
 1. Build the two-tab shell and Raw table with clear filters, sorting, and full-catalog default.
 2. Add editor-controlled combo names and execution difficulty, then the single-starter gameplan view and local entries with optional personal names, personal difficulty, role, use condition, status, tags, notes, dismissal reasons, and missing-catalog handling. Distinguish a blank status from explicit dismissal.
 3. Add comparison and reversible replacement to Raw's selected combo details.
-4. Add editor picks with reasons in Raw and a link from the empty gameplan.
+4. Link the empty gameplan to Raw.
 5. Expand structured search only as confirmed catalog data becomes available.
 6. Add local combo creation, editing, persistence, source filtering, and private tracking without requiring publication.
 7. Integrate an authorized in-page editor review and publish action with the current backend contract, then reconcile the resulting catalog record with its local origin.
@@ -133,7 +132,7 @@ Publishing currently emits a hitconfirm mechanic only when the local field is tr
 - Damage is visually prominent on every gameplan combo card, with resource cost and difficulty in smaller fields.
 - A player can rename a saved combo locally; its editor name stays visible in details, and clearing the override restores that name.
 - A player can filter Raw, compare a candidate with a Using route for the same character, support, and starter, switch to that replacement, and undo it.
-- A beginner can reach editor picks from an empty gameplan through Raw without a dedicated beginner mode.
+- A beginner can reach available routes from an empty gameplan through Raw without a dedicated beginner mode.
 - Character and support portrait grids show all available options and close after a selection, on Escape, or on backdrop click.
 - Raw initially shows every catalog and local row, and filters/sorts never relabel a computed winner as an editor recommendation.
 - A local combo survives a reload and can be edited, tracked, replaced, or deleted without changing the published catalog.

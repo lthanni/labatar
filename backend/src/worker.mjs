@@ -1,4 +1,9 @@
-import { handleCandidateRequest, removeCandidatesForPublishedCombo } from "./candidates.mjs";
+import {
+  handleCandidateRequest,
+  processedInputForCandidate,
+  removeCandidatesForPublishedCombo,
+} from "./candidates.mjs";
+import { validateProcessedComboInput } from "./processed-combo-input.mjs";
 import { sendDiscordAlert } from "./discord-alerts.mjs";
 
 const idPattern = /^[a-z0-9][a-z0-9-]{0,99}$/;
@@ -39,9 +44,9 @@ const allowedComboFields = new Set([
   "supportId",
   "name",
   "difficulty",
-  "editorPickReason",
-  "editorPickContext",
   "route",
+  "processedInput",
+  "inputFacing",
   "starterIsNonAttackStance",
   "routingMode",
   "moveIds",
@@ -350,6 +355,14 @@ export function validateRecord(kind, value, pathId) {
     throw new Error("startSeconds must be between 0 and 86400.");
   }
   const route = content(value.route, "route", 2000);
+  if ((value.processedInput === undefined) !== (value.inputFacing === undefined)) {
+    throw new Error("Processed inputs and inputFacing must be supplied together.");
+  }
+  if (value.processedInput !== undefined) {
+    validateProcessedComboInput(value.processedInput);
+    if (!["right", "left"].includes(value.inputFacing))
+      throw new Error("inputFacing must be right or left.");
+  }
   if (value.sourceCandidateId !== undefined && !candidateIdPattern.test(value.sourceCandidateId)) {
     throw new Error("sourceCandidateId must be a candidate UUID.");
   }
@@ -358,9 +371,10 @@ export function validateRecord(kind, value, pathId) {
     supportId: id(value.supportId, "supportId"),
     name: optionalContent(value.name, "name", 160),
     difficulty: comboDifficulty(value.difficulty),
-    editorPickReason: optionalContent(value.editorPickReason, "editorPickReason", 1000),
-    editorPickContext: optionalContent(value.editorPickContext, "editorPickContext", 160),
     route,
+    ...(value.processedInput
+      ? { processedInput: value.processedInput, inputFacing: value.inputFacing }
+      : {}),
     starterIsNonAttackStance: optionalBoolean(
       value.starterIsNonAttackStance,
       "starterIsNonAttackStance",
@@ -679,12 +693,43 @@ async function listRecords(db, kind, search, editor = false) {
   `)
     .bind(kind, character, character, support, support, editor ? 1 : 0)
     .all();
-  return (result.results ?? []).map((row) => ({
-    ...JSON.parse(row.payload),
+  return (result.results ?? []).map((row) => {
+    const payload = JSON.parse(row.payload);
+    if (kind === "combo") {
+      delete payload.processedInput;
+      delete payload.inputFacing;
+      delete payload.editorPickReason;
+      delete payload.editorPickContext;
+    }
+    return {
+      ...payload,
+      revision: row.revision,
+      updatedAt: row.created_at,
+      ...(editor ? { updatedBy: row.editor_email, published: Boolean(row.published) } : {}),
+    };
+  });
+}
+
+async function comboInputs(db, comboId) {
+  const result = await db
+    .prepare(`
+      SELECT payload, revision FROM catalog_versions
+      WHERE kind = 'combo' AND id = ? AND published = 1
+        AND revision = (SELECT MAX(revision) FROM catalog_versions WHERE kind = 'combo' AND id = ?)
+    `)
+    .bind(comboId, comboId)
+    .all();
+  const row = result.results?.[0];
+  if (!row) return null;
+  const combo = JSON.parse(row.payload);
+  if (!combo.processedInput) return null;
+  return {
+    comboId,
     revision: row.revision,
-    updatedAt: row.created_at,
-    ...(editor ? { updatedBy: row.editor_email, published: Boolean(row.published) } : {}),
-  }));
+    route: combo.route,
+    inputFacing: combo.inputFacing,
+    processedInput: combo.processedInput,
+  };
 }
 
 function expectedRevision(request) {
@@ -707,15 +752,27 @@ async function putRecord(request, env, kind, pathId, email) {
       )
         .bind(kind, pathId, expected)
         .all();
-      const sourceCandidateId = JSON.parse(
-        previous.results?.[0]?.payload ?? "{}",
-      ).sourceCandidateId;
+      const previousCombo = JSON.parse(previous.results?.[0]?.payload ?? "{}");
+      const sourceCandidateId = previousCombo.sourceCandidateId;
       if (sourceCandidateId) {
         if (body.sourceCandidateId && body.sourceCandidateId !== sourceCandidateId) {
           throw new Error("A catalog combo's sourceCandidateId cannot change between revisions.");
         }
         body.sourceCandidateId = sourceCandidateId;
       }
+      if (previousCombo.processedInput && body.processedInput === undefined) {
+        body.processedInput = previousCombo.processedInput;
+        body.inputFacing = previousCombo.inputFacing;
+      }
+    }
+    if (
+      kind === "combo" &&
+      isObject(body) &&
+      candidateIdPattern.test(body.sourceCandidateId ?? "") &&
+      !body.processedInput
+    ) {
+      const captured = await processedInputForCandidate(env.DB, body.sourceCandidateId);
+      if (captured) Object.assign(body, captured);
     }
     record = validateRecord(kind, body, pathId);
   } catch (error) {
@@ -789,7 +846,11 @@ export async function handleRequest(
 ) {
   const url = new URL(request.url);
   const path = url.pathname;
-  if (request.method === "OPTIONS" && /^\/v1\/(?:moves|combos)$/.test(path)) {
+  if (
+    request.method === "OPTIONS" &&
+    (/^\/v1\/(?:moves|combos)$/.test(path) ||
+      /^\/v1\/combos\/[a-z0-9][a-z0-9-]{0,99}\/inputs$/.test(path))
+  ) {
     return new Response(null, {
       status: 204,
       headers: {
@@ -867,6 +928,12 @@ export async function handleRequest(
       ok: true,
       features: { comboNotes: true, comboCandidates: Boolean(env.CANDIDATE_VIDEOS) },
     });
+  }
+  const comboInputsRoute = /^\/v1\/combos\/([a-z0-9][a-z0-9-]{0,99})\/inputs$/.exec(path);
+  if (comboInputsRoute) {
+    if (request.method !== "GET") return fail("Method not allowed.", 405);
+    const inputs = await comboInputs(env.DB, comboInputsRoute[1]);
+    return inputs ? json(inputs) : fail("Processed combo inputs not found.", 404);
   }
   if (path === "/v1/editor/combo-preview") {
     if (request.method !== "GET") return fail("Method not allowed.", 405, true);

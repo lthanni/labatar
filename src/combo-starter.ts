@@ -17,7 +17,7 @@ export const comboStarterGroups = [
 ] as const;
 
 export function comboStarterGroup(input: string): (typeof comboStarterGroups)[number]["id"] {
-  const base = input.split("~", 1)[0];
+  const base = input.split("~", 1)[0].replace(/^dl\./i, "");
   if (base.endsWith("!")) return "crit";
   const parsed = parseMoveNotation(base, { allowDirectionless: true });
   if (!parsed.ok) return "other";

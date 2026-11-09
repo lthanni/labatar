@@ -14,7 +14,6 @@ const combos = [
     confirm: "Yes",
     route: "5B > 2F~A > 5A > 236B",
     title: "Reliable 5B conversion",
-    pick: "A practical first route from a common grounded hit. It uses no pips and keeps the timing straightforward.",
     note: "Confirm the initial 5B before committing to the follow-up.",
   },
   {
@@ -46,7 +45,6 @@ const combos = [
     confirm: "Yes",
     route: "5B > 2F~A > j.B > 236B",
     title: "Fullscreen conversion",
-    pick: "A simple response when the hit starts far away. No resource spend is required in this example.",
     note: "Watch the spacing before the air follow-up.",
   },
   {
@@ -79,7 +77,6 @@ const combos = [
     confirm: "Yes",
     route: "j.B > 5B > 214A > 236EX",
     title: "Air hit follow-up",
-    pick: "A distinct starter to add after the basic grounded route.",
     note: "Jump-in height changes the timing of the grounded hit.",
   },
   {
@@ -128,7 +125,6 @@ const combos = [
     confirm: "Yes",
     route: "5A > 5B > 236A",
     title: "Korra basic confirm",
-    pick: "A compact starting route for a common normal.",
     note: "Keep the first link steady before adding a resource spend.",
   },
   {
@@ -179,7 +175,6 @@ const columns = [
   ["counterhit", "CH"],
   ["confirm", "Confirm"],
   ["route", "Route"],
-  ["pick", "Editor"],
   ["status", "My status"],
   ["dismissalReason", "Dismissal reason"],
   ["tags", "My tags"],
@@ -225,7 +220,7 @@ const state = {
       role: "",
       condition: "",
       tags: [],
-      note: "Try this editor pick when I revisit my 5B options.",
+      note: "Try this route when I revisit my 5B options.",
     },
     c2: {
       name: "Older 5B route",
@@ -773,7 +768,6 @@ function rawCell(combo, key) {
   if (key === "difficulty")
     return effectiveDifficulty(combo) == null ? "—" : `${effectiveDifficulty(combo)}/5`;
   if (key === "counterhit") return combo.counterhit ? "Yes" : "No";
-  if (key === "pick") return combo.pick ? label("Pick", "pick") : "—";
   if (key === "status") return entry(combo)?.status ? statusLabel(entry(combo).status) : "";
   if (key === "dismissalReason")
     return entry(combo)?.status === "Dismissed" && entry(combo).dismissalReason
@@ -894,12 +888,11 @@ function renderDetail(id, inRaw) {
   const old = usingRoutes.find((route) => route.id === state.rawReplacementId);
   const linkedMp4 = linkedMp4s.get(combo.id);
   return `<aside class="detail-panel" aria-label="Selected combo details"><div class="detail-top"><div class="panel-kicker">Selected combo · ${esc(combo.character)} / ${esc(combo.support)}</div><h2>${esc(displayName(combo))}</h2>${item?.name?.trim() && item.name.trim() !== combo.title ? `<p class="editor-name">${combo.local ? "Local name" : "Editor name"}: ${esc(combo.title)}</p>` : ""}
-    <div class="detail-badges">${combo.local ? label("Local combo", "local") : ""}${combo.pick ? label("Editor's pick", "pick") : ""}${item?.status ? statusLabel(item.status) : ""}${label(`Hitconfirm: ${combo.confirm.toLowerCase()}`, combo.confirm === "Unknown" ? "unknown" : "")}</div></div>
+    <div class="detail-badges">${combo.local ? label("Local combo", "local") : ""}${item?.status ? statusLabel(item.status) : ""}${label(`Hitconfirm: ${combo.confirm.toLowerCase()}`, combo.confirm === "Unknown" ? "unknown" : "")}</div></div>
     ${linkedMp4 ? `<video class="combo-video" data-local-video-player="${combo.id}" src="${esc(linkedMp4.url)}" controls playsinline preload="metadata" aria-label="Local MP4 for ${esc(displayName(combo))}"></video><p class="video-playback-error" data-video-error="${combo.id}" hidden>This MP4 could not be played here. Its codec may not be supported by your browser.</p>` : `<div class="video" role="img" aria-label="${combo.local ? "No clip linked to this local combo" : "Illustrative video placeholder"}">${combo.local ? '<span class="video-empty">No clip linked</span>' : '<span class="play" aria-hidden="true">▶</span>'}<span class="video-caption">${combo.local ? "Local combo · add a YouTube link before publishing" : "Combo clip preview · placeholder"}</span></div>`}
     <div class="detail-body"><div class="detail-section local-video-section"><h3>Local MP4</h3>${linkedMp4 ? `<p class="linked-video-name">${esc(linkedMp4.name)}</p>` : ""}<label for="local-video-${combo.id}">${linkedMp4 ? "Replace MP4" : "Choose MP4 to play"}</label><input id="local-video-${combo.id}" type="file" accept="video/mp4,.mp4" data-local-video-file="${combo.id}" />${linkedMp4 ? `<button type="button" class="text-button" data-action="remove-video" data-id="${combo.id}">Remove MP4</button>` : ""}<p class="field-hint">Selected files play here until this page is closed or reloaded.</p></div><div class="stat-grid"><div class="stat"><span class="stat-label">Damage</span><strong>${combo.damage}</strong></div><div class="stat"><span class="stat-label">Pips</span><strong>${combo.pips}</strong></div><div class="stat"><span class="stat-label">Flow</span><strong>${combo.flow}</strong></div></div>
       <div class="detail-section difficulty-section"><h3>Execution difficulty</h3><label for="my-difficulty-${combo.id}">My difficulty</label><select id="my-difficulty-${combo.id}" data-my-difficulty="${combo.id}"><option value="" ${item?.myDifficulty == null ? "selected" : ""}>${combo.editorDifficulty == null ? "No rating available" : `Use editor rating · ${esc(difficultyText(combo.editorDifficulty))}`}</option>${[1, 2, 3, 4, 5].map((rating) => `<option value="${rating}" ${item?.myDifficulty === rating ? "selected" : ""}>${esc(difficultyText(rating))}</option>`).join("")}</select></div>
       <div class="detail-section"><h3>Route</h3><div class="detail-route route">${esc(combo.route)}</div></div>
-      ${combo.pick ? `<div class="detail-section"><h3>Why the editor picked it</h3><p>${esc(combo.pick)}</p></div>` : ""}
       <div class="detail-section"><h3>Editor notes</h3><p>${combo.note ? esc(combo.note) : combo.local ? "This private combo has no editor notes." : "No editor notes for this combo."}</p></div>
       ${
         item?.status

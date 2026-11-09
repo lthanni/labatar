@@ -3,7 +3,9 @@ import { comboStarterFromRoute, comboStarterGroup } from "./combo-starter";
 import {
   catalogSnapshot,
   comboItems,
+  comboStarterOptions,
   countLocalCombos,
+  deleteSavedCatalogCombo,
   effectiveDifficulty,
   emptyPersonalEntry,
   localRevisionDraft,
@@ -12,6 +14,7 @@ import {
   replaceComboEntries,
 } from "./combo-gameplan";
 import type { PublishedCombo } from "./published-catalog";
+import type { ComboCandidate } from "./combo-candidates";
 
 const published: PublishedCombo = {
   id: "aang-route",
@@ -30,6 +33,77 @@ const published: PublishedCombo = {
 };
 
 describe("personal combo workspace", () => {
+  it("omits starters held only by rejected, untracked candidates", () => {
+    const base = comboItems([{ ...published, route: "2B 5C" }], [], [])[0];
+    const rejected = {
+      ...base,
+      id: "candidate:rejected",
+      source: "Candidate" as const,
+      candidate: { status: "rejected" } as ComboCandidate,
+      published: undefined,
+    };
+    expect(comboStarterOptions([rejected], {}, "aang", "gyatso", false)).toEqual([]);
+    expect(
+      comboStarterOptions(
+        [rejected],
+        { [rejected.id]: { ...emptyPersonalEntry(), status: "Learning" } },
+        "aang",
+        "gyatso",
+        false,
+      ),
+    ).toEqual(["2B"]);
+    expect(
+      comboStarterOptions(
+        [{ ...rejected, candidate: { ...rejected.candidate, status: "pending" } }],
+        {},
+        "aang",
+        "gyatso",
+        true,
+      ),
+    ).toEqual(["2B"]);
+    expect(comboStarterOptions([base], {}, "aang", "gyatso", true)).toEqual([]);
+    expect(comboStarterOptions([base], {}, "aang", "gyatso", false)).toEqual(["2B"]);
+  });
+
+  it("deletes an unavailable catalog copy and its attached local state", () => {
+    const saved = catalogSnapshot(comboItems([published], [], [])[0]);
+    const other = { ...saved, id: "other-route" };
+    const workspace = parseComboWorkspace({
+      version: 1,
+      snapshots: { [published.id]: saved, [other.id]: other },
+      entries: {
+        [published.id]: { status: "Using", note: "Practice this" },
+        [other.id]: { status: "Learning" },
+      },
+      recordingLinks: {
+        [published.id]: { recordingId: "aang.mp4", name: "aang.mp4" },
+      },
+      removedYouTubeVideoIds: { [published.id]: ["M7lc1UVf-VE"] },
+      candidateSubmissions: {
+        [published.id]: { id: "queue-1", submittedAt: "2026-01-01" },
+      },
+    });
+    expect(comboItems([], [], [], workspace.snapshots).map((item) => item.id)).toContain(
+      published.id,
+    );
+    expect(workspace.recordingLinks[published.id]?.recordingId).toBe("aang.mp4");
+    expect(workspace.candidateSubmissions[published.id]?.id).toBe("queue-1");
+
+    const result = deleteSavedCatalogCombo(workspace, published.id);
+    expect(comboItems([], [], [], result.snapshots).map((item) => item.id)).toEqual([other.id]);
+    expect(result.entries[published.id]).toBeUndefined();
+    expect(result.recordingLinks[published.id]).toBeUndefined();
+    expect(result.removedYouTubeVideoIds[published.id]).toBeUndefined();
+    expect(result.candidateSubmissions[published.id]).toBeUndefined();
+    expect(result.entries[other.id]?.status).toBe("Learning");
+    expect(workspace.snapshots[published.id]).toBeDefined();
+    expect(
+      comboItems([], [], [], parseComboWorkspace({ version: 1, ...result }).snapshots).map(
+        (item) => item.id,
+      ),
+    ).toEqual([other.id]);
+  });
+
   it("replaces a published candidate draft with its catalog identity and personal state", () => {
     const workspace = parseComboWorkspace({
       version: 1,
@@ -127,6 +201,8 @@ describe("personal combo workspace", () => {
     expect(comboStarterFromRoute("2B! > 5B > 236B")).toBe("2B!");
     expect(comboStarterGroup("2B!")).toBe("crit");
     expect(comboStarterGroup("2B")).toBe("ground-normal");
+    expect(comboStarterGroup("dl.2B")).toBe("ground-normal");
+    expect(comboStarterGroup("dl.j.2B")).toBe("air-command");
     expect(comboStarterGroup("j.B!~A")).toBe("crit");
     expect(comboStarterFromRoute("STANCE~B > 5A", true)).toBe("STANCE~B");
     expect(comboStarterFromRoute("2F~B > 5A")).toBe("2F~B");
@@ -277,7 +353,6 @@ describe("personal combo workspace", () => {
       revision: 3,
       name: "Editor route",
       difficulty: 4,
-      editorPickReason: "Reliable follow-up",
       moveIds: ["aang-5b", "aang-236a"],
       notes: [{ id: "timing", category: "execution" as const, text: "Delay the follow-up." }],
     };

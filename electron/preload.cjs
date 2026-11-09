@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("obs:set-source-toggle", { key, enabled }),
     startRecording: (request) => ipcRenderer.invoke("obs:start-recording", request),
     startManualRecording: (request) => ipcRenderer.invoke("obs:start-manual-recording", request),
+    startComboRecording: (request) => ipcRenderer.invoke("obs:start-combo-recording", request),
     stopRecording: () => ipcRenderer.invoke("obs:stop-recording"),
     setAutomaticRecording: (enabled) => ipcRenderer.invoke("obs:set-automatic-recording", enabled),
     onState: (listener) => {
@@ -128,6 +129,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return () => ipcRenderer.removeListener("recordings:finalized", handler);
     },
     list: (request) => ipcRenderer.invoke("recordings:list", request),
+    getOriginalComboInputs: (request) =>
+      ipcRenderer.invoke("recordings:get-original-combo-inputs", request),
+    reprocessComboInputs: (request) =>
+      ipcRenderer.invoke("recordings:reprocess-combo-inputs", request),
+    setComboInputEdit: (request) => ipcRenderer.invoke("recordings:set-combo-input-edit", request),
     importComboMp4: () => ipcRenderer.invoke("recordings:import-combo-mp4"),
     getChapters: (request) => ipcRenderer.invoke("recordings:get-chapters", request),
     openFrameReader: (request) => ipcRenderer.invoke("recordings:frame-reader-open", request),
@@ -135,6 +141,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     closeFrameReader: (request) => ipcRenderer.invoke("recordings:frame-reader-close", request),
     exportClip: (request) => ipcRenderer.invoke("recordings:export-clip", request),
     exportClipFast: (request) => ipcRenderer.invoke("recordings:export-clip-fast", request),
+    renderComboInputs: (request) => ipcRenderer.invoke("recordings:render-combo-inputs", request),
     trimClip: (request) => ipcRenderer.invoke("recordings:trim-clip", request),
     createF10Clips: (request) => ipcRenderer.invoke("recordings:create-f10-clips", request),
     renameRecording: (request) => ipcRenderer.invoke("recordings:rename", request),
@@ -178,6 +185,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   catalogPublisher: {
     publishCombo: (request) => ipcRenderer.invoke("catalog:publish-combo", request),
+    unpublishCombo: (request) => ipcRenderer.invoke("catalog:unpublish-combo", request),
     isOwner: () => ipcRenderer.invoke("catalog:is-owner"),
   },
   comboCandidates: {

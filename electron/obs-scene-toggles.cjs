@@ -10,6 +10,10 @@ const inputNames = {
 };
 const toggleKeys = ["pressureFramebar", "gameAudio", "desktopAudio", "microphone"];
 
+function isLabatarOwnedName(name) {
+  return typeof name === "string" && /^Labatar(?:$|[\s-])/.test(name);
+}
+
 function legacySceneToggles(name) {
   return {
     pressureFramebar: name === "Labatar - Labbing Pressure Framebar",
@@ -62,6 +66,7 @@ module.exports = {
   sceneName,
   inputNames,
   toggleKeys,
+  isLabatarOwnedName,
   legacySceneToggles,
   sceneTogglesFromItems,
   updateSceneToggles,

@@ -14,8 +14,6 @@ export type PublishComboDraft = {
     supportId: string;
     name?: string;
     difficulty?: number;
-    editorPickReason?: string;
-    editorPickContext?: string;
     route: string;
     starterIsNonAttackStance?: boolean;
     routingMode?: "autopilot" | "unique";
@@ -40,8 +38,6 @@ export function publishedComboFromDraft(draft: PublishComboDraft): PublishedComb
     supportId: draft.combo.supportId,
     name: draft.combo.name ?? "",
     difficulty: draft.combo.difficulty ?? null,
-    editorPickReason: draft.combo.editorPickReason ?? "",
-    editorPickContext: draft.combo.editorPickContext ?? "",
     route: draft.combo.route.trim(),
     ...(draft.combo.starterIsNonAttackStance ? { starterIsNonAttackStance: true } : {}),
     routingMode: draft.combo.routingMode ?? "autopilot",

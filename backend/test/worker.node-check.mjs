@@ -116,14 +116,19 @@ test("editor name and difficulty are public, optional, and validated", () => {
       ...combo(),
       name: "Reliable 5B",
       difficulty: 3,
-      editorPickReason: "Dependable opener",
-      editorPickContext: "Midscreen",
     },
     "aang-basic",
   );
   assert.equal(named.name, "Reliable 5B");
   assert.equal(named.difficulty, 3);
-  assert.equal(named.editorPickReason, "Dependable opener");
+  assert.throws(
+    () => validateRecord("combo", { ...combo(), editorPickReason: "Old pick" }, "aang-basic"),
+    /editorPickReason/,
+  );
+  assert.throws(
+    () => validateRecord("combo", { ...combo(), editorPickContext: "Midscreen" }, "aang-basic"),
+    /editorPickContext/,
+  );
   assert.equal(
     validateRecord("combo", { ...combo(), sourceCandidateId }, "aang-basic").sourceCandidateId,
     sourceCandidateId,
@@ -195,8 +200,6 @@ test("the Worker advertises and stores combo notes", async () => {
           notes,
           name: "Reliable 5B",
           difficulty: 3,
-          editorPickReason: "Easy to confirm",
-          editorPickContext: "Midscreen",
         },
         { "If-None-Match": "*" },
       ),
@@ -210,8 +213,15 @@ test("the Worker advertises and stores combo notes", async () => {
     assert.deepEqual(published.notes, notes);
     assert.equal(published.name, "Reliable 5B");
     assert.equal(published.difficulty, 3);
-    assert.equal(published.editorPickReason, "Easy to confirm");
-    assert.equal(published.editorPickContext, "Midscreen");
+    const legacy = { ...published, editorPickReason: "Old pick", editorPickContext: "Midscreen" };
+    await db
+      .prepare("UPDATE catalog_versions SET payload = ? WHERE kind = 'combo'")
+      .bind(JSON.stringify(legacy))
+      .run();
+    const legacyList = await handleRequest(request("/v1/combos"), env);
+    const listed = (await legacyList.json()).items[0];
+    assert.equal(listed.editorPickReason, undefined);
+    assert.equal(listed.editorPickContext, undefined);
   } finally {
     db.close();
   }

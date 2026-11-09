@@ -7,11 +7,7 @@ import {
   isInDateRange,
   type AnalysisSummary,
 } from "./AnalyticsSection";
-import {
-  buildRecordingReplayIndex,
-  interruptedMatchForSet,
-  recordingIdForSet,
-} from "./recording-replay-links";
+import { buildRecordingReplayIndex, recordingIdForSet } from "./recording-replay-links";
 import type { RecordedVideo } from "./recording-types";
 import type { ReplayStagingPreview, ReplayStagingStatus } from "./replay-staging-types";
 import { techSelectedRecordingStorageKey, techSelectRecordingEvent } from "./tech-types";
@@ -19,7 +15,6 @@ import {
   Alert,
   Box,
   Button,
-  Chip,
   Dialog,
   DialogActions,
   DialogContent,
@@ -34,8 +29,6 @@ import {
 } from "@mui/material";
 
 const SETS_PER_PAGE = 50;
-const ragequitLabelsStorageKey = "labatar:ragequit-labels:v1";
-const emptyInterruptedMatchIds: string[] = [];
 
 export type ReplayRow = {
   id: string;
@@ -624,7 +617,6 @@ function projectSession(session: SessionRow, games: ReplayRow[], poi: string | n
 
 export function AvatarGrid({
   rowData,
-  interruptedMatchIds = emptyInterruptedMatchIds,
   replayFolder,
   active,
   recordingsRefreshToken,
@@ -642,7 +634,6 @@ export function AvatarGrid({
   onReplaysChanged,
 }: {
   rowData: ReplayRow[];
-  interruptedMatchIds?: string[];
   replayFolder: string | null;
   active: boolean;
   recordingsRefreshToken: number;
@@ -658,7 +649,6 @@ export function AvatarGrid({
   invalidDateRange: boolean;
   onSummaryChange: (summary: AnalysisSummary) => void;
   onReplaysChanged: () => void;
-  onOpenGuide: (section: "matches" | "staging") => void;
 }) {
   const gridRef = useRef<AgGridReact<DisplayRow>>(null);
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
@@ -683,14 +673,6 @@ export function AvatarGrid({
   const [stagingBusy, setStagingBusy] = useState(false);
   const [selectedMatchupGameIds, setSelectedMatchupGameIds] = useState<string[] | null>(null);
   const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
-  const [ragequitLabels, setRagequitLabels] = useState<Set<string>>(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem(ragequitLabelsStorageKey) ?? "[]");
-      return new Set(Array.isArray(stored) ? stored.filter((key) => typeof key === "string") : []);
-    } catch {
-      return new Set();
-    }
-  });
   const [portraits, setPortraits] = useState<Record<string, PortraitUrls>>({});
   const visiblePortraits = webMode ? webPortraits : portraits;
   useEffect(() => {
@@ -787,52 +769,6 @@ export function AvatarGrid({
       ),
     [rowData],
   );
-  const interruptedSetMatches = useMemo(() => {
-    const interrupted = new Set(interruptedMatchIds);
-    const matches = new Map<string, string>();
-    for (const session of sessionRows) {
-      const matchId = interruptedMatchForSet(
-        session.games.map((game) => game.id),
-        replayFolder,
-        recordingReplayIndex,
-        recordings,
-        interrupted,
-        replayHashesById,
-      );
-      if (matchId) matches.set(session.id, matchId);
-    }
-    return matches;
-  }, [
-    interruptedMatchIds,
-    recordings,
-    recordingReplayIndex,
-    replayFolder,
-    replayHashesById,
-    sessionRows,
-  ]);
-  const ragequitKey = (data: DisplayRow) => {
-    const identity = data.kind === "session" ? (data.games.at(-1)?.id ?? data.id) : data.id;
-    return `${replayFolder ?? ""}|${identity}`;
-  };
-  const isMarkedRagequit = (data: DisplayRow) =>
-    ragequitLabels.has(ragequitKey(data)) ||
-    (data.kind === "session" &&
-      data.games.some((game) => ragequitLabels.has(`${replayFolder ?? ""}|${game.id}`)));
-  const toggleRagequit = () => {
-    if (!contextMenu) return;
-    const data = contextMenu.data;
-    const key = ragequitKey(data);
-    const next = new Set(ragequitLabels);
-    if (isMarkedRagequit(data)) {
-      next.delete(key);
-      if (data.kind === "session") {
-        for (const game of data.games) next.delete(`${replayFolder ?? ""}|${game.id}`);
-      }
-    } else next.add(key);
-    localStorage.setItem(ragequitLabelsStorageKey, JSON.stringify([...next]));
-    setRagequitLabels(next);
-    setContextMenu(null);
-  };
   const openRecording = (recordingId: string) => {
     localStorage.setItem(techSelectedRecordingStorageKey, recordingId);
     window.dispatchEvent(new CustomEvent(techSelectRecordingEvent, { detail: recordingId }));
@@ -1193,22 +1129,6 @@ export function AvatarGrid({
                 <Box component="span" sx={{ color, fontWeight: 600 }}>
                   {data.record}
                 </Box>
-                {interruptedSetMatches.has(data.id) && (
-                  <Chip
-                    size="small"
-                    color="warning"
-                    label="Disconnected"
-                    title="The game log reports a connection interruption and no replay was saved. It does not identify who caused it."
-                  />
-                )}
-                {isMarkedRagequit(data) && (
-                  <Chip
-                    size="small"
-                    color="error"
-                    label="Ragequit"
-                    title="Manually marked as a ragequit."
-                  />
-                )}
               </Stack>
             );
           }
@@ -1224,14 +1144,6 @@ export function AvatarGrid({
                 >
                   {result}
                 </Box>
-              )}
-              {isMarkedRagequit(data) && (
-                <Chip
-                  size="small"
-                  color="error"
-                  label="Ragequit"
-                  title="Manually marked as a ragequit."
-                />
               )}
             </Stack>
           );
@@ -1313,8 +1225,6 @@ export function AvatarGrid({
       replayHashesById,
       webMode,
       showMmrInUnrankedGames,
-      interruptedSetMatches,
-      ragequitLabels,
     ],
   );
   useEffect(() => {
@@ -1505,11 +1415,6 @@ export function AvatarGrid({
         <MenuItem onClick={() => void prepareContextReplays()} disabled={stagingBusy}>
           Prepare {contextMenu?.data.kind === "session" ? "set" : "game"} for in-game playback
         </MenuItem>
-        {!webMode && contextMenu && (
-          <MenuItem onClick={toggleRagequit}>
-            {isMarkedRagequit(contextMenu.data) ? "Remove ragequit label" : "Mark as ragequit"}
-          </MenuItem>
-        )}
       </Menu>
       <Dialog open={stageRequest !== null} onClose={() => !stagingBusy && setStageRequest(null)}>
         <DialogTitle>Prepare replays for in-game playback</DialogTitle>

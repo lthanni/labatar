@@ -91,8 +91,6 @@ describe("local catalog revision publishing", () => {
       backendId: published.id,
       name: local.editorName,
       difficulty: "4",
-      editorPickReason: "",
-      editorPickContext: "",
       youtubeUrl: local.youtubeUrl,
       moveIds: local.moveIds!.join("\n"),
       note: "",

@@ -722,7 +722,6 @@ function WebApp() {
           invalidDateRange={invalidDateRange}
           onSummaryChange={setSummary}
           onReplaysChanged={() => undefined}
-          onOpenGuide={() => undefined}
         />
       </Box>
     </Box>

@@ -528,6 +528,7 @@ void test("candidate client uploads every MP4 byte in ordered chunks before comp
   const token = "a".repeat(64);
   const parts = [];
   const progress = [];
+  const processedInput = { schemaVersion: 1, routes: { right: "5B", left: "5B" } };
   try {
     let signedIn = false;
     const ses = {
@@ -542,6 +543,8 @@ void test("candidate client uploads every MP4 byte in ordered chunks before comp
         assert.equal(body.fileSize, bytes.length);
         assert.equal(body.fileName, "combo.mp4");
         assert.deepEqual(body.combo, { id: "aang-5b" });
+        assert.deepEqual(body.processedInput, processedInput);
+        assert.equal(body.inputFacing, "right");
         assert.equal(body.originCandidateId, originCandidateId);
         return Response.json(
           { id, token, partSize: 8 * 1024 * 1024, partCount: 2 },
@@ -569,7 +572,9 @@ void test("candidate client uploads every MP4 byte in ordered chunks before comp
     };
     const result = await submitComboCandidate({
       recordingPath: filePath,
-      combo: { id: "aang-5b" },
+      combo: { id: "aang-5b", route: "5B" },
+      processedInput,
+      inputFacing: "right",
       originCandidateId,
       onProgress: (item) => progress.push(item),
       ses,
@@ -579,7 +584,7 @@ void test("candidate client uploads every MP4 byte in ordered chunks before comp
         assert.equal(await verifyAccess(ses), true);
       },
     });
-    assert.deepEqual(result, { id });
+    assert.deepEqual(result, { id, processedInputIncluded: true });
     assert.deepEqual(Buffer.concat(parts), bytes);
     assert.deepEqual(
       progress.map((item) => item.uploadedBytes),

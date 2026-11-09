@@ -604,7 +604,7 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
           direction="row"
           spacing={1}
           useFlexGap
-          sx={{ alignItems: "center", flexWrap: "wrap" }}
+          sx={{ alignItems: "flex-start", flexWrap: "wrap" }}
         >
           <Button
             size="small"

@@ -86,8 +86,6 @@ export type TechCombo = {
   support: string;
   name?: string;
   difficulty?: number | null;
-  editorPickReason?: string;
-  editorPickContext?: string;
   moveIds: Array<string | null>;
   route: string;
   routingMode?: "autopilot" | "unique";

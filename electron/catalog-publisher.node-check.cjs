@@ -6,6 +6,7 @@ const {
   publisherReadWithRecovery,
   listEditorCombos,
   isCatalogOwner,
+  unpublishCombo,
 } = require("./catalog-publisher.cjs");
 
 void test("route audit owner check fails closed without revealing access roles", async () => {
@@ -104,4 +105,88 @@ void test("catalog sign-in preflight treats an Electron cancelled redirect as si
     },
   };
   assert.equal(await listEditorCombos(ses), null);
+});
+
+void test("catalog delete confirms the current combo and sends a revision-checked DELETE", async () => {
+  const requests = [];
+  const ses = {
+    async fetch(url, options) {
+      requests.push({ url, options });
+      if (options.method === "DELETE") {
+        return Response.json({ id: "aang-basic", revision: 4, published: false });
+      }
+      return Response.json({
+        items: [
+          {
+            id: "aang-basic",
+            revision: 3,
+            published: true,
+            characterId: "aang",
+            supportId: "katara",
+            route: "5A 5B",
+          },
+        ],
+      });
+    },
+  };
+  let confirmation;
+  const result = await unpublishCombo(
+    { id: "aang-basic", expectedRevision: 3 },
+    null,
+    undefined,
+    ses,
+    async (options) => {
+      confirmation = options;
+      return { response: 0 };
+    },
+  );
+  assert.deepEqual(result, { cancelled: false, id: "aang-basic", revision: 4 });
+  assert.match(confirmation.message, /aang-basic/);
+  assert.equal(confirmation.defaultId, 1);
+  assert.equal(requests.length, 2);
+  assert.equal(new URL(requests[1].url).pathname, "/v1/editor/combos/aang-basic");
+  assert.equal(requests[1].options.method, "DELETE");
+  assert.equal(requests[1].options.headers["If-Match"], '"3"');
+});
+
+void test("catalog delete does not send a write when cancelled or the revision changed", async () => {
+  let writes = 0;
+  const ses = {
+    async fetch(_url, options) {
+      if (options.method === "DELETE") writes += 1;
+      return Response.json({
+        items: [{ id: "aang-basic", revision: 3, published: true }],
+      });
+    },
+  };
+  assert.deepEqual(
+    await unpublishCombo(
+      { id: "aang-basic", expectedRevision: 3 },
+      null,
+      undefined,
+      ses,
+      async () => ({ response: 1 }),
+    ),
+    { cancelled: true },
+  );
+  await assert.rejects(
+    unpublishCombo({ id: "aang-basic", expectedRevision: 2 }, null, undefined, ses),
+    /changed/,
+  );
+  assert.equal(writes, 0);
+});
+
+void test("catalog delete does not send a write when editor access is denied", async () => {
+  let writes = 0;
+  const ses = {
+    async fetch(_url, options) {
+      if (options.method === "DELETE") writes += 1;
+      return Response.json({ error: "Editor authentication required." }, { status: 403 });
+    },
+  };
+  await assert.rejects(
+    unpublishCombo({ id: "aang-basic", expectedRevision: 3 }, null, undefined, ses),
+    /Editor authentication required/,
+  );
+  assert.equal(writes, 0);
 });

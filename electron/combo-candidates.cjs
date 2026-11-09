@@ -100,6 +100,8 @@ async function submitComboCandidate({
   recordingPath,
   combo,
   originCandidateId,
+  processedInput,
+  inputFacing,
   onProgress,
   parent,
   ses = publisherSession(),
@@ -118,6 +120,20 @@ async function submitComboCandidate({
     if (!(await checkCandidateUploadAccess(ses))) {
       await signIn(ses, parent, checkCandidateUploadAccess, uploadApi);
     }
+    const details = {
+      combo: processedInput ? { ...combo, route: undefined } : combo,
+      ...(originCandidateId ? { originCandidateId: candidateId(originCandidateId) } : {}),
+      ...(processedInput ? { processedInput, inputFacing } : {}),
+      fileName: path.basename(recordingPath),
+      fileSize: stat.size,
+    };
+    const includeProcessedInput =
+      Boolean(processedInput) && Buffer.byteLength(JSON.stringify(details), "utf8") <= 512 * 1024;
+    if (!includeProcessedInput && processedInput) {
+      details.combo = combo;
+      delete details.processedInput;
+      delete details.inputFacing;
+    }
     const result = await publisherRequestWithTimeout("Combo upload creation", (signal) =>
       fetchEditorResponse(ses, uploadApi, {
         method: "POST",
@@ -125,12 +141,7 @@ async function submitComboCandidate({
         redirect: "manual",
         cache: "no-store",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({
-          combo,
-          ...(originCandidateId ? { originCandidateId: candidateId(originCandidateId) } : {}),
-          fileName: path.basename(recordingPath),
-          fileSize: stat.size,
-        }),
+        body: JSON.stringify(details),
         signal,
       }),
     );
@@ -186,7 +197,7 @@ async function submitComboCandidate({
     );
     if (finished.status !== "pending")
       throw new Error("The candidate did not reach the review queue.");
-    return { id: created.id };
+    return { id: created.id, processedInputIncluded: includeProcessedInput };
   } catch (error) {
     if (created?.id && created?.token) {
       await fetch(`${api}/${created.id}/abort`, {

@@ -7,6 +7,9 @@ export type TimelineChapterMarker = {
   gameStart: boolean;
 };
 
+const isInputChapter = (title: string) => title.startsWith("Labatar Input: ");
+const isStartChapter = (title: string) => /^(?:recording|video) start$/i.test(title.trim());
+
 export function timelineChapterMarkers(
   chapters: RecordingChapter[],
   durationSeconds: number,
@@ -16,7 +19,11 @@ export function timelineChapterMarkers(
   const sorted = chapters
     .filter(
       (chapter) =>
-        Number.isFinite(chapter.startMs) && chapter.startMs >= 0 && chapter.startMs <= durationMs,
+        !isInputChapter(chapter.title) &&
+        !isStartChapter(chapter.title) &&
+        Number.isFinite(chapter.startMs) &&
+        chapter.startMs >= 0 &&
+        chapter.startMs <= durationMs,
     )
     .sort((left, right) => left.startMs - right.startMs);
   const markers: TimelineChapterMarker[] = [];

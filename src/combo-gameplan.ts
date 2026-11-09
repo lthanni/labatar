@@ -1,6 +1,6 @@
 import { comboStarterFromRoute } from "./combo-starter";
 import { normalizeComboNotes } from "./combo-notes";
-import { isPublishedCombo } from "./published-catalog";
+import { cleanPublishedCombo, isPublishedCombo } from "./published-catalog";
 import type { ComboNote } from "./tech-types";
 import type { PublishedCombo, PublishedMove } from "./published-catalog";
 import type { ComboCandidate } from "./combo-candidates";
@@ -47,6 +47,9 @@ export type LocalCombo = {
   hitconfirm: ConfirmFact;
   counterhit: boolean;
   youtubeUrl: string;
+  recordingDraft?: boolean;
+  routeSource?: "capture" | "manual";
+  inputFacing?: "right" | "left";
   candidateOriginId?: string;
   needsCatalogPublication?: boolean;
   publishedId?: string;
@@ -55,8 +58,6 @@ export type LocalCombo = {
   originCatalog?: boolean;
   editorName?: string;
   editorDifficulty?: number | null;
-  editorPickReason?: string;
-  editorPickContext?: string;
   moveIds?: string[];
   routingMode?: "autopilot" | "unique";
   editorNotes?: ComboNote[];
@@ -203,16 +204,25 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
   const localCombos = Array.isArray(value.localCombos)
     ? value.localCombos.flatMap((item): LocalCombo[] => {
         if (!record(item) || !text(item.id).startsWith("local-")) return [];
-        if (!text(item.characterId) || !text(item.supportId) || !text(item.route)) return [];
+        if (
+          !text(item.characterId) ||
+          !text(item.supportId) ||
+          (!text(item.route) && item.recordingDraft !== true)
+        )
+          return [];
         return [
           {
             id: text(item.id),
             characterId: text(item.characterId),
             supportId: text(item.supportId),
-            starter: comboStarterFromRoute(
-              text(item.route),
-              isPublishedCombo(item.publishedBase) && item.publishedBase.starterIsNonAttackStance,
-            ),
+            starter:
+              item.recordingDraft === true && !text(item.route)
+                ? "Pending input"
+                : comboStarterFromRoute(
+                    text(item.route),
+                    isPublishedCombo(item.publishedBase) &&
+                      item.publishedBase.starterIsNonAttackStance,
+                  ),
             name: text(item.name),
             route: text(item.route),
             screenPosition: text(item.screenPosition),
@@ -224,6 +234,13 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
               item.hitconfirm === "yes" || item.hitconfirm === "no" ? item.hitconfirm : "unknown",
             counterhit: item.counterhit === true,
             youtubeUrl: text(item.youtubeUrl),
+            ...(item.recordingDraft === true ? { recordingDraft: true } : {}),
+            ...(item.routeSource === "capture" || item.routeSource === "manual"
+              ? { routeSource: item.routeSource }
+              : {}),
+            ...(item.inputFacing === "right" || item.inputFacing === "left"
+              ? { inputFacing: item.inputFacing }
+              : {}),
             ...(typeof item.candidateOriginId === "string" &&
             candidateIdPattern.test(item.candidateOriginId)
               ? { candidateOriginId: item.candidateOriginId }
@@ -238,18 +255,12 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
               ? { publishedRevision: Number(item.publishedRevision) }
               : {}),
             ...(isPublishedCombo(item.publishedBase) && item.publishedBase.id === item.publishedId
-              ? { publishedBase: item.publishedBase }
+              ? { publishedBase: cleanPublishedCombo(item.publishedBase) }
               : {}),
             ...(item.originCatalog === true ? { originCatalog: true } : {}),
             ...(typeof item.editorName === "string" ? { editorName: item.editorName } : {}),
             ...(item.editorDifficulty === null || rating(item.editorDifficulty) !== null
               ? { editorDifficulty: rating(item.editorDifficulty) }
-              : {}),
-            ...(typeof item.editorPickReason === "string"
-              ? { editorPickReason: item.editorPickReason }
-              : {}),
-            ...(typeof item.editorPickContext === "string"
-              ? { editorPickContext: item.editorPickContext }
               : {}),
             ...(Array.isArray(item.moveIds) && item.moveIds.every((id) => typeof id === "string")
               ? { moveIds: item.moveIds as string[] }
@@ -388,8 +399,6 @@ export function localRevisionDraft(item: ComboItem, id: string): LocalCombo | nu
     originCatalog: true,
     editorName: base.name ?? "",
     editorDifficulty: base.difficulty ?? null,
-    editorPickReason: base.editorPickReason ?? "",
-    editorPickContext: base.editorPickContext ?? "",
     moveIds: [...base.moveIds],
     routingMode: base.routingMode ?? "autopilot",
     editorNotes: normalizeComboNotes(base.notes),
@@ -442,10 +451,13 @@ export function comboItems(
       source: "Local",
       characterId: combo.characterId,
       supportId: combo.supportId,
-      starter: comboStarterFromRoute(
-        combo.route,
-        combo.publishedBase?.starterIsNonAttackStance ?? false,
-      ),
+      starter:
+        combo.recordingDraft && !combo.route
+          ? "Pending input"
+          : comboStarterFromRoute(
+              combo.route,
+              combo.publishedBase?.starterIsNonAttackStance ?? false,
+            ),
       name: combo.originCatalog
         ? (combo.editorName ?? combo.publishedBase?.name ?? "").trim()
         : combo.name.trim(),
@@ -463,6 +475,57 @@ export function comboItems(
       .filter((item) => !publishedIds.has(item.id))
       .map((item): ComboItem => ({ ...item, source: "Unavailable" })),
   ];
+}
+
+/** Starters with a combo that can appear in the current source view. */
+export function comboStarterOptions(
+  items: ComboItem[],
+  entries: ComboWorkspaceData["entries"],
+  characterId: string,
+  supportId: string,
+  candidateOnly: boolean,
+): string[] {
+  return [
+    ...new Set(
+      items
+        .filter(
+          (item) =>
+            item.characterId === characterId &&
+            item.supportId === supportId &&
+            (candidateOnly
+              ? item.candidate?.status === "pending" || item.candidate?.status === "approved"
+              : item.source !== "Candidate" ||
+                item.candidate?.status !== "rejected" ||
+                Boolean(entries[item.id]?.status)),
+        )
+        .map((item) => item.starter),
+    ),
+  ].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+/** Remove a retained catalog snapshot and the local state attached to its ID. */
+export function deleteSavedCatalogCombo(
+  workspace: ComboWorkspaceData,
+  id: string,
+): ComboWorkspaceData {
+  const snapshots = { ...workspace.snapshots };
+  const entries = { ...workspace.entries };
+  const recordingLinks = { ...workspace.recordingLinks };
+  const removedYouTubeVideoIds = { ...workspace.removedYouTubeVideoIds };
+  const candidateSubmissions = { ...workspace.candidateSubmissions };
+  delete snapshots[id];
+  delete entries[id];
+  delete recordingLinks[id];
+  delete removedYouTubeVideoIds[id];
+  delete candidateSubmissions[id];
+  return {
+    ...workspace,
+    snapshots,
+    entries,
+    recordingLinks,
+    removedYouTubeVideoIds,
+    candidateSubmissions,
+  };
 }
 
 /** Transfer a submitted local draft's personal state to its catalog identity. */

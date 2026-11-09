@@ -27,6 +27,7 @@ export type ObsRecordingState = {
   source: "manual" | "automatic" | null;
   metadata: RecordingMetadata | null;
   startedAt: string | null;
+  purpose?: "combo" | null;
 };
 
 export type ObsVideoSettings = {

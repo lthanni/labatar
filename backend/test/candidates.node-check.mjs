@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { handleRequest } from "../src/worker.mjs";
+
+const { processComboInputCapture } = createRequire(import.meta.url)(
+  "../../electron/combo-input-processing.cjs",
+);
 
 const schema = readFileSync(new URL("../schema.sql", import.meta.url), "utf8");
 const submitterMigration = readFileSync(
@@ -128,11 +133,72 @@ function combo() {
   };
 }
 
+function processedInput() {
+  return {
+    schemaVersion: 1,
+    processorVersion: 10,
+    processedAt: "2026-11-06T00:00:00.000Z",
+    source: {
+      kind: "comboInputCapture",
+      sha256: "a".repeat(64),
+      durationMs: 1000,
+      stateCount: 2,
+      timing: "approximate",
+      rawStartMs: 0,
+      editsSha256: "b".repeat(64),
+    },
+    context: { defaultFacing: "right", defaultPosition: "grounded" },
+    directionChanges: [
+      {
+        timeMs: 0,
+        sourceStateIndex: 0,
+        direction: 5,
+        heldButtons: [],
+        heldGameButtons: [],
+      },
+    ],
+    presses: [
+      {
+        timeMs: 100,
+        sourceStateIndex: 1,
+        physicalButton: "Y",
+        gameAction: "Atk2",
+        gameButton: "B",
+        context: { facing: "right", position: "grounded" },
+        positionAfter: null,
+        manualEdit: null,
+        interpretations: {
+          right: {
+            direction: 5,
+            motion: null,
+            directionPath: null,
+            suggestedNotation: "5B",
+            notation: "5B",
+          },
+          left: {
+            direction: 5,
+            motion: null,
+            directionPath: null,
+            suggestedNotation: "5B",
+            notation: "5B",
+          },
+        },
+      },
+    ],
+    routes: { right: "5B > 236A", left: "5B > 214A" },
+  };
+}
+
 async function submit(env, options = {}) {
   const response = await handleRequest(
     request("/v1/editor/candidates/upload", "POST", {
-      combo: options.combo ?? combo(),
+      combo: options.processedInput
+        ? { ...(options.combo ?? combo()), route: undefined }
+        : (options.combo ?? combo()),
       ...(options.originCandidateId ? { originCandidateId: options.originCandidateId } : {}),
+      ...(options.processedInput
+        ? { processedInput: options.processedInput, inputFacing: options.inputFacing ?? "right" }
+        : {}),
       fileName: "test.mp4",
       fileSize: 3,
     }),
@@ -346,7 +412,11 @@ void test("publishing a candidate removes its queued copy and MP4", async () => 
   const editor = async () => "editor@example.com";
   try {
     const created = await submit(env);
-    const duplicate = await submit(env, { originCandidateId: created.id });
+    const inputs = processedInput();
+    const duplicate = await submit(env, {
+      originCandidateId: created.id,
+      processedInput: inputs,
+    });
     assert.notEqual(created.id, duplicate.id);
     assert.equal(videos.objects.size, 2);
     const path = `/v1/editor/combos/${combo().id}`;
@@ -371,12 +441,33 @@ void test("publishing a candidate removes its queued copy and MP4", async () => 
       editor,
     );
     assert.equal(published.status, 201);
-    assert.equal((await published.json()).sourceCandidateId, created.id);
+    const publishedCombo = await published.json();
+    assert.equal(publishedCombo.sourceCandidateId, created.id);
+    assert.deepEqual(publishedCombo.processedInput, inputs);
+    assert.equal(publishedCombo.inputFacing, "right");
+    const publicCatalog = await handleRequest(request("/v1/combos"), env);
+    assert.equal((await publicCatalog.json()).items[0].processedInput, undefined);
+    const publicInputs = await handleRequest(request(`/v1/combos/${combo().id}/inputs`), env);
+    assert.equal(publicInputs.status, 200);
+    assert.deepEqual((await publicInputs.json()).processedInput, inputs);
     assert.deepEqual(
       (await (await handleRequest(request("/v1/editor/candidates"), env, {}, editor)).json()).items,
       [],
     );
     assert.equal(videos.objects.size, 0);
+    const revised = await handleRequest(
+      request(path, "PUT", { ...payload, damage: "400" }, { "If-Match": '"1"' }),
+      env,
+      {},
+      editor,
+    );
+    assert.equal(revised.status, 200);
+    assert.deepEqual((await revised.json()).processedInput, inputs);
+    assert.deepEqual(
+      (await (await handleRequest(request(`/v1/combos/${combo().id}/inputs`), env)).json())
+        .processedInput,
+      inputs,
+    );
   } finally {
     db.close();
   }
@@ -613,6 +704,110 @@ void test("candidate requires a valid MP4 upload and an editor can record its Yo
       ).status,
       404,
     );
+  } finally {
+    db.close();
+  }
+});
+
+void test("processed combo inputs accompany a candidate and survive route revisions", async () => {
+  const db = database();
+  const env = { DB: db, CANDIDATE_VIDEOS: bucket() };
+  const editor = async () => "editor@example.com";
+  try {
+    const inputs = processedInput();
+    const created = await submit(env, { processedInput: inputs });
+    const initial = (
+      await (await handleRequest(request("/v1/editor/candidates"), env, {}, editor)).json()
+    ).items[0];
+    assert.deepEqual(initial.processedInput, inputs);
+    assert.equal(initial.inputFacing, "right");
+    assert.equal(initial.combo.route, inputs.routes.right);
+    const revised = await handleRequest(
+      request(`/v1/editor/candidates/${created.id}`, "PATCH", {
+        combo: { ...combo(), route: "5B > 236A > 5B" },
+        updatedAt: initial.updatedAt,
+      }),
+      env,
+      {},
+      editor,
+    );
+    assert.equal(revised.status, 200);
+    assert.deepEqual((await revised.json()).processedInput, inputs);
+    const published = await handleRequest(
+      request(
+        `/v1/editor/combos/${combo().id}`,
+        "PUT",
+        {
+          ...combo(),
+          route: "5B > 236A > 5B",
+          sourceCandidateId: created.id,
+          youtubeUrl: `https://youtu.be/${videoId}`,
+        },
+        { "If-None-Match": "*" },
+      ),
+      env,
+      {},
+      editor,
+    );
+    assert.equal(published.status, 201);
+    assert.deepEqual((await published.json()).processedInput, inputs);
+
+    const mismatch = await handleRequest(
+      request("/v1/editor/candidates/upload", "POST", {
+        combo: combo(),
+        processedInput: { ...inputs, routes: { ...inputs.routes, right: "5A" } },
+        inputFacing: "right",
+        fileName: "test.mp4",
+        fileSize: 3,
+      }),
+      env,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      async () => "uploader@example.com",
+    );
+    assert.equal(mismatch.status, 400);
+    assert.match((await mismatch.json()).error, /processed input route/);
+  } finally {
+    db.close();
+  }
+});
+
+void test("candidate upload accepts the local processor's event artifact", async () => {
+  const db = database();
+  const env = { DB: db, CANDIDATE_VIDEOS: bucket() };
+  try {
+    const processed = processComboInputCapture(
+      {
+        schemaVersion: 1,
+        source: "xinput",
+        deviceIndex: 0,
+        bindings: { X: "Atk1" },
+        status: "complete",
+        timing: "approximate",
+        durationMs: 300,
+        states: [
+          { timeMs: 0, direction: 5, stickDirection: 5, buttons: [], actions: [] },
+          { timeMs: 100, direction: 5, stickDirection: 5, buttons: ["X"], actions: ["Atk1"] },
+        ],
+      },
+      "2026-11-06T00:00:00.000Z",
+      0,
+      { schemaVersion: 1, presses: { "100:X": { charged: true, directionOverride: "236" } } },
+    );
+    const created = await submit(env, { processedInput: processed });
+    const listed = await handleRequest(
+      request("/v1/editor/candidates"),
+      env,
+      {},
+      async () => "editor@example.com",
+    );
+    assert.equal(listed.status, 200);
+    const candidate = (await listed.json()).items[0];
+    assert.equal(candidate.id, created.id);
+    assert.equal(candidate.combo.route, "236[A]");
+    assert.deepEqual(candidate.processedInput.presses, processed.presses);
   } finally {
     db.close();
   }

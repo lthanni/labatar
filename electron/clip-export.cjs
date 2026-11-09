@@ -1,4 +1,4 @@
-function buildClipExportFfmpegArgs({ sourcePath, startTime, duration, outputPath }) {
+function buildClipExportFfmpegArgs({ sourcePath, startTime, duration, outputPath, videoFilter }) {
   return [
     "-nostdin",
     "-hide_banner",
@@ -18,6 +18,7 @@ function buildClipExportFfmpegArgs({ sourcePath, startTime, duration, outputPath
     "0:a:0?",
     "-map_chapters",
     "-1",
+    ...(videoFilter ? ["-vf", videoFilter] : []),
     "-c:v",
     "libx264",
     "-preset",

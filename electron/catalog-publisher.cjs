@@ -309,6 +309,88 @@ async function publishCombo(request, parent, onConnectionReset) {
   return { cancelled: false, id: combo.id, revision: result.body.revision };
 }
 
+async function unpublishCombo(
+  request,
+  parent,
+  onConnectionReset,
+  ses = publisherSession(),
+  showMessageBox = (...args) => dialog.showMessageBox(...args),
+) {
+  const id = request?.id;
+  const expectedRevision = request?.expectedRevision;
+  if (typeof id !== "string" || !slugPattern.test(id)) {
+    throw new Error("Select a valid catalog combo to delete.");
+  }
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+    throw new Error("The catalog revision is invalid. Refresh before deleting this combo.");
+  }
+  let items = await listEditorCombos(ses, 15000, onConnectionReset);
+  if (!items) items = await signInToCatalog(ses, parent);
+  const existing = items.find((item) => item.id === id);
+  if (!existing?.published) {
+    throw new Error("This combo is no longer published. Refresh the catalog.");
+  }
+  if (existing.revision !== expectedRevision) {
+    throw new Error("This catalog combo changed. Refresh it before deleting.");
+  }
+  const options = {
+    type: "warning",
+    title: "Delete catalog combo",
+    message: `Delete ${id} from the public catalog?`,
+    detail: [
+      `${existing.characterId} / ${existing.supportId}`,
+      existing.route,
+      `Current revision: ${existing.revision}`,
+      "The catalog keeps earlier revisions. Local copies and YouTube videos are not deleted.",
+    ].join("\n"),
+    buttons: ["Delete from catalog", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  };
+  const confirmation = parent
+    ? await showMessageBox(parent, options)
+    : await showMessageBox(options);
+  if (confirmation.response !== 0) return { cancelled: true };
+
+  let response;
+  try {
+    response = await publisherRequestWithTimeout("Catalog delete request", (signal) =>
+      ses.fetch(`${editorListUrl}/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        credentials: "include",
+        redirect: "error",
+        headers: { Accept: "application/json", "If-Match": `"${expectedRevision}"` },
+        signal,
+      }),
+    );
+  } catch (error) {
+    if (
+      error?.message === "Catalog delete request timed out. Check your connection and try again."
+    ) {
+      throw new Error(
+        "The catalog delete request timed out. Its outcome is unknown. Refresh the catalog before trying again.",
+      );
+    }
+    if (isCancelledEditorRedirect(error)) {
+      throw new Error("Catalog sign-in expired. Sign in again and retry deleting.");
+    }
+    throw error;
+  }
+  const result = await readEditorResponse(response);
+  if (result.authenticationRequired) {
+    throw new Error("Catalog sign-in expired. Sign in again and retry deleting.");
+  }
+  if (
+    result.body?.id !== id ||
+    result.body?.revision !== expectedRevision + 1 ||
+    result.body?.published !== false
+  ) {
+    throw new Error("The catalog returned an invalid delete response. Refresh the catalog.");
+  }
+  return { cancelled: false, id, revision: result.body.revision };
+}
+
 async function authenticatedPublisherSession(parent) {
   const ses = publisherSession();
   if (!(await listEditorCombos(ses))) await signInToCatalog(ses, parent);
@@ -317,6 +399,7 @@ async function authenticatedPublisherSession(parent) {
 
 module.exports = {
   publishCombo,
+  unpublishCombo,
   isCatalogOwner,
   assertExpectedRevision,
   authenticatedPublisherSession,

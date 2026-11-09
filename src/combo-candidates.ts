@@ -3,7 +3,7 @@ import { comboItems, localRevisionDraft, slugComboText } from "./combo-gameplan"
 import { comboStarterFromRoute } from "./combo-starter";
 import { normalizeComboNotes } from "./combo-notes";
 import type { TechResourceCosts } from "./tech-types";
-import type { RecordedVideo } from "./recording-types";
+import type { ProcessedComboInput, RecordedVideo } from "./recording-types";
 import type { PublishedCombo } from "./published-catalog";
 
 export type CandidateCombo = {
@@ -12,8 +12,6 @@ export type CandidateCombo = {
   supportId: string;
   name?: string;
   difficulty?: number;
-  editorPickReason?: string;
-  editorPickContext?: string;
   route: string;
   starterIsNonAttackStance?: boolean;
   routingMode?: "autopilot" | "unique";
@@ -29,6 +27,8 @@ export type ComboCandidate = {
   id: string;
   originCandidateId?: string;
   combo: CandidateCombo;
+  processedInput?: ProcessedComboInput;
+  inputFacing?: "right" | "left";
   fileName: string;
   fileSize: number;
   status: "pending" | "approved" | "rejected" | "uploaded";
@@ -247,8 +247,6 @@ export function localComboFromUploadedCandidate(candidate: ComboCandidate, id: s
     youtubeUrl: candidate.youtubeUrl,
     editorName: combo.name ?? "",
     editorDifficulty: combo.difficulty ?? null,
-    editorPickReason: combo.editorPickReason ?? "",
-    editorPickContext: combo.editorPickContext ?? "",
     moveIds: [...combo.moveIds],
     routingMode: combo.routingMode ?? "autopilot",
     editorNotes: normalizeComboNotes(combo.notes),
@@ -351,12 +349,6 @@ export function candidateComboFromItem(item: ComboItem): CandidateCombo {
     supportId: item.supportId,
     ...(name.trim() ? { name: name.trim() } : {}),
     ...(difficulty ? { difficulty } : {}),
-    ...((local?.editorPickReason ?? base?.editorPickReason)
-      ? { editorPickReason: local?.editorPickReason ?? base?.editorPickReason }
-      : {}),
-    ...((local?.editorPickContext ?? base?.editorPickContext)
-      ? { editorPickContext: local?.editorPickContext ?? base?.editorPickContext }
-      : {}),
     route: item.route,
     ...(base?.starterIsNonAttackStance ? { starterIsNonAttackStance: true } : {}),
     routingMode: local?.routingMode ?? base?.routingMode ?? "autopilot",

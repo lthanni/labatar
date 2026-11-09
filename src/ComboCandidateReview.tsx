@@ -216,17 +216,27 @@ export function ComboCandidateReview({
   return (
     <Paper variant="outlined" sx={{ p: 1.5 }}>
       <Stack spacing={1.5}>
-        <Typography variant="subtitle2">Candidate · {candidateReviewStatus(candidate)}</Typography>
+        <Typography variant="subtitle2" color="secondary.main">
+          Candidate · {candidateReviewStatus(candidate)}
+        </Typography>
         {error && <Alert severity="error">{error}</Alert>}
         {message && <Alert severity="success">{message}</Alert>}
         <Typography variant="body2" color="text.secondary">
           Queued MP4: {candidate.fileName} ({Math.round(candidate.fileSize / 1024 / 1024)} MB)
         </Typography>
+        {candidate.processedInput && (
+          <Typography variant="body2" color="text.secondary">
+            Processed inputs: {candidate.processedInput.presses.length} presses and{" "}
+            {candidate.processedInput.directionChanges.length} direction changes (
+            {candidate.inputFacing ?? "right"} facing).
+          </Typography>
+        )}
         {(candidate.status === "pending" || candidate.status === "approved") && (
           <>
             <Button
               size="small"
               variant="outlined"
+              color="secondary"
               onClick={() => {
                 setDraft({ ...candidate.combo, notes: [...candidate.combo.notes] });
                 setMoveIdsText(candidate.combo.moveIds.join("\n"));
@@ -258,6 +268,7 @@ export function ComboCandidateReview({
               <Button
                 size="small"
                 variant="outlined"
+                color="secondary"
                 disabled={busy}
                 onClick={() =>
                   void act(async () => {
@@ -299,6 +310,7 @@ export function ComboCandidateReview({
             <Button
               size="small"
               variant="contained"
+              color="secondary"
               onClick={upload}
               disabled={busy || !connected}
               sx={{ alignSelf: "flex-start" }}
@@ -318,6 +330,7 @@ export function ComboCandidateReview({
                 fullWidth
               />
               <Button
+                color="secondary"
                 disabled={busy || !youtubeUrl.trim()}
                 onClick={() =>
                   void act(async () => {
@@ -407,6 +420,7 @@ export function ComboCandidateReview({
                 {draft.route && draft.route !== formatComboRoute(draft.route) && (
                   <Button
                     size="small"
+                    color="secondary"
                     onClick={() => {
                       setDraft((current) => {
                         if (!current) return current;
@@ -495,11 +509,6 @@ export function ComboCandidateReview({
                   slotProps={{ htmlInput: { min: 0 } }}
                 />
                 <TextField
-                  label="Editor pick context"
-                  value={draft.editorPickContext ?? ""}
-                  onChange={(event) => updateDraft("editorPickContext", event.target.value)}
-                />
-                <TextField
                   select
                   label="Routing mode"
                   value={draft.routingMode ?? "autopilot"}
@@ -511,14 +520,6 @@ export function ComboCandidateReview({
                   <option value="autopilot">Autopilot</option>
                   <option value="unique">Unique routing</option>
                 </TextField>
-                <TextField
-                  label="Why the editor picked it"
-                  multiline
-                  minRows={2}
-                  value={draft.editorPickReason ?? ""}
-                  onChange={(event) => updateDraft("editorPickReason", event.target.value)}
-                  sx={{ gridColumn: "1 / -1" }}
-                />
                 <TextField
                   label="Move IDs, one per line"
                   multiline
@@ -588,6 +589,7 @@ export function ComboCandidateReview({
                         <option value="situational">Situational</option>
                       </TextField>
                       <Button
+                        color="secondary"
                         onClick={() =>
                           setDraft((current) =>
                             current
@@ -604,6 +606,7 @@ export function ComboCandidateReview({
                     </Stack>
                   ))}
                   <Button
+                    color="secondary"
                     onClick={() =>
                       setDraft((current) =>
                         current
@@ -638,6 +641,7 @@ export function ComboCandidateReview({
           </Button>
           <Button
             variant="contained"
+            color="secondary"
             onClick={saveDetails}
             disabled={busy || !draft?.route.trim() || !draft.damage.trim()}
           >

@@ -32,6 +32,82 @@ export type RecordingCaptureMetadata = {
   normalization: "even-output-dimensions" | null;
 };
 
+export type ComboInputState = {
+  timeMs: number;
+  direction: number;
+  stickDirection: number;
+  buttons: string[];
+  actions: string[];
+};
+
+export type ComboInputCapture = {
+  schemaVersion: 1;
+  source: "xinput";
+  deviceIndex: number;
+  bindings: Record<string, string>;
+  status: "complete" | "interrupted";
+  timing: string;
+  durationMs: number;
+  states: ComboInputState[];
+};
+
+export type ProcessedComboInput = {
+  schemaVersion: 1;
+  processorVersion: number;
+  processedAt: string;
+  source: {
+    kind: "comboInputCapture";
+    sha256: string;
+    durationMs: number;
+    stateCount: number;
+    timing: string;
+    rawStartMs: number | null;
+    editsSha256?: string;
+  };
+  context: {
+    defaultFacing: "right";
+    defaultPosition: "grounded";
+  };
+  directionChanges: Array<{
+    timeMs: number;
+    sourceStateIndex: number;
+    direction: number;
+    heldButtons: string[];
+    heldGameButtons: string[];
+  }>;
+  presses: Array<{
+    timeMs: number;
+    sourceStateIndex: number;
+    physicalButton: string;
+    gameAction: string | null;
+    gameButton: string | null;
+    context: { facing: "right"; position: "grounded" | "airborne" };
+    positionAfter?: "grounded" | "airborne" | null;
+    manualEdit?: {
+      notation?: string;
+      separator?: " " | "~";
+      positionAfter?: "grounded" | "airborne";
+      togglePosition?: true;
+      charged?: true;
+      delay?: true;
+      crit?: true;
+      anyAttack?: true;
+      directionOverride?: string;
+    } | null;
+    interpretations: Record<
+      "right" | "left",
+      {
+        direction: number;
+        motion: string | null;
+        directionPath: string | null;
+        suggestedNotation?: string | null;
+        notation: string | null;
+      }
+    >;
+  }>;
+  routes: Record<"right" | "left", string>;
+};
+
 export type RecordedGame = {
   matchId: string;
   lobbyId: string;
@@ -105,4 +181,10 @@ export type RecordedVideo = {
   moveTake?: RecordingMoveTake | null;
   clip: RecordingClipMetadata | null;
   capture?: RecordingCaptureMetadata | null;
+  comboInputCapture?: ComboInputCapture | null;
+  comboInputRawStartMs?: number | null;
+  processedComboInput?: ProcessedComboInput | null;
+  inputOverlayRendered?: boolean;
+  inputOverlayEditsSha256?: string | null;
+  originalComboInputAvailable?: boolean;
 };

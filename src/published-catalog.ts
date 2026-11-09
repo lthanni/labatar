@@ -1,4 +1,5 @@
 import type { ComboNote } from "./tech-types";
+import type { ProcessedComboInput } from "./recording-types";
 
 const databaseName = "labatar-published-catalog-v1";
 const storeName = "snapshots";
@@ -37,9 +38,9 @@ export type PublishedCombo = {
   supportId: string;
   name?: string;
   difficulty?: number | null;
-  editorPickReason?: string;
-  editorPickContext?: string;
   route: string;
+  processedInput?: ProcessedComboInput;
+  inputFacing?: "right" | "left";
   starterIsNonAttackStance?: boolean;
   routingMode?: "autopilot" | "unique";
   moveIds: string[];
@@ -109,14 +110,22 @@ export function isPublishedCombo(value: unknown): value is PublishedCombo {
     (value.revision === undefined ||
       (Number.isSafeInteger(value.revision) && Number(value.revision) > 0)) &&
     (value.name === undefined || typeof value.name === "string") &&
-    (value.editorPickReason === undefined || typeof value.editorPickReason === "string") &&
-    (value.editorPickContext === undefined || typeof value.editorPickContext === "string") &&
     (value.difficulty === undefined ||
       value.difficulty === null ||
       (Number.isInteger(value.difficulty) &&
         Number(value.difficulty) >= 1 &&
         Number(value.difficulty) <= 5)) &&
     typeof value.route === "string" &&
+    (value.processedInput === undefined ||
+      (isRecord(value.processedInput) &&
+        value.processedInput.schemaVersion === 1 &&
+        isRecord(value.processedInput.routes) &&
+        typeof value.processedInput.routes.right === "string" &&
+        typeof value.processedInput.routes.left === "string" &&
+        Array.isArray(value.processedInput.directionChanges) &&
+        Array.isArray(value.processedInput.presses) &&
+        (value.inputFacing === "right" || value.inputFacing === "left"))) &&
+    (value.inputFacing === undefined || value.processedInput !== undefined) &&
     (value.starterIsNonAttackStance === undefined ||
       typeof value.starterIsNonAttackStance === "boolean") &&
     (value.routingMode === undefined ||
@@ -156,6 +165,13 @@ function parseItems<T>(value: unknown, guard: (item: unknown) => item is T): T[]
   return value.items;
 }
 
+export function cleanPublishedCombo(combo: PublishedCombo): PublishedCombo {
+  const cleaned = { ...combo };
+  delete (cleaned as Record<string, unknown>).editorPickReason;
+  delete (cleaned as Record<string, unknown>).editorPickContext;
+  return cleaned;
+}
+
 export function parsePublishedCatalog(value: unknown): PublishedCatalog {
   if (
     !isRecord(value) ||
@@ -168,7 +184,8 @@ export function parsePublishedCatalog(value: unknown): PublishedCatalog {
   ) {
     throw new Error("The saved catalog has an unexpected format.");
   }
-  return value as PublishedCatalog;
+  const catalog = value as PublishedCatalog;
+  return { ...catalog, combos: catalog.combos.map(cleanPublishedCombo) };
 }
 
 export async function fetchPublishedCatalog(
@@ -187,7 +204,7 @@ export async function fetchPublishedCatalog(
   return {
     fetchedAt: Date.now(),
     moves: parseItems(movesBody, isMove),
-    combos: parseItems(combosBody, isPublishedCombo),
+    combos: parseItems(combosBody, isPublishedCombo).map(cleanPublishedCombo),
   };
 }
 
@@ -198,7 +215,7 @@ export async function fetchPublishedCombos(
 ): Promise<PublishedCombo[]> {
   const response = await fetcher(`${apiUrl}/v1/combos`, { signal, cache: "no-store" });
   if (!response.ok) throw new Error("The published combos could not be loaded.");
-  return parseItems(await response.json(), isPublishedCombo);
+  return parseItems(await response.json(), isPublishedCombo).map(cleanPublishedCombo);
 }
 
 function openDatabase(): Promise<IDBDatabase> {

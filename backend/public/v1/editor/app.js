@@ -7,8 +7,6 @@ const fieldIds = [
   "support-id",
   "combo-name",
   "difficulty",
-  "editor-pick-reason",
-  "editor-pick-context",
   "route",
   "routing-mode",
   "screen-position",
@@ -83,14 +81,9 @@ function payload() {
   const name = fields["combo-name"].value.trim();
   const difficultyValue = fields.difficulty.value;
   const difficulty = difficultyValue ? Number(difficultyValue) : null;
-  const editorPickReason = fields["editor-pick-reason"].value.trim();
-  const editorPickContext = fields["editor-pick-context"].value.trim();
   if (name.length > 160) throw new Error("Combo name must be at most 160 characters.");
   if (difficulty !== null && (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > 5)) {
     throw new Error("Difficulty must be a whole number from 1 to 5.");
-  }
-  if (editorPickReason.length > 1000 || editorPickContext.length > 160) {
-    throw new Error("Editor pick reason or context is too long.");
   }
   const routingMode = fields["routing-mode"].value;
   if (!["autopilot", "unique"].includes(routingMode)) throw new Error("Select a routing mode.");
@@ -167,8 +160,6 @@ function payload() {
     supportId,
     name,
     difficulty,
-    editorPickReason,
-    editorPickContext,
     route,
     routingMode,
     moveIds,
@@ -238,8 +229,6 @@ function loadRecord(record) {
     "support-id": record.supportId,
     "combo-name": record.name ?? "",
     difficulty: String(record.difficulty ?? ""),
-    "editor-pick-reason": record.editorPickReason ?? "",
-    "editor-pick-context": record.editorPickContext ?? "",
     route: record.route,
     "routing-mode": record.routingMode ?? "autopilot",
     "screen-position": ["corner", "midscreen", "fullscreen"].includes(

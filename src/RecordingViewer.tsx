@@ -38,6 +38,12 @@ import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import YouTubeIcon from "@mui/icons-material/YouTube";
 import type { RecordedVideo, RecordingTagCategory, RecordingTags } from "./recording-types";
+import {
+  comboClipExportedEvent,
+  comboClipTrimmedEvent,
+  comboRecordingRenamedEvent,
+} from "./combo-input-route";
+import { ComboInputInspector } from "./ComboInputInspector";
 import { processMoveTake } from "./process-move-take";
 import { timelineChapterMarkers, type RecordingChapter } from "./recording-chapters";
 import type {
@@ -718,7 +724,9 @@ export function RecordingViewer({
   refreshToken = 0,
   mode = "recordings",
   panelOnly = false,
+  embeddedCombo = false,
   selectedRecordingId = null,
+  onPlaybackTimeMs,
   seekToLastFrameRequest = null,
   youtubeReviewRequest = null,
   youtubeUploadJobs = [],
@@ -727,7 +735,9 @@ export function RecordingViewer({
   refreshToken?: number;
   mode?: "recordings" | "nerd-processing";
   panelOnly?: boolean;
+  embeddedCombo?: boolean;
   selectedRecordingId?: string | null;
+  onPlaybackTimeMs?: (timeMs: number) => void;
   seekToLastFrameRequest?: { recordingId: string; requestId: number } | null;
   youtubeReviewRequest?: { recordingId: string; url: string; requestId: number } | null;
   youtubeUploadJobs?: Array<{ recordingId: string; phase: "queued" | "uploading" }>;
@@ -772,7 +782,11 @@ export function RecordingViewer({
   const [clipRange, setClipRange] = useState<[number, number]>([0, 0]);
   const [clipMode, setClipMode] = useState(false);
   const [exportingClipMode, setExportingClipMode] = useState<"fast" | "precise" | null>(null);
+  const [renderingInputOverlay, setRenderingInputOverlay] = useState(false);
+  const [overlayNeedsRefresh, setOverlayNeedsRefresh] = useState(false);
+  const [overlayEditsPending, setOverlayEditsPending] = useState(false);
   const [trimmingClip, setTrimmingClip] = useState(false);
+  const trimmingTask = useRef<{ recordingId: string; completion: Promise<void> } | null>(null);
   const [confirmTrim, setConfirmTrim] = useState<"fast" | "precise" | null>(null);
   const [mediaRevision, setMediaRevision] = useState(0);
   const [clipExportNotice, setClipExportNotice] = useState<string | null>(null);
@@ -841,6 +855,7 @@ export function RecordingViewer({
   const [editingRecordingId, setEditingRecordingId] = useState<string | null>(null);
   const [editingRecordingName, setEditingRecordingName] = useState("");
   const [renamingRecordingId, setRenamingRecordingId] = useState<string | null>(null);
+  const [renameWaitingForTrim, setRenameWaitingForTrim] = useState(false);
   const [reprocessingNameId, setReprocessingNameId] = useState<string | null>(null);
   const [gameChaptersId, setGameChaptersId] = useState<string | null>(null);
   const [gameChaptersNotice, setGameChaptersNotice] = useState<string | null>(null);
@@ -875,6 +890,7 @@ export function RecordingViewer({
     height: 0,
   });
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const embeddedRootRef = useRef<HTMLDivElement | null>(null);
   const youtubePlayerRef = useRef<YouTubePlaybackHandle | null>(null);
   const youtubeInfoRequestId = useRef(0);
   const handledYouTubeReviewRequestId = useRef(0);
@@ -934,61 +950,83 @@ export function RecordingViewer({
     [positionKey],
   );
 
-  const loadRecordings = useCallback(async () => {
-    if (!window.electronAPI?.recordings) return;
-    const generation = ++loadGeneration.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await window.electronAPI.recordings.list({
-        analysisScope: mode === "nerd-processing" ? "all" : panelOnly ? "move-takes" : "none",
-      });
-      if (generation !== loadGeneration.current) return;
-      const tabRecordings =
-        mode === "recordings" && !panelOnly
-          ? result.recordings.filter(
-              (recording) => !recording.moveTake && !recording.id.startsWith("moves/"),
-            )
-          : result.recordings;
-      const pendingRecordingId =
-        mode === "recordings" && !panelOnly
-          ? localStorage.getItem(techSelectedRecordingStorageKey)
-          : null;
-      const byId = new Map(tabRecordings.map((recording) => [recording.id, recording]));
-      const pendingRecording = pendingRecordingId ? byId.get(pendingRecordingId) : null;
-      if (pendingRecording) {
-        setRecordingListTab(recordingLibraryTab(pendingRecording, byId));
-        setSelectedTagFilters(emptyRecordingTags);
-        setExpandedRecordingIds((current) => {
-          const next = new Set(current);
-          const seen = new Set<string>([pendingRecording.id]);
-          let parentId = pendingRecording.clip?.sourceRecordingId;
-          while (parentId && !seen.has(parentId)) {
-            next.add(parentId);
-            seen.add(parentId);
-            parentId = byId.get(parentId)?.clip?.sourceRecordingId;
-          }
-          return next;
+  const loadRecordings = useCallback(
+    async (preserveOrder = false) => {
+      if (!window.electronAPI?.recordings) return;
+      const generation = ++loadGeneration.current;
+      if (!preserveOrder) setLoading(true);
+      setError(null);
+      try {
+        const result = await window.electronAPI.recordings.list({
+          analysisScope:
+            mode === "nerd-processing"
+              ? "all"
+              : panelOnly && !embeddedCombo
+                ? "move-takes"
+                : "none",
         });
+        if (generation !== loadGeneration.current) return;
+        const tabRecordings =
+          mode === "recordings" && !panelOnly
+            ? result.recordings.filter(
+                (recording) => !recording.moveTake && !recording.id.startsWith("moves/"),
+              )
+            : result.recordings;
+        const pendingRecordingId =
+          mode === "recordings" && !panelOnly
+            ? localStorage.getItem(techSelectedRecordingStorageKey)
+            : null;
+        const byId = new Map(tabRecordings.map((recording) => [recording.id, recording]));
+        const pendingRecording = pendingRecordingId ? byId.get(pendingRecordingId) : null;
+        if (pendingRecording) {
+          setRecordingListTab(recordingLibraryTab(pendingRecording, byId));
+          setSelectedTagFilters(emptyRecordingTags);
+          setExpandedRecordingIds((current) => {
+            const next = new Set(current);
+            const seen = new Set<string>([pendingRecording.id]);
+            let parentId = pendingRecording.clip?.sourceRecordingId;
+            while (parentId && !seen.has(parentId)) {
+              next.add(parentId);
+              seen.add(parentId);
+              parentId = byId.get(parentId)?.clip?.sourceRecordingId;
+            }
+            return next;
+          });
+        }
+        setFolder(result.folder);
+        setRecordings((current) => {
+          if (!preserveOrder) return tabRecordings;
+          const currentIds = new Set(current.map((recording) => recording.id));
+          return [
+            ...current.flatMap((recording) => {
+              const updated = byId.get(recording.id);
+              return updated ? [updated] : [];
+            }),
+            ...tabRecordings.filter((recording) => !currentIds.has(recording.id)),
+          ];
+        });
+        recordingSelection.retain(new Set(byId.keys()));
+        if (pendingRecording) {
+          setSelectedId(pendingRecording.id);
+        } else {
+          setSelectedId((current) =>
+            byId.has(current ?? "") ? current : panelOnly ? null : (tabRecordings[0]?.id ?? null),
+          );
+        }
+      } catch (loadError) {
+        if (generation === loadGeneration.current) {
+          setError(loadError instanceof Error ? loadError.message : String(loadError));
+        }
+      } finally {
+        if (generation === loadGeneration.current && !preserveOrder) setLoading(false);
       }
-      setFolder(result.folder);
-      setRecordings(tabRecordings);
-      recordingSelection.retain(new Set(byId.keys()));
-      if (pendingRecording) {
-        setSelectedId(pendingRecording.id);
-      } else {
-        setSelectedId((current) =>
-          byId.has(current ?? "") ? current : panelOnly ? null : (tabRecordings[0]?.id ?? null),
-        );
-      }
-    } catch (loadError) {
-      if (generation === loadGeneration.current) {
-        setError(loadError instanceof Error ? loadError.message : String(loadError));
-      }
-    } finally {
-      if (generation === loadGeneration.current) setLoading(false);
-    }
-  }, [mode, panelOnly, recordingSelection]);
+    },
+    [embeddedCombo, mode, panelOnly, recordingSelection],
+  );
+
+  useEffect(() => {
+    onPlaybackTimeMs?.(Math.round(currentTime * 1000));
+  }, [currentTime, onPlaybackTimeMs]);
 
   useEffect(() => {
     if (active || (mode === "recordings" && youtubeReviewRequest)) void loadRecordings();
@@ -1011,6 +1049,21 @@ export function RecordingViewer({
     () => recordings.find((recording) => recording.id === selectedId) ?? null,
     [recordings, selectedId],
   );
+  useEffect(() => {
+    setOverlayNeedsRefresh(false);
+    setOverlayEditsPending(false);
+  }, [selectedRecording?.id]);
+  const canRenderInputOverlay =
+    selectedRecording?.comboInputCapture &&
+    selectedRecording.mediaKind !== "youtube" &&
+    (selectedRecording.processedComboInput?.presses.length ?? 0) > 0 &&
+    (!selectedRecording.inputOverlayRendered ||
+      (Boolean(selectedRecording.clip?.sourceRecordingId) &&
+        (overlayNeedsRefresh ||
+          !selectedRecording.inputOverlayEditsSha256 ||
+          (selectedRecording.processedComboInput?.source.editsSha256 != null &&
+            selectedRecording.processedComboInput.source.editsSha256 !==
+              selectedRecording.inputOverlayEditsSha256))));
 
   useEffect(() => {
     let cancelled = false;
@@ -1426,6 +1479,17 @@ export function RecordingViewer({
           mode === "fast"
             ? await recordingsApi.exportClipFast(request)
             : await recordingsApi.exportClip(request);
+        if (selectedRecording.comboInputCapture && exported.comboInputCapture) {
+          window.dispatchEvent(
+            new CustomEvent(comboClipExportedEvent, {
+              detail: {
+                sourceRecordingId: selectedRecording.id,
+                recordingId: exported.id,
+                name: exported.name,
+              },
+            }),
+          );
+        }
         await loadRecordings();
         setClipMode(false);
         // The freshly exported clip is nested under the current recording.
@@ -1435,7 +1499,7 @@ export function RecordingViewer({
           next.add(selectedRecording.id);
           return next;
         });
-        setSelectedId(exported.id);
+        if (!embeddedCombo) setSelectedId(exported.id);
         const shift = clipRange[0] - (exported.clip?.startTime ?? clipRange[0]);
         setClipExportNotice(
           `Clip exported: ${exported.name}.${
@@ -1452,8 +1516,36 @@ export function RecordingViewer({
         setExportingClipMode(null);
       }
     },
-    [clipRange, exportingClipMode, loadRecordings, selectedRecording],
+    [clipRange, embeddedCombo, exportingClipMode, loadRecordings, selectedRecording],
   );
+
+  const renderComboInputs = useCallback(async () => {
+    const recordingsApi = window.electronAPI?.recordings;
+    if (!recordingsApi || !selectedRecording || renderingInputOverlay) return;
+    setRenderingInputOverlay(true);
+    setClipExportNotice(null);
+    setClipExportError(null);
+    try {
+      const rendered = await recordingsApi.renderComboInputs({ recordingId: selectedRecording.id });
+      window.dispatchEvent(
+        new CustomEvent(comboClipExportedEvent, {
+          detail: {
+            sourceRecordingId: selectedRecording.id,
+            recordingId: rendered.id,
+            name: rendered.name,
+          },
+        }),
+      );
+      await loadRecordings();
+      setExpandedRecordingIds((current) => new Set(current).add(selectedRecording.id));
+      if (!embeddedCombo) setSelectedId(rendered.id);
+      setClipExportNotice(`Rendered input overlay: ${rendered.name}. Review it before uploading.`);
+    } catch (error) {
+      setClipExportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRenderingInputOverlay(false);
+    }
+  }, [embeddedCombo, loadRecordings, renderingInputOverlay, selectedRecording]);
 
   const trimClip = useCallback(
     async (mode: "fast" | "precise") => {
@@ -1484,7 +1576,10 @@ export function RecordingViewer({
         setClipRange([0, 0]);
         setClipMode(false);
         setChapterRefreshToken((token) => token + 1);
-        await loadRecordings();
+        await loadRecordings(true);
+        if (result.recording.comboInputCapture) {
+          window.dispatchEvent(new CustomEvent(comboClipTrimmedEvent));
+        }
         const shift = clipRange[0] - result.actualStartTime;
         setClipExportNotice(
           `Trimmed ${result.recording.name}.${
@@ -1511,6 +1606,23 @@ export function RecordingViewer({
     ],
   );
 
+  const startTrim = useCallback(
+    (mode: "fast" | "precise") => {
+      if (!selectedRecording || trimmingTask.current) return;
+      const task = {
+        recordingId: selectedRecording.id,
+        completion: trimClip(mode).catch((error) => {
+          setClipExportError(error instanceof Error ? error.message : String(error));
+        }),
+      };
+      trimmingTask.current = task;
+      void task.completion.finally(() => {
+        if (trimmingTask.current === task) trimmingTask.current = null;
+      });
+    },
+    [selectedRecording, trimClip],
+  );
+
   const beginRename = useCallback((recording: RecordedVideo) => {
     const extensionStart = recording.name.lastIndexOf(".");
     const currentName =
@@ -1531,7 +1643,16 @@ export function RecordingViewer({
   const finishRecordingRename = useCallback(
     async (renamed: RecordedVideo, previousId: string) => {
       relinkTechRecording(previousId, renamed.id);
-      await loadRecordings();
+      window.dispatchEvent(
+        new CustomEvent(comboRecordingRenamedEvent, {
+          detail: { previousId, recordingId: renamed.id, name: renamed.name },
+        }),
+      );
+      setRecordings((current) =>
+        current.map((recording) => (recording.id === previousId ? renamed : recording)),
+      );
+      setSelectedId(renamed.id);
+      await loadRecordings(true);
       videoRef.current?.pause();
       setIsPlaying(false);
       setCurrentTime(0);
@@ -1539,7 +1660,6 @@ export function RecordingViewer({
       setClipRange([0, 0]);
       setClipMode(false);
       restoredRecordingId.current = null;
-      setSelectedId(renamed.id);
     },
     [loadRecordings],
   );
@@ -1554,6 +1674,11 @@ export function RecordingViewer({
     setRenameError(null);
     setRenamingRecordingId(editingRecordingId);
     try {
+      const pendingTrim = trimmingTask.current;
+      if (pendingTrim?.recordingId === editingRecordingId) {
+        setRenameWaitingForTrim(true);
+        await pendingTrim.completion;
+      }
       const renamed = await window.electronAPI.recordings.renameRecording({
         recordingId: editingRecordingId,
         name: requestedName,
@@ -1566,6 +1691,7 @@ export function RecordingViewer({
         renameActionError instanceof Error ? renameActionError.message : String(renameActionError),
       );
     } finally {
+      setRenameWaitingForTrim(false);
       setRenamingRecordingId(null);
     }
   }, [editingRecordingId, editingRecordingName, finishRecordingRename]);
@@ -2679,9 +2805,11 @@ export function RecordingViewer({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
       const key = event.key.toLowerCase();
       if (!active || !selectedRecording) return;
       const target = event.target as HTMLElement | null;
+      if (embeddedCombo && (!target || !embeddedRootRef.current?.contains(target))) return;
       if (
         target?.isContentEditable ||
         target?.tagName === "INPUT" ||
@@ -2716,10 +2844,18 @@ export function RecordingViewer({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [active, beginRename, selectedRecording, stepFrame, togglePlayback]);
+  }, [active, beginRename, embeddedCombo, selectedRecording, stepFrame, togglePlayback]);
 
   return (
-    <Stack spacing={2} sx={{ height: "100%", minHeight: 0, overflow: "hidden" }}>
+    <Stack
+      ref={embeddedRootRef}
+      spacing={embeddedCombo ? 1 : 2}
+      sx={{
+        height: embeddedCombo ? "auto" : "100%",
+        minHeight: 0,
+        overflow: embeddedCombo ? "visible" : "hidden",
+      }}
+    >
       {error && <Alert severity="error">{error}</Alert>}
       {renameError && <Alert severity="error">{renameError}</Alert>}
       {gameChaptersError && <Alert severity="error">{gameChaptersError}</Alert>}
@@ -2886,8 +3022,8 @@ export function RecordingViewer({
           minHeight: 0,
           minWidth: 0,
           alignItems: "stretch",
-          overflowX: "hidden",
-          overflowY: { xs: "auto", md: "hidden" },
+          overflowX: embeddedCombo ? "visible" : "hidden",
+          overflowY: embeddedCombo ? "visible" : { xs: "auto", md: "hidden" },
         }}
       >
         <Paper
@@ -3197,6 +3333,11 @@ export function RecordingViewer({
                           size="small"
                           value={editingRecordingName}
                           disabled={renamingRecordingId === recording.id}
+                          helperText={
+                            renameWaitingForTrim && renamingRecordingId === recording.id
+                              ? "Name will be saved when trimming finishes."
+                              : undefined
+                          }
                           aria-label={`New name for ${recording.name}`}
                           onChange={(event) => setEditingRecordingName(event.target.value)}
                           onClick={(event) => event.stopPropagation()}
@@ -3887,7 +4028,7 @@ export function RecordingViewer({
               color="warning"
               variant="contained"
               onClick={() => {
-                if (confirmTrim) void trimClip(confirmTrim);
+                if (confirmTrim) startTrim(confirmTrim);
               }}
               disabled={trimmingClip}
             >
@@ -3900,111 +4041,113 @@ export function RecordingViewer({
           variant="outlined"
           sx={{
             p: 2,
-            flex: { xs: "0 0 auto", md: 1 },
+            flex: embeddedCombo ? "1 1 auto" : { xs: "0 0 auto", md: 1 },
             minWidth: 0,
-            minHeight: { xs: "auto", md: 0 },
-            overflow: { xs: "visible", md: "auto" },
+            minHeight: embeddedCombo ? "auto" : { xs: "auto", md: 0 },
+            overflow: embeddedCombo ? "visible" : { xs: "visible", md: "auto" },
             textAlign: "left",
             containerType: "inline-size",
           }}
         >
           {selectedRecording ? (
             <Stack spacing={1.5}>
-              <Stack direction="row" sx={{ alignItems: "center", flexWrap: "wrap", gap: 1 }}>
-                <Stack
-                  sx={{
-                    flex: "1 1 160px",
-                    minWidth: 0,
-                    "@container (max-width: 760px)": { flexBasis: "100%" },
-                  }}
-                >
-                  <Typography variant="subtitle1" sx={{ overflowWrap: "anywhere" }}>
-                    {selectedRecording.name}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {selectedRecording.mediaKind === "youtube"
-                      ? "YouTube video"
-                      : formatFileSize(selectedRecording.size)}
-                  </Typography>
+              {!embeddedCombo && (
+                <Stack direction="row" sx={{ alignItems: "center", flexWrap: "wrap", gap: 1 }}>
+                  <Stack
+                    sx={{
+                      flex: "1 1 160px",
+                      minWidth: 0,
+                      "@container (max-width: 760px)": { flexBasis: "100%" },
+                    }}
+                  >
+                    <Typography variant="subtitle1" sx={{ overflowWrap: "anywhere" }}>
+                      {selectedRecording.name}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {selectedRecording.mediaKind === "youtube"
+                        ? "YouTube video"
+                        : formatFileSize(selectedRecording.size)}
+                    </Typography>
+                  </Stack>
+                  {selectedRecording.youtubeUrl ? (
+                    <Tooltip title="Open linked YouTube video">
+                      <IconButton
+                        size="small"
+                        color="error"
+                        aria-label={`Open YouTube video for ${selectedRecording.name}`}
+                        onClick={() => void openYouTubeVideo(selectedRecording)}
+                      >
+                        <YouTubeIcon />
+                      </IconButton>
+                    </Tooltip>
+                  ) : (
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={() => void openYouTubeStudio(selectedRecording)}
+                    >
+                      Open YouTube Studio in browser
+                    </Button>
+                  )}
+                  <Button size="small" onClick={() => beginYouTubeLink(selectedRecording)}>
+                    {selectedRecording.youtubeUrl ? "Edit YouTube link" : "Link YouTube video"}
+                  </Button>
+                  {selectedRecording.mediaKind === "local" &&
+                    selectedRecording.name.toLowerCase().endsWith(".mp4") && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        disabled={Boolean(youtubeUploadJobById.get(selectedRecording.id))}
+                        onClick={() => {
+                          const pendingUrl = pendingYouTubeUploadById.get(selectedRecording.id);
+                          if (pendingUrl) beginYouTubeLink(selectedRecording, pendingUrl);
+                          else beginYouTubeUpload(selectedRecording);
+                        }}
+                      >
+                        {youtubeUploadJobById.get(selectedRecording.id) === "queued"
+                          ? "Queued for YouTube"
+                          : youtubeUploadJobById.get(selectedRecording.id) === "uploading"
+                            ? "Uploading to YouTube"
+                            : pendingYouTubeUploadById.has(selectedRecording.id)
+                              ? "Review and link"
+                              : "Upload to YouTube"}
+                      </Button>
+                    )}
+                  {mode === "nerd-processing" && selectedRecording.mediaKind !== "youtube" && (
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={() => void processSelectedRecording()}
+                      disabled={
+                        Boolean(processingRecordingId) ||
+                        (selectedRecording.moveTake
+                          ? selectedRecording.framebarSequence?.status !== "approved"
+                          : calibrationSaves > 0 ||
+                            !persistentConfig ||
+                            Boolean(processingConfigError))
+                      }
+                    >
+                      {processingRecordingId === selectedRecording.id
+                        ? "Processing recording..."
+                        : selectedRecording.moveTake
+                          ? "Determine move data"
+                          : "Process current calibration"}
+                    </Button>
+                  )}
+                  {mode === "nerd-processing" &&
+                    !selectedRecording.moveTake &&
+                    selectedRecording.analysis?.processingSnapshot && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        disabled={Boolean(processingRecordingId) || calibrationSaves > 0}
+                        onClick={() => void processSelectedRecording(true)}
+                      >
+                        Reprocess saved calibration
+                      </Button>
+                    )}
                 </Stack>
-                {selectedRecording.youtubeUrl ? (
-                  <Tooltip title="Open linked YouTube video">
-                    <IconButton
-                      size="small"
-                      color="error"
-                      aria-label={`Open YouTube video for ${selectedRecording.name}`}
-                      onClick={() => void openYouTubeVideo(selectedRecording)}
-                    >
-                      <YouTubeIcon />
-                    </IconButton>
-                  </Tooltip>
-                ) : (
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={() => void openYouTubeStudio(selectedRecording)}
-                  >
-                    Open YouTube Studio in browser
-                  </Button>
-                )}
-                <Button size="small" onClick={() => beginYouTubeLink(selectedRecording)}>
-                  {selectedRecording.youtubeUrl ? "Edit YouTube link" : "Link YouTube video"}
-                </Button>
-                {selectedRecording.mediaKind === "local" &&
-                  selectedRecording.name.toLowerCase().endsWith(".mp4") && (
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      disabled={Boolean(youtubeUploadJobById.get(selectedRecording.id))}
-                      onClick={() => {
-                        const pendingUrl = pendingYouTubeUploadById.get(selectedRecording.id);
-                        if (pendingUrl) beginYouTubeLink(selectedRecording, pendingUrl);
-                        else beginYouTubeUpload(selectedRecording);
-                      }}
-                    >
-                      {youtubeUploadJobById.get(selectedRecording.id) === "queued"
-                        ? "Queued for YouTube"
-                        : youtubeUploadJobById.get(selectedRecording.id) === "uploading"
-                          ? "Uploading to YouTube"
-                          : pendingYouTubeUploadById.has(selectedRecording.id)
-                            ? "Review and link"
-                            : "Upload to YouTube"}
-                    </Button>
-                  )}
-                {mode === "nerd-processing" && selectedRecording.mediaKind !== "youtube" && (
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={() => void processSelectedRecording()}
-                    disabled={
-                      Boolean(processingRecordingId) ||
-                      (selectedRecording.moveTake
-                        ? selectedRecording.framebarSequence?.status !== "approved"
-                        : calibrationSaves > 0 ||
-                          !persistentConfig ||
-                          Boolean(processingConfigError))
-                    }
-                  >
-                    {processingRecordingId === selectedRecording.id
-                      ? "Processing recording..."
-                      : selectedRecording.moveTake
-                        ? "Determine move data"
-                        : "Process current calibration"}
-                  </Button>
-                )}
-                {mode === "nerd-processing" &&
-                  !selectedRecording.moveTake &&
-                  selectedRecording.analysis?.processingSnapshot && (
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      disabled={Boolean(processingRecordingId) || calibrationSaves > 0}
-                      onClick={() => void processSelectedRecording(true)}
-                    >
-                      Reprocess saved calibration
-                    </Button>
-                  )}
-              </Stack>
+              )}
               {selectedRecording.moveTake && (
                 <Alert
                   severity={
@@ -4415,7 +4558,7 @@ export function RecordingViewer({
                 ) : (
                   <Box
                     component="video"
-                    key={`${selectedRecording.url}-${mediaRevision}`}
+                    key={selectedRecording.url}
                     ref={videoRef}
                     src={`${selectedRecording.url}?v=${mediaRevision}`}
                     tabIndex={0}
@@ -4444,7 +4587,7 @@ export function RecordingViewer({
                           selectedRecording.framebarSequence?.status === "awaiting-review"
                         ) {
                           showLastVideoFrame(video);
-                        } else if (panelOnly && Number.isFinite(nextDuration)) {
+                        } else if (panelOnly && !embeddedCombo && Number.isFinite(nextDuration)) {
                           const needsVideoApproval =
                             selectedRecording.moveTake?.captureMethod === "automated" &&
                             selectedRecording.moveTake.captureReviewStatus !==
@@ -5315,228 +5458,278 @@ export function RecordingViewer({
                       }}
                       disabled={!duration}
                     />
-                    <Stack
-                      direction={{ xs: "column", sm: "row" }}
-                      spacing={1}
-                      sx={{ alignItems: { sm: "center" } }}
-                    >
-                      <Typography variant="caption" color="text.secondary">
-                        {formatVideoTime(currentTime)} / {formatVideoTime(duration)}
-                      </Typography>
-                      {reviewFrame && (
-                        <Typography variant="caption" color="primary.main">
-                          Exact decoded frame {reviewFrame.frameIndex}
-                        </Typography>
-                      )}
-                      {reviewLoading && (
+                    {!embeddedCombo && (
+                      <Stack
+                        direction={{ xs: "column", sm: "row" }}
+                        spacing={1}
+                        sx={{ alignItems: { sm: "center" } }}
+                      >
                         <Typography variant="caption" color="text.secondary">
-                          Decoding exact frame…
+                          {formatVideoTime(currentTime)} / {formatVideoTime(duration)}
                         </Typography>
-                      )}
-                      {selectedRecording.mediaKind !== "youtube" && (
-                        <Typography
-                          variant="caption"
-                          color="text.secondary"
-                          sx={{ ml: { sm: "auto" } }}
-                        >
-                          E: forward frame | Q: backward frame
-                        </Typography>
-                      )}
-                      {selectedRecording.mediaKind !== "youtube" && (
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          startIcon={<SceneMarkerIcon />}
-                          onClick={() => {
-                            setClipRange([0, duration]);
-                            setClipMode(true);
-                          }}
-                          disabled={!duration}
-                        >
-                          {selectedRecording.clip
-                            ? "Create or trim clip"
-                            : "Create clip or trim recording"}
-                        </Button>
-                      )}
-                      {selectedRecording?.name.toLowerCase().endsWith(".mp4") &&
-                        selectedRecording.mediaKind !== "youtube" &&
-                        !selectedRecording.clip && (
+                        {reviewFrame && (
+                          <Typography variant="caption" color="primary.main">
+                            Exact decoded frame {reviewFrame.frameIndex}
+                          </Typography>
+                        )}
+                        {reviewLoading && (
+                          <Typography variant="caption" color="text.secondary">
+                            Decoding exact frame…
+                          </Typography>
+                        )}
+                        {selectedRecording.mediaKind !== "youtube" && (
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ ml: { sm: "auto" } }}
+                          >
+                            E: forward frame | Q: backward frame
+                          </Typography>
+                        )}
+                        {selectedRecording.mediaKind !== "youtube" && (
                           <Button
                             variant="outlined"
                             size="small"
-                            disabled={Boolean(f10ClipsId) || Boolean(gameChaptersId)}
-                            onClick={() => void createF10Clips(selectedRecording)}
+                            startIcon={<SceneMarkerIcon />}
+                            onClick={() => {
+                              setClipRange([0, duration]);
+                              setClipMode(true);
+                            }}
+                            disabled={!duration}
                           >
-                            {f10ClipsId === selectedRecording.id
-                              ? "Creating clips from manual chapters..."
-                              : "Create 30-second clips from manual chapters"}
+                            {selectedRecording.clip
+                              ? "Create or trim clip"
+                              : "Create clip or trim recording"}
                           </Button>
                         )}
-                    </Stack>
+                        {selectedRecording?.name.toLowerCase().endsWith(".mp4") &&
+                          selectedRecording.mediaKind !== "youtube" &&
+                          !selectedRecording.clip && (
+                            <Button
+                              variant="outlined"
+                              size="small"
+                              disabled={Boolean(f10ClipsId) || Boolean(gameChaptersId)}
+                              onClick={() => void createF10Clips(selectedRecording)}
+                            >
+                              {f10ClipsId === selectedRecording.id
+                                ? "Creating clips from manual chapters..."
+                                : "Create 30-second clips from manual chapters"}
+                            </Button>
+                          )}
+                      </Stack>
+                    )}
                   </>
                 )}
               </Stack>
-              {clipExportNotice && <Alert severity="success">{clipExportNotice}</Alert>}
-              {clipExportError && <Alert severity="error">{clipExportError}</Alert>}
-              {chapterLoadError && (
-                <Alert severity="warning">Could not read chapters: {chapterLoadError}</Alert>
-              )}
-              {playbackError && <Alert severity="warning">{playbackError}</Alert>}
-              {(selectedRecording.clip || linkedClips.length > 0) && (
+              {!embeddedCombo && (
                 <>
-                  <Divider />
-                  <Stack spacing={0.75}>
-                    <Typography variant="subtitle2">Related recordings</Typography>
-                    {selectedRecording.clip && (
-                      <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                        <Typography variant="body2" color="text.secondary">
-                          Original video:
-                        </Typography>
-                        {sourceRecording ? (
-                          <Button
-                            variant="text"
-                            size="small"
-                            onClick={() => selectRecording(sourceRecording.id)}
-                            sx={{ justifyContent: "flex-start", overflowWrap: "anywhere" }}
-                          >
-                            {sourceRecording.name}
-                          </Button>
-                        ) : (
-                          <Typography variant="body2">
-                            {selectedRecording.clip.sourceRecordingName} (not found)
-                          </Typography>
-                        )}
-                        <Typography variant="caption" color="text.secondary">
-                          {formatVideoTime(selectedRecording.clip.startTime)} –{" "}
-                          {formatVideoTime(selectedRecording.clip.endTime)}
-                        </Typography>
-                      </Stack>
-                    )}
-                    {linkedClips.length > 0 && (
-                      <Stack spacing={0.25}>
-                        <Typography variant="body2" color="text.secondary">
-                          Clips from this video:
-                        </Typography>
-                        {linkedClips.map((clip) => (
-                          <Button
-                            key={clip.id}
-                            variant="text"
-                            size="small"
-                            onClick={() => selectRecording(clip.id)}
-                            sx={{ justifyContent: "flex-start", overflowWrap: "anywhere" }}
-                          >
-                            {clip.name} ({formatVideoTime(clip.clip?.startTime ?? 0)} –{" "}
-                            {formatVideoTime(clip.clip?.endTime ?? 0)})
-                          </Button>
-                        ))}
-                      </Stack>
-                    )}
-                  </Stack>
-                </>
-              )}
-              {selectedRecording && (
-                <>
-                  <Divider />
-                  <Stack spacing={0.75}>
-                    <Typography variant="subtitle2">Tags</Typography>
-                    {recordingTagCategories.map((category) => {
-                      const selectedTags = selectedRecording.tags ?? emptyRecordingTags;
-                      const selected = selectedTags[category.key];
-                      if (!category.subtags) {
-                        return (
-                          <FormControlLabel
-                            key={category.key}
-                            control={
-                              <Checkbox
+                  {clipExportNotice && <Alert severity="success">{clipExportNotice}</Alert>}
+                  {clipExportError && <Alert severity="error">{clipExportError}</Alert>}
+                  {canRenderInputOverlay && (
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      title={
+                        overlayEditsPending
+                          ? "Applying saved input edits before rendering."
+                          : "Crop the top and bottom HUD, shrink the game view, and place inputs in a black band. Saves a separate MP4."
+                      }
+                      onClick={() => void renderComboInputs()}
+                      disabled={
+                        renderingInputOverlay ||
+                        overlayEditsPending ||
+                        Boolean(exportingClipMode) ||
+                        trimmingClip
+                      }
+                      sx={{ alignSelf: "flex-start" }}
+                    >
+                      {renderingInputOverlay
+                        ? "Rendering input overlay..."
+                        : overlayEditsPending
+                          ? "Applying edits before rendering..."
+                          : selectedRecording.inputOverlayRendered
+                            ? "Render updated overlay from original"
+                            : "Render video with input overlay"}
+                    </Button>
+                  )}
+                  {selectedRecording?.comboInputCapture && (
+                    <ComboInputInspector
+                      key={selectedRecording.id}
+                      recording={selectedRecording}
+                      playheadMs={Math.round(currentTime * 1000)}
+                      onUpdated={loadRecordings}
+                      onEdited={() => {
+                        setOverlayNeedsRefresh(true);
+                        setOverlayEditsPending(true);
+                      }}
+                      onProcessingComplete={() => setOverlayEditsPending(false)}
+                    />
+                  )}
+                  {chapterLoadError && (
+                    <Alert severity="warning">Could not read chapters: {chapterLoadError}</Alert>
+                  )}
+                  {playbackError && <Alert severity="warning">{playbackError}</Alert>}
+                  {(selectedRecording.clip || linkedClips.length > 0) && (
+                    <>
+                      <Divider />
+                      <Stack spacing={0.75}>
+                        <Typography variant="subtitle2">Related recordings</Typography>
+                        {selectedRecording.clip && (
+                          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                            <Typography variant="body2" color="text.secondary">
+                              Original video:
+                            </Typography>
+                            {sourceRecording ? (
+                              <Button
+                                variant="text"
                                 size="small"
-                                checked={selected === true}
-                                onChange={(event) =>
+                                onClick={() => selectRecording(sourceRecording.id)}
+                                sx={{ justifyContent: "flex-start", overflowWrap: "anywhere" }}
+                              >
+                                {sourceRecording.name}
+                              </Button>
+                            ) : (
+                              <Typography variant="body2">
+                                {selectedRecording.clip.sourceRecordingName} (not found)
+                              </Typography>
+                            )}
+                            <Typography variant="caption" color="text.secondary">
+                              {formatVideoTime(selectedRecording.clip.startTime)} –{" "}
+                              {formatVideoTime(selectedRecording.clip.endTime)}
+                            </Typography>
+                          </Stack>
+                        )}
+                        {linkedClips.length > 0 && (
+                          <Stack spacing={0.25}>
+                            <Typography variant="body2" color="text.secondary">
+                              Clips from this video:
+                            </Typography>
+                            {linkedClips.map((clip) => (
+                              <Button
+                                key={clip.id}
+                                variant="text"
+                                size="small"
+                                onClick={() => selectRecording(clip.id)}
+                                sx={{ justifyContent: "flex-start", overflowWrap: "anywhere" }}
+                              >
+                                {clip.name} ({formatVideoTime(clip.clip?.startTime ?? 0)} –{" "}
+                                {formatVideoTime(clip.clip?.endTime ?? 0)})
+                              </Button>
+                            ))}
+                          </Stack>
+                        )}
+                      </Stack>
+                    </>
+                  )}
+                  {selectedRecording && (
+                    <>
+                      <Divider />
+                      <Stack spacing={0.75}>
+                        <Typography variant="subtitle2">Tags</Typography>
+                        {recordingTagCategories.map((category) => {
+                          const selectedTags = selectedRecording.tags ?? emptyRecordingTags;
+                          const selected = selectedTags[category.key];
+                          if (!category.subtags) {
+                            return (
+                              <FormControlLabel
+                                key={category.key}
+                                control={
+                                  <Checkbox
+                                    size="small"
+                                    checked={selected === true}
+                                    onChange={(event) =>
+                                      void updateRecordingTags({
+                                        ...selectedTags,
+                                        [category.key]: event.target.checked,
+                                      } as RecordingTags)
+                                    }
+                                    disabled={updatingTagsId === selectedRecording.id}
+                                  />
+                                }
+                                label={category.label}
+                              />
+                            );
+                          }
+                          const selectedSubtags = Array.isArray(selected)
+                            ? (selected as string[])
+                            : [];
+                          return (
+                            <Stack
+                              key={category.key}
+                              direction={{ xs: "column", sm: "row" }}
+                              spacing={1}
+                              sx={{ alignItems: { sm: "center" } }}
+                            >
+                              <Typography variant="body2" sx={{ minWidth: 64 }}>
+                                {category.label}
+                              </Typography>
+                              <ToggleButtonGroup
+                                size="small"
+                                exclusive={category.exclusive}
+                                value={
+                                  category.exclusive
+                                    ? (selectedSubtags[0] ?? null)
+                                    : selectedSubtags
+                                }
+                                onChange={(_, nextValue) => {
+                                  const nextSubtags = category.exclusive
+                                    ? nextValue
+                                      ? [nextValue]
+                                      : []
+                                    : (nextValue as string[]);
                                   void updateRecordingTags({
                                     ...selectedTags,
-                                    [category.key]: event.target.checked,
-                                  } as RecordingTags)
-                                }
+                                    [category.key]: nextSubtags,
+                                  } as RecordingTags);
+                                }}
+                                aria-label={`${category.label} tags`}
                                 disabled={updatingTagsId === selectedRecording.id}
-                              />
-                            }
-                            label={category.label}
-                          />
-                        );
-                      }
-                      const selectedSubtags = Array.isArray(selected) ? (selected as string[]) : [];
-                      return (
-                        <Stack
-                          key={category.key}
-                          direction={{ xs: "column", sm: "row" }}
-                          spacing={1}
-                          sx={{ alignItems: { sm: "center" } }}
-                        >
-                          <Typography variant="body2" sx={{ minWidth: 64 }}>
-                            {category.label}
-                          </Typography>
-                          <ToggleButtonGroup
-                            size="small"
-                            exclusive={category.exclusive}
-                            value={
-                              category.exclusive ? (selectedSubtags[0] ?? null) : selectedSubtags
-                            }
-                            onChange={(_, nextValue) => {
-                              const nextSubtags = category.exclusive
-                                ? nextValue
-                                  ? [nextValue]
-                                  : []
-                                : (nextValue as string[]);
-                              void updateRecordingTags({
-                                ...selectedTags,
-                                [category.key]: nextSubtags,
-                              } as RecordingTags);
-                            }}
-                            aria-label={`${category.label} tags`}
-                            disabled={updatingTagsId === selectedRecording.id}
-                          >
-                            {category.subtags.map((subtag) => (
-                              <ToggleButton
-                                key={subtag}
-                                value={subtag.replaceAll(" ", "-")}
-                                aria-label={subtag}
                               >
-                                {subtag}
-                              </ToggleButton>
-                            ))}
-                          </ToggleButtonGroup>
-                        </Stack>
-                      );
-                    })}
-                    {tagError && <Alert severity="error">{tagError}</Alert>}
-                  </Stack>
-                </>
-              )}
-              {selectedRecording.metadata && (
-                <>
-                  <Divider />
-                  <Stack spacing={0.35}>
-                    <Typography variant="subtitle2">Match metadata</Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      Match ID: {selectedRecording.metadata.matchId || "Unknown"}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      Players: {selectedRecording.metadata.player1 || "Unknown"} vs{" "}
-                      {selectedRecording.metadata.player2 || "Unknown"}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      Game {selectedRecording.metadata.gameNumber || "Unknown"} | Mode:{" "}
-                      {selectedRecording.metadata.mode || "Unknown"}
-                    </Typography>
-                    {selectedRecording.replayFileName && (
-                      <Typography
-                        variant="body2"
-                        color="text.secondary"
-                        sx={{ overflowWrap: "anywhere" }}
-                      >
-                        Replay: {selectedRecording.replayFileName}
-                      </Typography>
-                    )}
-                  </Stack>
+                                {category.subtags.map((subtag) => (
+                                  <ToggleButton
+                                    key={subtag}
+                                    value={subtag.replaceAll(" ", "-")}
+                                    aria-label={subtag}
+                                  >
+                                    {subtag}
+                                  </ToggleButton>
+                                ))}
+                              </ToggleButtonGroup>
+                            </Stack>
+                          );
+                        })}
+                        {tagError && <Alert severity="error">{tagError}</Alert>}
+                      </Stack>
+                    </>
+                  )}
+                  {selectedRecording.metadata && (
+                    <>
+                      <Divider />
+                      <Stack spacing={0.35}>
+                        <Typography variant="subtitle2">Match metadata</Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          Match ID: {selectedRecording.metadata.matchId || "Unknown"}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          Players: {selectedRecording.metadata.player1 || "Unknown"} vs{" "}
+                          {selectedRecording.metadata.player2 || "Unknown"}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          Game {selectedRecording.metadata.gameNumber || "Unknown"} | Mode:{" "}
+                          {selectedRecording.metadata.mode || "Unknown"}
+                        </Typography>
+                        {selectedRecording.replayFileName && (
+                          <Typography
+                            variant="body2"
+                            color="text.secondary"
+                            sx={{ overflowWrap: "anywhere" }}
+                          >
+                            Replay: {selectedRecording.replayFileName}
+                          </Typography>
+                        )}
+                      </Stack>
+                    </>
+                  )}
                 </>
               )}
             </Stack>

@@ -167,13 +167,35 @@ async function probeChapters(executable, videoPath) {
 }
 
 async function addGameChaptersToMp4({ executable, videoPath, manifest }) {
-  if (path.extname(videoPath).toLowerCase() !== ".mp4")
-    throw new Error("Only MP4 recordings support game chapter processing.");
-  const originalStat = await fs.stat(videoPath);
-  if (!originalStat.isFile()) throw new Error("The recording is not a file.");
   const probe = await probeChapters(executable, videoPath);
   const plan = planGameChapters(manifest, probe.creationTime, probe.durationMs);
-  const metadata = buildChapterMetadata(probe.chapters, plan.chapters, probe.durationMs);
+  return addChaptersToMp4({
+    executable,
+    videoPath,
+    probe,
+    chapters: plan.chapters,
+    replaceTitle: (title) => /^Labatar Game \d+(?: \(start not captured\))?$/.test(title),
+    skipped: plan.skipped,
+  });
+}
+
+async function addChaptersToMp4({
+  executable,
+  videoPath,
+  probe,
+  chapters,
+  replaceTitle,
+  skipped = [],
+}) {
+  if (path.extname(videoPath).toLowerCase() !== ".mp4")
+    throw new Error("Only MP4 recordings support chapter processing.");
+  const originalStat = await fs.stat(videoPath);
+  if (!originalStat.isFile()) throw new Error("The recording is not a file.");
+  const retained = probe.chapters.filter((chapter) => !replaceTitle(chapter.title));
+  const metadata = buildChapterMetadata(retained, chapters, probe.durationMs, true);
+  if (JSON.stringify(metadata.chapters) === JSON.stringify(probe.chapters)) {
+    return { added: chapters.length, skipped, backupPath: null };
+  }
   const folder = path.dirname(videoPath);
   const tempFolder = await fs.mkdtemp(path.join(folder, ".labatar-chapters-"));
   const tempVideo = path.join(tempFolder, "recording.partial");
@@ -238,8 +260,8 @@ async function addGameChaptersToMp4({ executable, videoPath, manifest }) {
       () => true,
     );
     return {
-      added: plan.chapters.length,
-      skipped: plan.skipped,
+      added: chapters.length,
+      skipped,
       backupPath: backupRemovalFailed ? backupPath : null,
     };
   } catch (error) {
