@@ -141,7 +141,11 @@ export function GettingStartedGuide({
                 </Button>
               ))}
             </Box>
-            <Box component="nav" aria-label="Guide steps" sx={{ display: "flex", gap: 0.5 }}>
+            <Box
+              component="nav"
+              aria-label="Guide steps"
+              sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}
+            >
               {steps.map((item, index) => (
                 <Button
                   key={item.title}

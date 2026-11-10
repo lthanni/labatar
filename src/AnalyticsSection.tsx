@@ -19,6 +19,7 @@ import {
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { ReplayRow } from "./AvatarGrid";
 import { summarizeOpponents } from "./opponent-summary";
+import { displayGroupedPlayerName } from "./replay-player-identity";
 import supportMap from "../electron/support-map.json";
 
 const ENABLE_OPPONENT_WIN_RATE_CHART = false;
@@ -314,7 +315,11 @@ function OpponentAutocomplete({
     const query = inputValue.trim().toLowerCase();
     let resultCount = 0;
     for (const value of values) {
-      if (selectedValues.has(value) || (query && !value.toLowerCase().includes(query))) continue;
+      if (
+        selectedValues.has(value) ||
+        (query && !displayGroupedPlayerName(value).toLowerCase().includes(query))
+      )
+        continue;
       matches.push(value);
       resultCount += 1;
       if (resultCount === AUTOCOMPLETE_RESULT_LIMIT) break;
@@ -326,11 +331,13 @@ function OpponentAutocomplete({
       size="small"
       sx={{ minWidth: 190, width: "100%" }}
       options={options}
+      getOptionKey={(option) => option}
       value={selected}
       inputValue={inputValue}
       onInputChange={(_, value) => setInputValue(value)}
       onChange={(_, value) => onChange(value)}
       filterOptions={(available) => available}
+      getOptionLabel={displayGroupedPlayerName}
       noOptionsText="No opponents found"
       renderInput={(params) => <TextField {...params} label={label} />}
       limitTags={2}
@@ -361,7 +368,11 @@ function PlayerAutocomplete({
     const query = search.trim().toLowerCase();
     let resultCount = 0;
     for (const [name] of sortedPlayers) {
-      if (name === playerOverride || (query && !name.toLowerCase().includes(query))) continue;
+      if (
+        name === playerOverride ||
+        (query && !displayGroupedPlayerName(name).toLowerCase().includes(query))
+      )
+        continue;
       matches.push(name);
       resultCount += 1;
       if (resultCount === AUTOCOMPLETE_RESULT_LIMIT) break;
@@ -373,6 +384,7 @@ function PlayerAutocomplete({
       size="small"
       sx={{ width: "100%", backgroundColor: "background.paper" }}
       options={options}
+      getOptionKey={(option) => option}
       value={playerOverride ?? ""}
       onInputChange={(_, value, reason) => setSearch(reason === "input" ? value : "")}
       onChange={(_, value) => {
@@ -382,9 +394,9 @@ function PlayerAutocomplete({
       filterOptions={(available) => available}
       getOptionLabel={(name) =>
         name
-          ? `${name} (${playerCounts[name] ?? 0})`
+          ? `${displayGroupedPlayerName(name)} (${playerCounts[name] ?? 0})`
           : playerOfInterest
-            ? `${playerOfInterest} (auto)`
+            ? `${displayGroupedPlayerName(playerOfInterest)} (auto)`
             : "Auto-detected"
       }
       renderInput={(params) => <TextField {...params} label="Player" />}
@@ -1527,7 +1539,7 @@ export function AnalyticsSection({
                             size="small"
                             slotProps={{
                               input: {
-                                "aria-label": `Include ${row.name} in charts and match table`,
+                                "aria-label": `Include ${displayGroupedPlayerName(row.name)} in charts and match table`,
                               },
                             }}
                             checked={!disabledOpponents.has(row.name)}
@@ -1536,7 +1548,7 @@ export function AnalyticsSection({
                           />
                         </TableCell>
                         <TableCell component="th" scope="row" sx={{ whiteSpace: "nowrap" }}>
-                          {row.name}
+                          {displayGroupedPlayerName(row.name)}
                         </TableCell>
                         <TableCell align="right">{row.sets}</TableCell>
                         <TableCell align="right">{row.games}</TableCell>
@@ -1592,8 +1604,18 @@ export function AnalyticsSection({
                   <BarChart data={opponentData} layout="vertical" margin={{ left: 20, right: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis type="number" domain={[0, 100]} unit="%" />
-                    <YAxis type="category" dataKey="name" width={120} interval={0} />
-                    <Tooltip />
+                    <YAxis
+                      type="category"
+                      dataKey="name"
+                      width={120}
+                      interval={0}
+                      tickFormatter={displayGroupedPlayerName}
+                    />
+                    <Tooltip
+                      labelFormatter={(label) =>
+                        typeof label === "string" ? displayGroupedPlayerName(label) : label
+                      }
+                    />
                     <Bar dataKey="winRate" name="Win rate" fill="#ce93d8" radius={[0, 4, 4, 0]} />
                   </BarChart>
                 </ResponsiveContainer>

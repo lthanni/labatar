@@ -8,6 +8,7 @@ import {
   type AnalysisSummary,
 } from "./AnalyticsSection";
 import { buildRecordingReplayIndex, recordingIdForSet } from "./recording-replay-links";
+import { displayGroupedPlayerName } from "./replay-player-identity";
 import type { RecordedVideo } from "./recording-types";
 import type { ReplayStagingPreview, ReplayStagingStatus } from "./replay-staging-types";
 import { techSelectedRecordingStorageKey, techSelectRecordingEvent } from "./tech-types";
@@ -36,9 +37,12 @@ export type ReplayRow = {
   timestamp: string | null;
   player1: string;
   player2: string;
+  player1SteamId?: string;
+  player2SteamId?: string;
   player1Character: string;
   player2Character: string;
   winner: string;
+  winnerSlot?: 1 | 2 | null;
   player1Support: string;
   player2Support: string;
   roundScore: string;
@@ -876,7 +880,7 @@ export function AvatarGrid({
     const ids = data.kind === "session" ? data.games.map((game) => game.id) : [data.id];
     const suggestedName =
       data.kind === "session"
-        ? `Labatar set - ${data.started} vs ${data.opponent}`
+        ? `Labatar set - ${data.started} vs ${displayGroupedPlayerName(data.opponent)}`
         : `Labatar replay - ${data.timestamp ?? data.id}`;
     setContextMenu(null);
     try {
@@ -1038,7 +1042,7 @@ export function AvatarGrid({
                         style={{ width: "100%" }}
                         aria-label={
                           isSession
-                            ? `Open recording for set against ${data.opponent}`
+                            ? `Open recording for set against ${displayGroupedPlayerName(data.opponent)}`
                             : "Open set recording"
                         }
                         title="Open set recording"
@@ -1161,7 +1165,7 @@ export function AvatarGrid({
           const portraits = characterSupportPairsForRow(data, playerOfInterest, "opponent")
             .map(({ character, support }) => `${character}/${support}`)
             .join(", ");
-          return [name, mmr, portraits].filter(Boolean).join(" ");
+          return [displayGroupedPlayerName(name), mmr, portraits].filter(Boolean).join(" ");
         },
         cellRenderer: ({ data }: ICellRendererParams<DisplayRow>) => {
           if (!data) return null;
@@ -1181,10 +1185,10 @@ export function AvatarGrid({
               <Typography
                 variant="body2"
                 noWrap
-                title={name}
+                title={displayGroupedPlayerName(name)}
                 sx={{ flex: "1 1 auto", minWidth: 0, textAlign: "left" }}
               >
-                {name}
+                {displayGroupedPlayerName(name)}
               </Typography>
               {mmr && (
                 <Box

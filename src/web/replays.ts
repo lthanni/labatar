@@ -23,9 +23,12 @@ export type WebReplayRow = {
   timestamp: string | null;
   player1: string;
   player2: string;
+  player1SteamId?: string;
+  player2SteamId?: string;
   player1Character: string;
   player2Character: string;
   winner: string;
+  winnerSlot?: 1 | 2 | null;
   player1Support: string;
   player2Support: string;
   roundScore: string;
@@ -415,7 +418,10 @@ async function* logLines(file: Blob, signal?: AbortSignal): AsyncGenerator<strin
 }
 
 function ratingsFromLogs(files: ReplayInputFile[], options: ReplayScanOptions) {
-  const map = new Map<string, ReplayRatings>();
+  const map = new Map<
+    string,
+    { ratings: ReplayRatings | null; player1SteamId: string; player2SteamId: string }
+  >();
   const logs = files.filter(
     ({ relativePath }) =>
       /(^|\/)logs\//i.test(relativePath) && relativePath.toLowerCase().endsWith(".txt"),
@@ -427,6 +433,7 @@ function ratingsFromLogs(files: ReplayInputFile[], options: ReplayScanOptions) {
       let pendingChange: PendingChange | null = null;
       const volatility: Record<string, number | null> = {};
       const characters: Record<string, string | null> = {};
+      const steamIds: Record<string, string> = {};
       let lineIndex = 0;
       try {
         for await (const line of logLines(logs[index].file, options.signal)) {
@@ -437,9 +444,12 @@ function ratingsFromLogs(files: ReplayInputFile[], options: ReplayScanOptions) {
             if (player === "player1") {
               characters.player1 = null;
               characters.player2 = null;
+              steamIds.player1 = "";
+              steamIds.player2 = "";
               pendingChange = null;
             }
             characters[player] = setPlayer[2].trim();
+            steamIds[player] = line.match(/\(SteamID:\s*(\d+)/i)?.[1] ?? "";
             const vol = line.match(
               /Glicko:\s*\[\s*R:\s*([^:]+):\s*D:\s*([^:]+):\s*Vol:\s*([^\]]+)\]/i,
             );
@@ -468,10 +478,16 @@ function ratingsFromLogs(files: ReplayInputFile[], options: ReplayScanOptions) {
               characters,
             );
           const replay = line.match(/Successfully wrote replay file:\s*(.*?\.dlr)/i);
-          if (replay && pending) {
+          if (replay) {
             const name = replay[1].split(/[\\/]/).pop()!.toLowerCase();
-            map.set(name, pending);
+            map.set(name, {
+              ratings: pending,
+              player1SteamId: steamIds.player1 && steamIds.player2 ? steamIds.player1 : "",
+              player2SteamId: steamIds.player1 && steamIds.player2 ? steamIds.player2 : "",
+            });
             pending = null;
+            steamIds.player1 = "";
+            steamIds.player2 = "";
             volatility.player1 = null;
             volatility.player2 = null;
             characters.player1 = null;
@@ -551,7 +567,7 @@ export async function rescanReplayFolder(
     completed: replayFiles.length,
     total: replayFiles.length,
   });
-  const ratings = await ratingsFromLogs(files, options);
+  const logDetails = await ratingsFromLogs(files, options);
   const games: WebReplayRow[] = [];
   const hashes = new Set<string>();
   let duplicateCount = 0;
@@ -569,6 +585,7 @@ export async function rescanReplayFolder(
     }
     const fields = decodeAsciiFields(bytes);
     const fileName = input.relativePath.split("/").pop() ?? input.relativePath;
+    const details = logDetails.get(fileName.toLowerCase());
     const player1 = cleanName(fields.ReplayInfo_P1Name ?? "Player 1");
     const player2 = cleanName(fields.ReplayInfo_P2Name ?? "Player 2");
     const rawCharacter1 = fields.P1 ?? fields.PreFight_MainChar ?? "Unknown";
@@ -581,6 +598,8 @@ export async function rescanReplayFolder(
         : fields.ReplayInfo_Winner === "2"
           ? player2
           : "Unknown";
+    const winnerSlot =
+      fields.ReplayInfo_Winner === "1" ? 1 : fields.ReplayInfo_Winner === "2" ? 2 : null;
     const timestampMatch = fileName.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2})-(\d{2})-(\d{2})/);
     const contentHash = await sha256(bytes);
     if (hashes.has(contentHash)) duplicateCount += 1;
@@ -594,9 +613,12 @@ export async function rescanReplayFolder(
           : null,
         player1,
         player2,
+        player1SteamId: details?.player1SteamId ?? "",
+        player2SteamId: details?.player2SteamId ?? "",
         player1Character,
         player2Character,
         winner,
+        winnerSlot,
         player1Support: formatSupport(
           player1Character,
           fields.P1_SupportCharId ??
@@ -612,7 +634,7 @@ export async function rescanReplayFolder(
             fields.SupportCharIDP2,
         ),
         roundScore: replayRoundScore(fields),
-        ratings: ratings.get(fileName.toLowerCase()) ?? null,
+        ratings: details?.ratings ?? null,
       });
     }
     options.onProgress?.({ phase: "scanning", completed: index + 1, total: replayFiles.length });

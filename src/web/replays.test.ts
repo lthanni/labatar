@@ -92,6 +92,7 @@ describe("browser replay scanning", () => {
       player1Support: "Gyatso",
       player2Support: "None",
       winner: "Alice",
+      winnerSlot: 1,
       roundScore: "2 - 1",
     });
     expect(result.duplicateCount).toBe(1);
@@ -247,6 +248,32 @@ describe("browser replay scanning", () => {
       mode: "Ranked",
       player1: { rating: 100, characterMmr: 1200, volatility: 0.4 },
       player2: { rating: 200, characterMmr: 1300, volatility: 0.5 },
+    });
+    expect(result.games[0]).toMatchObject({ player1SteamId: "1", player2SteamId: "2" });
+  });
+
+  it("associates Steam IDs even when a log has no ratings header", async () => {
+    const result = await rescanReplayFolder({
+      name: "game",
+      files: [
+        {
+          relativePath: "replays/unranked.dlr",
+          file: replay({ ReplayInfo_P1Name: "A", ReplayInfo_P2Name: "B" }),
+        },
+        {
+          relativePath: "logs/match.txt",
+          file: new Blob([
+            "SetNewMatch: Player 1: Aang (SteamID: 76561198000000001, Glicko: [])\n" +
+              "SetNewMatch: Player 2: Korra (SteamID: 76561198000000002, Glicko: [])\n" +
+              "Successfully wrote replay file: C:\\game\\replays\\unranked.dlr",
+          ]),
+        },
+      ],
+    });
+    expect(result.games[0]).toMatchObject({
+      player1SteamId: "76561198000000001",
+      player2SteamId: "76561198000000002",
+      ratings: null,
     });
   });
 });

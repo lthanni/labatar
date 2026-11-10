@@ -38,6 +38,10 @@ import { AllCommunityModule } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-quartz.css";
 import { AvatarGrid, type ReplayRow } from "./AvatarGrid";
+import {
+  groupReplayPlayersBySteamId,
+  resolveGroupedPlayerSelection,
+} from "./replay-player-identity";
 import type { AnalysisSummary } from "./AnalyticsSection";
 import { useCallback } from "react";
 import { ObsRecordingPanel } from "./ObsRecordingPanel";
@@ -790,7 +794,6 @@ function ReplayAnalysis({
 }) {
   const [games, setGames] = useState<ReplayRow[]>([]);
   const [replayFolder, setReplayFolder] = useState<string | null>(null);
-  const [playerCounts, setPlayerCounts] = useState<Record<string, number>>({});
   const [overridePlayer, setOverridePlayer] = useState<string | null>(null);
   const [rankedOnly, setRankedOnly] = useState(false);
   const [rankAffectingOnly, setRankAffectingOnly] = useState(false);
@@ -830,42 +833,31 @@ function ReplayAnalysis({
   }, [active, gameFolder]);
   const [isGridPending, startGridTransition] = useTransition();
   const lastLoadedFolder = useRef<string | null>(null);
-  const onData = useCallback(
-    (nextGames: ReplayRow[], counts: Record<string, number>, folder: string) => {
-      const folderChanged = lastLoadedFolder.current !== folder;
-      lastLoadedFolder.current = folder;
-      startGridTransition(() => {
-        setGames((currentGames) => {
-          const previousById = new Map(currentGames.map((game) => [game.id, game]));
-          const stableGames = nextGames.map((game) => {
-            const previous = previousById.get(game.id);
-            return previous && JSON.stringify(previous) === JSON.stringify(game) ? previous : game;
-          });
-          return stableGames.length === currentGames.length &&
-            stableGames.every((game, index) => game === currentGames[index])
-            ? currentGames
-            : stableGames;
+  const onData = useCallback((nextGames: ReplayRow[], folder: string) => {
+    const folderChanged = lastLoadedFolder.current !== folder;
+    lastLoadedFolder.current = folder;
+    startGridTransition(() => {
+      setGames((currentGames) => {
+        const previousById = new Map(currentGames.map((game) => [game.id, game]));
+        const stableGames = nextGames.map((game) => {
+          const previous = previousById.get(game.id);
+          return previous && JSON.stringify(previous) === JSON.stringify(game) ? previous : game;
         });
-        setReplayFolder(folder);
-        setPlayerCounts((currentCounts) => {
-          const currentKeys = Object.keys(currentCounts);
-          const nextKeys = Object.keys(counts);
-          return currentKeys.length === nextKeys.length &&
-            nextKeys.every((key) => currentCounts[key] === counts[key])
-            ? currentCounts
-            : counts;
-        });
-        if (folderChanged) setOverridePlayer(null);
+        return stableGames.length === currentGames.length &&
+          stableGames.every((game, index) => game === currentGames[index])
+          ? currentGames
+          : stableGames;
       });
-    },
-    [],
-  );
+      setReplayFolder(folder);
+      if (folderChanged) setOverridePlayer(null);
+    });
+  }, []);
   useEffect(() => {
     if (!active) return;
     const replays = window.electronAPI?.replays;
     let current = true;
     if (!replays || !gameFolder) {
-      onData([], {}, "");
+      onData([], "");
       setScanLoading(false);
       onScanError(null);
       return;
@@ -899,7 +891,7 @@ function ReplayAnalysis({
           if (progressTimer !== null) window.clearTimeout(progressTimer);
           setScanLoading(false);
           onScanError(null);
-          onData(cached.games, cached.playerCounts, gameFolder);
+          onData(cached.games, gameFolder);
         })
         .catch(() => undefined);
     }
@@ -915,7 +907,7 @@ function ReplayAnalysis({
         if (progressTimer !== null) window.clearTimeout(progressTimer);
         setScanLoading(false);
         onScanError(null);
-        onData(result.games, result.playerCounts, gameFolder);
+        onData(result.games, gameFolder);
         const scannedCount = result.games.length + result.duplicateCount;
         setScanProgress({ completed: scannedCount, total: scannedCount, phase: "scanning" });
       })
@@ -925,7 +917,7 @@ function ReplayAnalysis({
         scanRequest.at = Date.now();
         if (progressTimer !== null) window.clearTimeout(progressTimer);
         setScanLoading(false);
-        if (showFullLoadProgress && lastLoadedFolder.current !== gameFolder) onData([], {}, "");
+        if (showFullLoadProgress && lastLoadedFolder.current !== gameFolder) onData([], "");
         onScanError(error instanceof Error ? error.message : String(error));
       });
     return () => {
@@ -935,20 +927,25 @@ function ReplayAnalysis({
       if (!scanFinished && lastScanRequest.current === scanRequest) lastScanRequest.current = null;
     };
   }, [active, gameFolder, gameFolderRefreshToken, focusRefreshToken, onData, onScanError]);
-  const deferredGames = useDeferredValue(games);
-  const isGridStale = deferredGames !== games;
+  const groupedGames = useMemo(() => groupReplayPlayersBySteamId(games), [games]);
+  const resolvedPlayerOverride = useMemo(
+    () => resolveGroupedPlayerSelection(overridePlayer, groupedGames),
+    [overridePlayer, groupedGames],
+  );
+  const deferredGames = useDeferredValue(groupedGames);
+  const isGridStale = deferredGames !== groupedGames;
   const isPreparingGrid = isGridPending || isGridStale;
   const modeFilteredGames = useMemo(() => {
     const modeGames = rankedOnly ? deferredGames.filter(isRankedReplay) : deferredGames;
     return rankedOnly && rankAffectingOnly ? modeGames.filter(affectsRank) : modeGames;
   }, [deferredGames, rankedOnly, rankAffectingOnly]);
   const visiblePlayerCounts = useMemo(
-    () => (rankedOnly ? getPlayerCounts(modeFilteredGames) : playerCounts),
-    [modeFilteredGames, playerCounts, rankedOnly],
+    () => getPlayerCounts(modeFilteredGames),
+    [modeFilteredGames],
   );
   const automaticPlayer =
     Object.entries(visiblePlayerCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
-  const playerOfInterest = overridePlayer ?? automaticPlayer;
+  const playerOfInterest = resolvedPlayerOverride ?? automaticPlayer;
   const relevantGames = useMemo(
     () =>
       modeFilteredGames.filter(
@@ -1069,7 +1066,7 @@ function ReplayAnalysis({
         showMmrInUnrankedGames={showMmrInUnrankedGames}
         playerOfInterest={playerOfInterest}
         playerCounts={visiblePlayerCounts}
-        playerOverride={overridePlayer}
+        playerOverride={resolvedPlayerOverride}
         onPlayerOverrideChange={onPlayerOverride}
         dateFrom={dateFrom}
         dateTo={dateTo}
@@ -1273,8 +1270,8 @@ function App() {
       section: "Record a combo",
       title: "Review the route",
       instruction:
-        "Open the recorded combo and review its suggested route against the video. Correct inputs or facing where needed. Trim only if you want the route from a shorter part of the recording.",
-      why: "Controller inputs alone cannot tell whether an attack connected or which way the character faced after a side switch.",
+        "Open the recorded combo and compare its suggested route with the linked video. For extra attempts, select its MP4 in Recordings, choose Create clip or trim recording, set the successful range, and use Precise trim. The linked route updates to match.",
+      why: "The suggested route comes from controller presses. It cannot tell whether an attack connected, when you jumped or landed, or whether you switched sides.",
       anchor: "combo-route",
       fallbackAnchor: "combo-record",
       fallbackInstruction:
@@ -1282,10 +1279,34 @@ function App() {
       tab: combosTabIndex,
     },
     {
+      section: "Record a combo",
+      title: "Mark jumps and landings",
+      instruction:
+        "In Recorded inputs below Route, right-click the first airborne move and choose Toggle airborne/grounded from here. That chip and later chips become airborne (j.). Right-click the first grounded move after landing and toggle again.",
+      why: "The input processor starts grounded. Each toggle changes the position for that chip and every later chip until the next toggle.",
+      anchor: "combo-input-track",
+      fallbackAnchor: "combo-route",
+      fallbackInstruction:
+        "Select a recorded combo with saved controller inputs. Its Recorded inputs section appears below Route; if the inputs are unavailable, use Reprocess clip inputs.",
+      tab: combosTabIndex,
+    },
+    {
+      section: "Record a combo",
+      title: "Correct individual moves",
+      instruction:
+        "Click a recorded input chip to edit its Track token, join it to the previous move with ~, or set the position after that move. Choose Save and reprocess. Right-click and choose Override direction to fix motions after a side switch.",
+      why: "Chip edits update the suggested route while keeping the raw controller capture. Editing the Route field in Edit combo data makes that route manual, so later input processing will not replace it.",
+      anchor: "combo-input-track",
+      fallbackAnchor: "combo-route",
+      fallbackInstruction:
+        "Select a recorded combo with saved controller inputs, then use its Recorded inputs section below Route. Use Edit combo data for final details after fixing the input track.",
+      tab: combosTabIndex,
+    },
+    {
       section: "Submit a candidate",
       title: "Complete the combo details",
       instruction:
-        "Click Edit combo data. Check the route, fill in damage, choose the screen position, then save and close the editor. Keep the saved MP4 linked to this combo.",
+        "Click Edit combo data. Check the corrected route, fill in damage, choose the screen position, then save and close the editor. Keep the saved MP4 linked to this combo.",
       why: "A candidate contains the video and catalog-facing combo details. Personal practice tracking stays on your device.",
       anchor: "combo-edit-data",
       fallbackAnchor: "combo-record",

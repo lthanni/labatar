@@ -1,8 +1,27 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const path = require("node:path");
 const { PassThrough } = require("node:stream");
 const test = require("node:test");
-const { startComboInputClient } = require("./combo-input-client.cjs");
+const { comboInputWorkerPath, startComboInputClient } = require("./combo-input-client.cjs");
+
+void test("the packaged combo input worker is unpacked for PowerShell", () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+  assert.ok(packageJson.build.asarUnpack.includes("electron/combo-input-worker.ps1"));
+});
+
+void test("combo input worker resolves to a real unpacked path in a packaged app", () => {
+  const packagedDirectory = path.join("release", "resources", "app.asar", "electron");
+  assert.equal(
+    comboInputWorkerPath(packagedDirectory),
+    path.join("release", "resources", "app.asar.unpacked", "electron", "combo-input-worker.ps1"),
+  );
+  assert.equal(
+    comboInputWorkerPath(path.join("project", "electron")),
+    path.join("project", "electron", "combo-input-worker.ps1"),
+  );
+});
 
 function fakeWorker() {
   const child = new EventEmitter();

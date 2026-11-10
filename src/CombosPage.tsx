@@ -5509,18 +5509,20 @@ function ComboDetail({
               </Typography>
             </Box>
             {!readOnly && recording?.comboInputCapture && (
-              <ComboInputInspector
-                key={recording.id}
-                recording={recording}
-                playheadMs={localVideoTimeMs}
-                onUpdated={onInputsUpdated}
-                onEdited={() => {
-                  setOverlayNeedsRefresh(true);
-                  setOverlayEditsPending(true);
-                }}
-                onProcessingComplete={() => setOverlayEditsPending(false)}
-                compact
-              />
+              <Box data-guide-anchor="combo-input-track">
+                <ComboInputInspector
+                  key={recording.id}
+                  recording={recording}
+                  playheadMs={localVideoTimeMs}
+                  onUpdated={onInputsUpdated}
+                  onEdited={() => {
+                    setOverlayNeedsRefresh(true);
+                    setOverlayEditsPending(true);
+                  }}
+                  onProcessingComplete={() => setOverlayEditsPending(false)}
+                  compact
+                />
+              </Box>
             )}
             {!readOnly && canRenderInputOverlay && (
               <Stack spacing={1} sx={{ alignItems: "flex-start" }}>

@@ -4227,6 +4227,7 @@ async function readReplayRatingsFromLog(logFile) {
   let pendingRatings = null;
   const pendingVolatility = {};
   const pendingCharacters = {};
+  const pendingSteamIds = {};
   let pendingMmrChange = null;
   const input = fs.createReadStream(logFile, { encoding: "latin1" });
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
@@ -4236,10 +4237,13 @@ async function readReplayRatingsFromLog(logFile) {
       if (glicko.player === "player1") {
         pendingCharacters.player1 = null;
         pendingCharacters.player2 = null;
+        pendingSteamIds.player1 = "";
+        pendingSteamIds.player2 = "";
         pendingMmrChange = null;
       }
       pendingVolatility[glicko.player] = glicko.volatility;
       pendingCharacters[glicko.player] = glicko.character;
+      pendingSteamIds[glicko.player] = line.match(/\(SteamID:\s*(\d+)/i)?.[1] ?? "";
     }
 
     const mmrChange = parseCharacterMmrChange(line);
@@ -4259,9 +4263,17 @@ async function readReplayRatingsFromLog(logFile) {
     }
 
     const replayMatch = line.match(/Successfully wrote replay file:\s*(.*?\.dlr)/i);
-    if (replayMatch && pendingRatings) {
-      ratingsByReplayName.set(path.win32.basename(replayMatch[1]), pendingRatings);
+    if (replayMatch) {
+      ratingsByReplayName.set(path.win32.basename(replayMatch[1]).toLowerCase(), {
+        ratings: pendingRatings,
+        player1SteamId:
+          pendingSteamIds.player1 && pendingSteamIds.player2 ? pendingSteamIds.player1 : "",
+        player2SteamId:
+          pendingSteamIds.player1 && pendingSteamIds.player2 ? pendingSteamIds.player2 : "",
+      });
       pendingRatings = null;
+      pendingSteamIds.player1 = "";
+      pendingSteamIds.player2 = "";
       pendingVolatility.player1 = null;
       pendingVolatility.player2 = null;
       pendingCharacters.player1 = null;
@@ -4348,6 +4360,8 @@ async function parseReplayFile(
       : fields.ReplayInfo_Winner === "2"
         ? names.player2
         : "Unknown";
+  const winnerSlot =
+    fields.ReplayInfo_Winner === "1" ? 1 : fields.ReplayInfo_Winner === "2" ? 2 : null;
   const timestampMatch = fileName.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2})-(\d{2})-(\d{2})/);
   const timestamp = timestampMatch
     ? `${timestampMatch[1]}-${timestampMatch[2]}-${timestampMatch[3]} ${timestampMatch[4]}:${timestampMatch[5]}:${timestampMatch[6]}`
@@ -4362,6 +4376,7 @@ async function parseReplayFile(
     player1Character: characters.player1,
     player2Character: characters.player2,
     winner,
+    winnerSlot,
     player1Support: formatSupport(
       characters.player1,
       fields.P1_SupportCharId ??
@@ -6548,7 +6563,7 @@ async function findReplayFiles(folder) {
   return replayFiles.sort((left, right) => left.localeCompare(right));
 }
 
-const REPLAY_SCAN_CACHE_VERSION = 2;
+const REPLAY_SCAN_CACHE_VERSION = 3;
 const replayScanSupportMapHash = createHash("sha256")
   .update(JSON.stringify(supportMap))
   .digest("hex");
@@ -6737,9 +6752,12 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
         scanCache.replayFiles.delete(scanCache.replayFiles.keys().next().value);
         scanCache.dirty = true;
       }
+      const logDetails = ratingsByReplayName.get(path.basename(filePath).toLowerCase());
       const game = {
         ...cached.replay,
-        ratings: ratingsByReplayName.get(path.basename(filePath)) ?? null,
+        ratings: logDetails?.ratings ?? null,
+        player1SteamId: logDetails?.player1SteamId ?? "",
+        player2SteamId: logDetails?.player2SteamId ?? "",
       };
       game.id = logicalReplayId(resolvedFolder, filePath, seenReplayIds, stagingState);
       if (seenReplayHashes.has(game.contentHash)) duplicateCount += 1;

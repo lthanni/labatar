@@ -55,6 +55,7 @@
     },
     "electronDist": "node_modules/electron/dist",
     "asarUnpack": [
+      "electron/combo-input-worker.ps1",
       "node_modules/ffmpeg-static/ffmpeg.exe"
     ],
     "files": [

@@ -34,6 +34,10 @@ import {
   createTheme,
 } from "@mui/material";
 import { AvatarGrid, type ReplayRow } from "./AvatarGrid";
+import {
+  groupReplayPlayersBySteamId,
+  resolveGroupedPlayerSelection,
+} from "./replay-player-identity";
 import { OPPONENT_CHARACTER_ROSTER, type AnalysisSummary } from "./AnalyticsSection";
 import { ObsRecordingProvider } from "./ObsRecordingContext";
 import { extractWebArtwork, type WebArtworkLibrary, type WebArtworkProgress } from "./web/artwork";
@@ -322,7 +326,14 @@ function WebApp() {
     }
   };
 
-  const allGames: ReplayRow[] = result?.games ?? EMPTY_GAMES;
+  const allGames: ReplayRow[] = useMemo(
+    () => groupReplayPlayersBySteamId(result?.games ?? EMPTY_GAMES),
+    [result],
+  );
+  const resolvedPlayerOverride = useMemo(
+    () => resolveGroupedPlayerSelection(playerOverride, allGames),
+    [playerOverride, allGames],
+  );
   const modeGames = useMemo(
     () =>
       allGames.filter(
@@ -332,13 +343,10 @@ function WebApp() {
       ),
     [allGames, rankedOnly, rankAffectingOnly],
   );
-  const playerCounts = useMemo(
-    () => (rankedOnly ? playerCountsFor(modeGames) : (result?.playerCounts ?? {})),
-    [modeGames, rankedOnly, result],
-  );
+  const playerCounts = useMemo(() => playerCountsFor(modeGames), [modeGames]);
   const automaticPlayer =
     Object.entries(playerCounts).sort((left, right) => right[1] - left[1])[0]?.[0] ?? null;
-  const player = playerOverride ?? automaticPlayer;
+  const player = resolvedPlayerOverride ?? automaticPlayer;
   const games = useMemo(
     () => modeGames.filter((game) => game.player1 === player || game.player2 === player),
     [modeGames, player],
@@ -736,7 +744,7 @@ function WebApp() {
           webPortraits={portraits}
           playerOfInterest={player}
           playerCounts={playerCounts}
-          playerOverride={playerOverride}
+          playerOverride={resolvedPlayerOverride}
           onPlayerOverrideChange={setPlayerOverride}
           dateFrom={dateFrom}
           dateTo={dateTo}

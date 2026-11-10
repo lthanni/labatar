@@ -639,14 +639,12 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
                 )}
                 {currentMatch?.player1 && (
                   <Typography variant="body2">
-                    P1 character: {currentMatch.player1.character || "unknown"} · Steam ID:{" "}
-                    {currentMatch.player1.steamId || "unknown"}
+                    P1 character: {currentMatch.player1.character || "unknown"}
                   </Typography>
                 )}
                 {currentMatch?.player2 && (
                   <Typography variant="body2">
-                    P2 character: {currentMatch.player2.character || "unknown"} · Steam ID:{" "}
-                    {currentMatch.player2.steamId || "unknown"}
+                    P2 character: {currentMatch.player2.character || "unknown"}
                   </Typography>
                 )}
                 {currentMatch && (

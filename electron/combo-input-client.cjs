@@ -1,6 +1,11 @@
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 
+function comboInputWorkerPath(moduleDirectory = __dirname) {
+  const workerPath = path.join(moduleDirectory, "combo-input-worker.ps1");
+  return workerPath.replace(/([\\/])app\.asar([\\/])/, "$1app.asar.unpacked$2");
+}
+
 async function startComboInputClient({
   onState,
   powershell = "powershell.exe",
@@ -18,7 +23,7 @@ async function startComboInputClient({
       "-ExecutionPolicy",
       "Bypass",
       "-File",
-      path.join(__dirname, "combo-input-worker.ps1"),
+      comboInputWorkerPath(),
     ],
     { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], shell: false },
   );
@@ -106,4 +111,4 @@ async function startComboInputClient({
   };
 }
 
-module.exports = { startComboInputClient };
+module.exports = { comboInputWorkerPath, startComboInputClient };
