@@ -35,6 +35,7 @@ const sideGuidePopperModifiers: PopperProps["modifiers"] = [
 ];
 
 export type GuideMode = keyof typeof gettingStartedGuideOptions;
+export type GettingStartedMenu = "audience" | "consumer";
 
 export type AnchoredGuideStep = {
   section: string;
@@ -58,50 +59,73 @@ export type GuideStep = AnchoredGuideStep & {
 };
 
 export function GettingStartedChooser({
-  open,
+  menu,
+  onChooseConsumer,
   onChoose,
   onOpenLabbing,
+  onBack,
   onClose,
 }: {
-  open: boolean;
+  menu: GettingStartedMenu | null;
+  onChooseConsumer: () => void;
   onChoose: (mode: GuideMode) => void;
   onOpenLabbing?: () => void;
+  onBack: () => void;
   onClose: () => void;
 }) {
-  const options = [
-    ...(["browse", "contribute"] as const).map((mode) => ({
-      id: mode,
-      ...gettingStartedGuideOptions[mode],
-      onSelect: () => onChoose(mode),
-    })),
-    ...(onOpenLabbing
-      ? [
-          {
-            id: "labbing",
-            title: "Practice in Labbing",
-            description:
-              "Use P2 Recovery Mode to practice against randomized inputs in training mode.",
-            onSelect: onOpenLabbing,
-          },
-        ]
-      : []),
-  ];
+  const consumerMenu = menu === "consumer";
+  const options = consumerMenu
+    ? [
+        {
+          id: "browse",
+          ...gettingStartedGuideOptions.browse,
+          onSelect: () => onChoose("browse"),
+        },
+        ...(onOpenLabbing
+          ? [
+              {
+                id: "labbing",
+                title: "Practice in Labbing",
+                description:
+                  "Use P2 Recovery Mode to practice against randomized inputs in training mode.",
+                onSelect: onOpenLabbing,
+              },
+            ]
+          : []),
+      ]
+    : [
+        {
+          id: "consumer",
+          title: "For consumers",
+          description: "Find combos, guides, and players for your character.",
+          onSelect: onChooseConsumer,
+        },
+        {
+          id: "creator",
+          title: "For creators",
+          description: gettingStartedGuideOptions.contribute.description,
+          onSelect: () => onChoose("contribute"),
+        },
+      ];
 
   return (
     <Dialog
-      open={open}
+      open={menu !== null}
       onClose={onClose}
       aria-labelledby="getting-started-title"
       fullWidth
       maxWidth="xs"
     >
-      <DialogTitle id="getting-started-title">Getting started</DialogTitle>
+      <DialogTitle id="getting-started-title">
+        {consumerMenu ? "Getting started for consumers" : "Getting started"}
+      </DialogTitle>
       <DialogContent>
         <Stack spacing={1.5}>
-          {options.map(({ id, title, description, onSelect }) => (
+          {options.map(({ id, title, description, onSelect }, index) => (
             <Button
               key={id}
               variant="outlined"
+              autoFocus={menu !== null && index === 0}
               aria-label={title}
               aria-describedby={`guide-option-${id}`}
               onClick={onSelect}
@@ -123,6 +147,7 @@ export function GettingStartedChooser({
         </Stack>
       </DialogContent>
       <DialogActions>
+        {consumerMenu && <Button onClick={onBack}>Back</Button>}
         <Button onClick={onClose}>Close</Button>
       </DialogActions>
     </Dialog>
@@ -145,6 +170,7 @@ export function AnchoredGuide({
   onChooseGuide,
   onClose,
   placement = "bottom-start",
+  launcherAnchor = "consumer-guide-launcher",
   action,
 }: {
   label: string;
@@ -154,6 +180,7 @@ export function AnchoredGuide({
   onChooseGuide?: () => void;
   onClose: () => void;
   placement?: "bottom-start" | "right-start" | "inline";
+  launcherAnchor?: string;
   action?: ReactNode;
 }) {
   const step = steps[stepIndex];
@@ -173,7 +200,7 @@ export function AnchoredGuide({
     let highlighted: HTMLElement | null = null;
     const locate = () => {
       const target = visibleAnchor(targetName);
-      const next = target ?? visibleAnchor(fallbackName) ?? visibleAnchor("guide-launcher");
+      const next = target ?? visibleAnchor(fallbackName) ?? visibleAnchor(launcherAnchor);
       if (highlighted !== target) {
         highlighted?.classList.remove("labatar-guide-target");
         target?.classList.add("labatar-guide-target");
@@ -197,7 +224,7 @@ export function AnchoredGuide({
       window.removeEventListener("resize", locate);
       highlighted?.classList.remove("labatar-guide-target");
     };
-  }, [stepIndex, targetName, fallbackName]);
+  }, [stepIndex, targetName, fallbackName, launcherAnchor]);
 
   useEffect(() => setPreviewIndex(null), [stepIndex]);
 

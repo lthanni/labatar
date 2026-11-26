@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./style.css";
 import SettingsIcon from "@mui/icons-material/Settings";
 import HelpOutlinedIcon from "@mui/icons-material/HelpOutlined";
+import CreateOutlinedIcon from "@mui/icons-material/CreateOutlined";
 import StorageIcon from "@mui/icons-material/Storage";
 import FormatListBulletedIcon from "@mui/icons-material/FormatListBulleted";
 import PlayCircleOutlinedIcon from "@mui/icons-material/PlayCircleOutlined";
@@ -65,6 +66,7 @@ import {
   AnchoredGuide,
   GettingStartedChooser,
   gettingStartedGuideOptions,
+  type GettingStartedMenu,
   type GuideMode,
   type GuideStep,
 } from "./GettingStartedDialog";
@@ -1251,11 +1253,11 @@ function App() {
     requestId: number;
   } | null>(null);
   const youtubeReviewRequestId = useRef(0);
-  const [tourView, setTourView] = useState<"choose" | GuideMode | null>(() =>
+  const [tourView, setTourView] = useState<GettingStartedMenu | GuideMode | null>(() =>
     localStorage.getItem("labatar-getting-started-v1") !== "done" &&
     localStorage.getItem("avatar-app-last-tab-v2") === null &&
     localStorage.getItem("avatar-app-last-tab") === null
-      ? "choose"
+      ? "audience"
       : null,
   );
   const [settingsSection, setSettingsSection] = useState<"game" | "artwork" | "obs">("obs");
@@ -1582,7 +1584,8 @@ function App() {
       destination: "combos",
     },
   ];
-  const tourMode = tourView === "choose" ? null : tourView;
+  const tourMode = tourView === "browse" || tourView === "contribute" ? tourView : null;
+  const tourMenu = tourView === "audience" || tourView === "consumer" ? tourView : null;
   const guideSteps = { browse: browseSteps, contribute: contributionSteps };
   const [tourStepIndex, setTourStepIndex] = useState(0);
   const closeTour = () => {
@@ -1598,6 +1601,19 @@ function App() {
       changeTab(settingsTabIndex);
     } else {
       changeTab(combosTabIndex);
+    }
+  };
+  const startTour = (mode: GuideMode) => {
+    setLabbingGuideOpen(false);
+    setTourView(mode);
+    changeTourStep(mode, 0);
+  };
+  const openConsumerGuide = () => {
+    if (labbingAvailable) {
+      setLabbingGuideOpen(false);
+      setTourView("consumer");
+    } else {
+      startTour("browse");
     }
   };
   const finishReplayImport = ({ importedCount }: { importedCount: number }) => {
@@ -2043,10 +2059,8 @@ function App() {
           <SidebarFooter
             expanded={expanded}
             settingsActive={tab === settingsTabIndex}
-            onGettingStarted={() => {
-              setLabbingGuideOpen(false);
-              setTourView("choose");
-            }}
+            onConsumerGuide={openConsumerGuide}
+            onCreatorGuide={() => startTour("contribute")}
             onOpenSettings={() => openSettings("obs")}
           />
         )}
@@ -2148,11 +2162,9 @@ function App() {
           </Stack>
         )}
         <GettingStartedChooser
-          open={tourView === "choose"}
-          onChoose={(mode) => {
-            setTourView(mode);
-            changeTourStep(mode, 0);
-          }}
+          menu={tourMenu}
+          onChooseConsumer={openConsumerGuide}
+          onChoose={startTour}
           onOpenLabbing={
             labbingAvailable
               ? () => {
@@ -2162,6 +2174,7 @@ function App() {
                 }
               : undefined
           }
+          onBack={() => setTourView("audience")}
           onClose={closeTour}
         />
         {tourMode && tab !== labbingTabIndex && (
@@ -2170,8 +2183,11 @@ function App() {
             steps={guideSteps[tourMode]}
             stepIndex={tourStepIndex}
             onStepChange={(index) => changeTourStep(tourMode, index)}
-            onChooseGuide={() => setTourView("choose")}
+            onChooseGuide={() => setTourView("audience")}
             onClose={closeTour}
+            launcherAnchor={
+              tourMode === "browse" ? "consumer-guide-launcher" : "creator-guide-launcher"
+            }
           />
         )}
         {(recordingWork.some((work) => work.phase !== "ready") ||
@@ -2630,12 +2646,14 @@ function SidebarAction({
 function SidebarFooter({
   expanded,
   settingsActive,
-  onGettingStarted,
+  onConsumerGuide,
+  onCreatorGuide,
   onOpenSettings,
 }: {
   expanded: boolean;
   settingsActive: boolean;
-  onGettingStarted: () => void;
+  onConsumerGuide: () => void;
+  onCreatorGuide: () => void;
   onOpenSettings: () => void;
 }) {
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -2690,10 +2708,17 @@ function SidebarFooter({
     >
       <SidebarAction
         expanded={expanded}
-        label="Getting started"
+        label="Consumer guide"
         icon={<HelpOutlinedIcon />}
-        onClick={onGettingStarted}
-        anchor="guide-launcher"
+        onClick={onConsumerGuide}
+        anchor="consumer-guide-launcher"
+      />
+      <SidebarAction
+        expanded={expanded}
+        label="Creator guide"
+        icon={<CreateOutlinedIcon />}
+        onClick={onCreatorGuide}
+        anchor="creator-guide-launcher"
       />
       <SidebarAction
         expanded={expanded}
