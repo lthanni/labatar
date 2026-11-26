@@ -76,6 +76,68 @@ describe("automatic replay association", () => {
     expect(pending).toHaveLength(1);
   });
 
+  it("links a delayed replay after the rematch starts", async () => {
+    const pending: Array<{ match: { matchId: string } }> = [];
+    const linked: Array<string | undefined> = [];
+    const watcher = new MatchLogWatcher({
+      onMatchEnded: (match: { matchId: string }) => pending.push({ match }),
+      onReplaySaved: (_replayPath: string, matchId: string | null) => {
+        linked.push(takePendingReplayMatch(pending, matchId)?.match.matchId);
+      },
+    });
+
+    await watcher.processLine("[08:07:05] SetNewMatch: New match started with ID first-game");
+    await watcher.processLine("[08:08:32] EndMatch: Match ended and telemetry submitted");
+    await watcher.processLine("[08:08:34] SetNewMatch: New match started with ID second-game");
+    await watcher.processLine(
+      "[08:08:37] Successfully wrote replay file: C:\\replays\\2026-11-14 08-08-32 Player 1 Vs Player 2.dlr",
+    );
+
+    expect(linked).toEqual(["first-game"]);
+    expect(pending).toHaveLength(0);
+    expect(watcher.currentMatch.matchId).toBe("second-game");
+  });
+
+  it("links out-of-order saves by filename time across midnight", async () => {
+    const linked: Array<string | null> = [];
+    const watcher = new MatchLogWatcher({
+      onReplaySaved: (_replayPath: string, matchId: string | null) => linked.push(matchId),
+    });
+
+    for (const line of [
+      "[23:59:00] SetNewMatch: New match started with ID first-game",
+      "[23:59:59] EndMatch: Match ended and telemetry submitted",
+      "[00:00:02] SetNewMatch: New match started with ID second-game",
+      "[00:01:01] EndMatch: Match ended and telemetry submitted",
+      "[00:01:02] Successfully wrote replay file: C:/replays/2026-11-15 00-01-02 Player 1 Vs Player 2.dlr",
+      "[00:01:03] Successfully wrote replay file: C:/replays/2026-11-15 00-00-00 Player 1 Vs Player 2.dlr",
+    ]) {
+      await watcher.processLine(line);
+    }
+
+    expect(linked).toEqual(["second-game", "first-game"]);
+  });
+
+  it("leaves ambiguous and stale timestamped saves unlinked", async () => {
+    const linked: Array<string | null> = [];
+    const watcher = new MatchLogWatcher({
+      onReplaySaved: (_replayPath: string, matchId: string | null) => linked.push(matchId),
+    });
+
+    for (const line of [
+      "[08:07:05] SetNewMatch: New match started with ID first-game",
+      "[08:08:32] EndMatch: Match ended and telemetry submitted",
+      "[08:08:33] SetNewMatch: New match started with ID second-game",
+      "[08:08:33] EndMatch: Match ended and telemetry submitted",
+      "[08:08:34] Successfully wrote replay file: C:/replays/2026-11-14 08-08-33 Player 1 Vs Player 2.dlr",
+      "[08:10:32] Successfully wrote replay file: C:/replays/2026-11-14 08-08-32 Player 1 Vs Player 2.dlr",
+    ]) {
+      await watcher.processLine(line);
+    }
+
+    expect(linked).toEqual([null, null]);
+  });
+
   it("rejects a replay with another game's characters, including during a name rebuild", () => {
     const game = { metadata: { player1Character: "Aang", player2Character: "Korra" } };
     expect(replayMatchesGame(game, { player1Character: "Aang", player2Character: "Kyoshi" })).toBe(

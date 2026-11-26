@@ -8,8 +8,11 @@ const fieldIds = [
   "combo-name",
   "difficulty",
   "route",
+  "starter-override",
   "routing-mode",
   "screen-position",
+  "character-whitelist",
+  "character-blacklist",
   "damage",
   "start-seconds",
   "pips",
@@ -94,6 +97,20 @@ function payload() {
   if (!["corner", "midscreen", "fullscreen"].includes(screenPosition)) {
     throw new Error("Choose Corner, Midscreen, or Fullscreen.");
   }
+  const whitelist = lines("character-whitelist");
+  const blacklist = lines("character-blacklist");
+  for (const [name, ids] of Object.entries({ whitelist, blacklist })) {
+    if (
+      ids.length > 100 ||
+      ids.some((id) => id.length > 100 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id))
+    ) {
+      throw new Error(`Use up to 100 lowercase character IDs in the ${name}, one per line.`);
+    }
+    if (new Set(ids).size !== ids.length) throw new Error(`The ${name} contains duplicate IDs.`);
+  }
+  if (whitelist.some((id) => blacklist.includes(id))) {
+    throw new Error("A character cannot be both whitelisted and blacklisted.");
+  }
   const moveIds = lines("move-ids");
   if (moveIds.length > 100 || !moveIds.every((moveId) => slugPattern.test(moveId))) {
     throw new Error("Move IDs must be lowercase slugs, at most 100 entries.");
@@ -161,7 +178,11 @@ function payload() {
     name,
     difficulty,
     route,
+    ...(fields["starter-override"].value.trim()
+      ? { starterOverride: fields["starter-override"].value.trim() }
+      : {}),
     routingMode,
+    characterCompatibility: { whitelist, blacklist },
     moveIds,
     screenPosition,
     damage,
@@ -230,7 +251,10 @@ function loadRecord(record) {
     "combo-name": record.name ?? "",
     difficulty: String(record.difficulty ?? ""),
     route: record.route,
+    "starter-override": record.starterOverride ?? "",
     "routing-mode": record.routingMode ?? "autopilot",
+    "character-whitelist": (record.characterCompatibility?.whitelist ?? []).join("\n"),
+    "character-blacklist": (record.characterCompatibility?.blacklist ?? []).join("\n"),
     "screen-position": ["corner", "midscreen", "fullscreen"].includes(
       record.screenPosition?.toLowerCase(),
     )

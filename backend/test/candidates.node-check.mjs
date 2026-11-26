@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { handleRequest } from "../src/worker.mjs";
+import { validateProcessedComboInput } from "../src/processed-combo-input.mjs";
 
 const { processComboInputCapture } = createRequire(import.meta.url)(
   "../../electron/combo-input-processing.cjs",
@@ -38,9 +39,9 @@ void test("submitter migration keeps existing candidate rows", () => {
   }
 });
 
-function database() {
+function database(initialSchema = schema) {
   const sqlite = new DatabaseSync(":memory:");
-  sqlite.exec(schema);
+  sqlite.exec(initialSchema);
   return {
     prepare(sql) {
       const statement = sqlite.prepare(sql);
@@ -58,7 +59,21 @@ function database() {
   };
 }
 
-function bucket() {
+void test("candidate submission remains available before the submitter email migration", async () => {
+  const db = database(schema.replace(/^  submitter_email TEXT,\r?\n/m, ""));
+  try {
+    const created = await submit({ DB: db, CANDIDATE_VIDEOS: bucket() });
+    const rows = await db
+      .prepare("SELECT status FROM combo_candidates WHERE id = ?")
+      .bind(created.id)
+      .all();
+    assert.equal(rows.results[0].status, "pending");
+  } finally {
+    db.close();
+  }
+});
+
+function bucket(opaqueEtags = false) {
   const objects = new Map();
   const uploads = new Map();
   return {
@@ -74,7 +89,9 @@ function bucket() {
       return {
         async uploadPart(partNumber, bytes) {
           const data = Buffer.from(bytes);
-          const etag = createHash("md5").update(data).digest("hex");
+          const etag = opaqueEtags
+            ? `R2-${"x".repeat(168)}`
+            : createHash("md5").update(data).digest("hex");
           upload.parts.set(partNumber, { data, etag });
           return { partNumber, etag };
         },
@@ -109,6 +126,20 @@ function bucket() {
     },
   };
 }
+
+void test("candidate upload accepts an opaque R2 part ETag", async () => {
+  const db = database();
+  try {
+    const created = await submit({ DB: db, CANDIDATE_VIDEOS: bucket(true) });
+    const rows = await db
+      .prepare("SELECT status FROM combo_candidates WHERE id = ?")
+      .bind(created.id)
+      .all();
+    assert.equal(rows.results[0].status, "pending");
+  } finally {
+    db.close();
+  }
+});
 
 function request(path, method = "GET", body, headers = {}) {
   const isJson = body && typeof body === "object" && !ArrayBuffer.isView(body);
@@ -189,12 +220,21 @@ function processedInput() {
   };
 }
 
+void test("processed input accepts reversible hidden press metadata", () => {
+  const processed = processedInput();
+  processed.presses[0].manualEdit = { hidden: true };
+  assert.equal(validateProcessedComboInput(processed), processed);
+  processed.presses[0].manualEdit = { hidden: false };
+  assert.throws(() => validateProcessedComboInput(processed), /processed combo inputs are invalid/);
+});
+
 async function submit(env, options = {}) {
   const response = await handleRequest(
     request("/v1/editor/candidates/upload", "POST", {
-      combo: options.processedInput
-        ? { ...(options.combo ?? combo()), route: undefined }
-        : (options.combo ?? combo()),
+      combo:
+        options.processedInput && !options.keepComboRoute
+          ? { ...(options.combo ?? combo()), route: undefined }
+          : (options.combo ?? combo()),
       ...(options.originCandidateId ? { originCandidateId: options.originCandidateId } : {}),
       ...(options.processedInput
         ? { processedInput: options.processedInput, inputFacing: options.inputFacing ?? "right" }
@@ -752,23 +792,18 @@ void test("processed combo inputs accompany a candidate and survive route revisi
     assert.equal(published.status, 201);
     assert.deepEqual((await published.json()).processedInput, inputs);
 
-    const mismatch = await handleRequest(
-      request("/v1/editor/candidates/upload", "POST", {
-        combo: combo(),
-        processedInput: { ...inputs, routes: { ...inputs.routes, right: "5A" } },
-        inputFacing: "right",
-        fileName: "test.mp4",
-        fileSize: 3,
-      }),
-      env,
-      {},
-      undefined,
-      undefined,
-      undefined,
-      async () => "uploader@example.com",
-    );
-    assert.equal(mismatch.status, 400);
-    assert.match((await mismatch.json()).error, /processed input route/);
+    const differingInputs = { ...inputs, routes: { ...inputs.routes, right: "5A" } };
+    const mismatch = await submit(env, {
+      combo: combo(),
+      processedInput: differingInputs,
+      keepComboRoute: true,
+    });
+    const candidates = (
+      await (await handleRequest(request("/v1/editor/candidates"), env, {}, editor)).json()
+    ).items;
+    const savedMismatch = candidates.find((candidate) => candidate.id === mismatch.id);
+    assert.equal(savedMismatch.combo.route, combo().route);
+    assert.deepEqual(savedMismatch.processedInput, differingInputs);
   } finally {
     db.close();
   }
@@ -794,7 +829,10 @@ void test("candidate upload accepts the local processor's event artifact", async
       },
       "2026-11-06T00:00:00.000Z",
       0,
-      { schemaVersion: 1, presses: { "100:X": { charged: true, directionOverride: "236" } } },
+      {
+        schemaVersion: 1,
+        presses: { "100:X": { charged: true, directionOverride: "236", toggleFacing: true } },
+      },
     );
     const created = await submit(env, { processedInput: processed });
     const listed = await handleRequest(
@@ -808,6 +846,7 @@ void test("candidate upload accepts the local processor's event artifact", async
     assert.equal(candidate.id, created.id);
     assert.equal(candidate.combo.route, "236[A]");
     assert.deepEqual(candidate.processedInput.presses, processed.presses);
+    assert.equal(candidate.processedInput.presses[0].context.facing, "left");
   } finally {
     db.close();
   }
@@ -824,7 +863,13 @@ void test("an editor revises a queued candidate in place before publication", as
     const initial = (
       await (await handleRequest(request("/v1/editor/candidates"), env, {}, editor)).json()
     ).items[0];
-    const editedCombo = { ...combo(), name: "Trimmed route", route: "5B > 236A > 5B" };
+    const characterCompatibility = { whitelist: ["avatar-aang"], blacklist: ["toph"] };
+    const editedCombo = {
+      ...combo(),
+      name: "Trimmed route",
+      route: "5B > 236A > 5B",
+      characterCompatibility,
+    };
     const denied = await handleRequest(
       request(url, "PATCH", { combo: editedCombo, updatedAt: initial.updatedAt }),
       env,
@@ -846,6 +891,7 @@ void test("an editor revises a queued candidate in place before publication", as
     assert.equal(next.status, "pending");
     assert.equal(next.combo.name, "Trimmed route");
     assert.equal(next.combo.route, "5B > 236A > 5B");
+    assert.deepEqual(next.combo.characterCompatibility, characterCompatibility);
     assert.equal(videos.objects.size, 1);
     assert.equal(
       await (await handleRequest(request(`${url}/video`), env, {}, editor)).text(),
@@ -876,6 +922,7 @@ void test("an editor revises a queued candidate in place before publication", as
     ).items;
     assert.equal(listed.length, 1);
     assert.equal(listed[0].combo.route, editedCombo.route);
+    assert.deepEqual(listed[0].combo.characterCompatibility, characterCompatibility);
   } finally {
     db.close();
   }

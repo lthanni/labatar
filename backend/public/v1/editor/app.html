@@ -75,6 +75,11 @@
           ></textarea>
         </label>
         <label
+          >Starter move override (optional)
+          <input id="starter-override" maxlength="100" placeholder="Move that came out" />
+          <small>Use when the first route input produces a different move.</small>
+        </label>
+        <label
           >Routing mode
           <select id="routing-mode">
             <option value="autopilot">Autopilot</option>
@@ -96,6 +101,18 @@
             >Start video at (seconds)
             <input id="start-seconds" type="number" min="0" max="86400" step="1" value="0"
           /></label>
+        </div>
+        <div class="grid two">
+          <label
+            >Character whitelist
+            <textarea id="character-whitelist" rows="3" placeholder="korra"></textarea>
+            <small>Opponents this combo works against, one character ID per line.</small>
+          </label>
+          <label
+            >Character blacklist
+            <textarea id="character-blacklist" rows="3" placeholder="toph"></textarea>
+            <small>Opponents this combo fails against, one character ID per line.</small>
+          </label>
         </div>
         <div class="grid three">
           <label

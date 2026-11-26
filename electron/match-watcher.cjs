@@ -1,8 +1,20 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { pendingReplayTimeoutMs } = require("./automatic-replay-association.cjs");
+
+const secondsPerDay = 24 * 60 * 60;
 
 function parseLogTime(line) {
   return line.match(/^\[(\d{2}:\d{2}:\d{2})\]/)?.[1] ?? null;
+}
+
+function secondsSinceMidnight(time) {
+  const [hours, minutes, seconds] = time.split(/[:-]/).map(Number);
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+function elapsedLogSeconds(start, end) {
+  return (end - start + secondsPerDay) % secondsPerDay;
 }
 
 function parseGlicko(value) {
@@ -143,6 +155,7 @@ class MatchLogWatcher {
     this.lineBuffer = "";
     this.currentMatch = null;
     this.replayMatchId = null;
+    this.recentMatchEnds = [];
     this.setNumber = 0;
     this.gameNumber = 0;
     this.lobbyId = null;
@@ -228,6 +241,7 @@ class MatchLogWatcher {
     this.logPath = filePath;
     this.currentMatch = null;
     this.replayMatchId = null;
+    this.recentMatchEnds = [];
     this.lastReplayPath = null;
     this.setNumber = 0;
     this.gameNumber = 0;
@@ -297,6 +311,15 @@ class MatchLogWatcher {
         const completedMatch = this.currentMatch;
         this.currentMatch = null;
         this.replayMatchId = completedMatch.matchId;
+        const endTime = parseLogTime(line);
+        if (endTime) {
+          this.pruneMatchEnds(processingStartedAt);
+          this.recentMatchEnds.push({
+            matchId: completedMatch.matchId,
+            endSeconds: secondsSinceMidnight(endTime),
+            observedAt: processingStartedAt,
+          });
+        }
         this.diagnostic("match-end-handler-start", {
           matchId: completedMatch.matchId,
           logTime: completedMatch.logTime,
@@ -321,12 +344,39 @@ class MatchLogWatcher {
     const replayPath = parseReplayPath(line);
     if (replayPath) {
       this.lastReplayPath = replayPath;
-      const matchId = this.replayMatchId;
-      this.replayMatchId = null;
-      this.diagnostic("replay-detected", { replayPath, matchId, logTime: parseLogTime(line) });
+      const logTime = parseLogTime(line);
+      const matchId = this.matchIdForReplay(replayPath, logTime);
+      if (matchId === this.replayMatchId) this.replayMatchId = null;
+      this.diagnostic("replay-detected", { replayPath, matchId, logTime });
       await this.onReplaySaved?.(replayPath, matchId);
       this.emit();
     }
+  }
+
+  pruneMatchEnds(now) {
+    this.recentMatchEnds = this.recentMatchEnds.filter(
+      ({ observedAt }) => now - observedAt < pendingReplayTimeoutMs,
+    );
+  }
+
+  matchIdForReplay(replayPath, logTime) {
+    const fileTime = /^\d{4}-\d{2}-\d{2} (\d{2}-\d{2}-\d{2})/.exec(
+      path.win32.basename(replayPath),
+    )?.[1];
+    if (!fileTime) return this.replayMatchId;
+    if (!logTime) return null;
+
+    // The filename is dated at match end, even if the save is logged during a rematch.
+    const replaySeconds = secondsSinceMidnight(fileTime);
+    const writeSeconds = secondsSinceMidnight(logTime);
+    if (elapsedLogSeconds(replaySeconds, writeSeconds) * 1000 >= pendingReplayTimeoutMs) {
+      return null;
+    }
+    this.pruneMatchEnds(Date.now());
+    const matches = this.recentMatchEnds.filter(
+      ({ endSeconds }) => elapsedLogSeconds(endSeconds, replaySeconds) <= 1,
+    );
+    return matches.length === 1 ? matches[0].matchId : null;
   }
 
   async beginCurrentMatch(recovered) {
@@ -506,6 +556,7 @@ class MatchLogWatcher {
     this.lineBuffer = "";
     this.currentMatch = null;
     this.replayMatchId = null;
+    this.recentMatchEnds = [];
     this.lobbyId = null;
     this.emit();
     return this.snapshot();

@@ -1,6 +1,6 @@
 import supportMap from "../electron/support-map.json";
 import { slugComboText } from "./combo-gameplan";
-import { comboStarterFromRoute } from "./combo-starter";
+import { comboStarter } from "./combo-starter";
 
 type RecordingNameParts = {
   character: string;
@@ -44,6 +44,7 @@ export function candidateRecordingTitle(combo: {
   characterId: string;
   supportId: string;
   route: string;
+  starterOverride?: string;
   starterIsNonAttackStance?: boolean;
   screenPosition: string;
   damage: string;
@@ -51,7 +52,7 @@ export function candidateRecordingTitle(combo: {
   return formatComboRecordingBaseName({
     character: displayName(combo.characterId),
     support: displayName(combo.supportId),
-    starter: comboStarterFromRoute(combo.route, combo.starterIsNonAttackStance),
+    starter: comboStarter(combo.route, combo.starterOverride, combo.starterIsNonAttackStance),
     screenPosition: combo.screenPosition,
     damage: combo.damage,
   });

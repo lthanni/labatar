@@ -7,7 +7,9 @@ const test = require("node:test");
 const { comboInputWorkerPath, startComboInputClient } = require("./combo-input-client.cjs");
 
 void test("the packaged combo input worker is unpacked for PowerShell", () => {
-  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"),
+  );
   assert.ok(packageJson.build.asarUnpack.includes("electron/combo-input-worker.ps1"));
 });
 
@@ -51,4 +53,31 @@ void test("an unexpected controller worker exit is reported", async () => {
   child.stderr.write("The controller disconnected.");
   child.emit("exit", 1, null);
   assert.match(client.failure.message, /controller disconnected/i);
+});
+
+void test("button detection can cancel a controller worker during startup", async () => {
+  const child = fakeWorker();
+  const controller = new AbortController();
+  const starting = startComboInputClient({
+    spawnProcess: () => child,
+    platform: "win32",
+    signal: controller.signal,
+  });
+  controller.abort();
+  await assert.rejects(starting, { name: "AbortError" });
+});
+
+void test("a controller disconnection can be reported to an active listener", async () => {
+  const child = fakeWorker();
+  const errors = [];
+  const starting = startComboInputClient({
+    spawnProcess: () => child,
+    platform: "win32",
+    onError: (error) => errors.push(error),
+  });
+  child.stdout.write('{"type":"ready","deviceIndex":0}\n');
+  const client = await starting;
+  child.stdout.write('{"type":"error","message":"Controller unplugged."}\n');
+  assert.match(errors[0].message, /unplugged/);
+  await client.stop();
 });

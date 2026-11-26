@@ -81,13 +81,15 @@ export type ProcessedComboInput = {
     physicalButton: string;
     gameAction: string | null;
     gameButton: string | null;
-    context: { facing: "right"; position: "grounded" | "airborne" };
+    context: { facing: "right" | "left"; position: "grounded" | "airborne" };
     positionAfter?: "grounded" | "airborne" | null;
     manualEdit?: {
       notation?: string;
       separator?: " " | "~";
       positionAfter?: "grounded" | "airborne";
       togglePosition?: true;
+      toggleFacing?: true;
+      hidden?: true;
       charged?: true;
       delay?: true;
       crit?: true;
@@ -129,6 +131,7 @@ export type RecordedGame = {
 
 export type RecordingPortraitSide = {
   slot: 1 | 2;
+  steamId?: string | null;
   playerName: string;
   character: string;
   support: string | null;
@@ -174,12 +177,24 @@ export type RecordedVideo = {
     replayFileName: string;
     replay?: unknown;
   }>;
+  combinedSets?: {
+    schemaVersion: 1;
+    createdAt: string;
+    sourceSets: Array<{
+      recordingId: string;
+      replayKeys: string[];
+      startMs: number;
+      durationMs: number;
+    }>;
+  } | null;
   replayPath: string | null;
   replayFileName: string | null;
   youtubeUrl?: string | null;
   youtubeDurationMs?: number | null;
   moveTake?: RecordingMoveTake | null;
   clip: RecordingClipMetadata | null;
+  f10Clip?: boolean;
+  f10ClipTrimmedAndRenamed?: boolean;
   capture?: RecordingCaptureMetadata | null;
   comboInputCapture?: ComboInputCapture | null;
   comboInputRawStartMs?: number | null;

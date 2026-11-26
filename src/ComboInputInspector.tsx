@@ -10,6 +10,7 @@ import {
   DialogTitle,
   Divider,
   FormControl,
+  FormControlLabel,
   InputLabel,
   MenuItem,
   Menu,
@@ -17,6 +18,7 @@ import {
   Paper,
   Select,
   Stack,
+  Switch,
   Tab,
   Table,
   TableBody,
@@ -29,6 +31,7 @@ import {
   Typography,
 } from "@mui/material";
 import type { ComboInputCapture, ProcessedComboInput, RecordedVideo } from "./recording-types";
+import { ControllerBindingsDialog, type ControllerBindings } from "./ControllerBindingsDialog";
 import { previewComboChipEdit } from "./combo-input-preview";
 import {
   chipShortcutActions,
@@ -41,12 +44,13 @@ import {
 } from "./combo-chip-shortcuts";
 
 const PAGE_SIZE = 100;
-const CHIP_EDIT_PROCESSOR_VERSION = 10;
+const CHIP_EDIT_PROCESSOR_VERSION = 12;
 const CHIP_EDIT_IDLE_DELAY_MS = 10_000;
 type InputView = "clip-raw" | "processed" | "original-raw";
 const chipShortcutLabels: Record<ChipShortcutAction, string> = {
   followup: "Toggle ~ follow-up",
   togglePosition: "Toggle airborne/grounded",
+  toggleFacing: "Toggle left/right",
   removeDirection: "Remove direction",
   anyAttack: "Any attack button (X)",
   delay: "Toggle delay dl.",
@@ -125,7 +129,7 @@ function RawCaptureDetails({ capture }: { capture: ComboInputCapture }) {
         Controller {capture.deviceIndex} · {capture.source} · {capture.timing}
       </Typography>
       <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-        Saved bindings: {bindings || "None"}
+        Bindings at capture: {bindings || "None"}
       </Typography>
       {capture.status === "interrupted" && (
         <Alert severity="warning" sx={{ mt: 0.5 }}>
@@ -157,6 +161,8 @@ export function ComboInputInspector({
   const [loadingOriginal, setLoadingOriginal] = useState(false);
   const [originalError, setOriginalError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
+  const [bindingsOpen, setBindingsOpen] = useState(false);
+  const [savedBindings, setSavedBindings] = useState<ControllerBindings | null>(null);
   const [preview, setPreview] = useState<ProcessedComboInput | null>(null);
   const previewRef = useRef<ProcessedComboInput | null>(null);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
@@ -171,6 +177,8 @@ export function ComboInputInspector({
   const [editNotation, setEditNotation] = useState("");
   const [editSeparator, setEditSeparator] = useState<" " | "~">(" ");
   const [editPosition, setEditPosition] = useState<"keep" | "grounded" | "airborne">("keep");
+  const [editHidden, setEditHidden] = useState(false);
+  const [showHiddenInputs, setShowHiddenInputs] = useState(false);
   const [directionDialogPress, setDirectionDialogPress] = useState<
     ProcessedComboInput["presses"][number] | null
   >(null);
@@ -191,20 +199,47 @@ export function ComboInputInspector({
   const [shortcutError, setShortcutError] = useState("");
   const processed = preview ?? recording.processedComboInput;
   const capture = recording.comboInputCapture;
+  const effectiveBindings = savedBindings ?? capture?.bindings ?? {};
+  useEffect(() => {
+    const api = window.electronAPI?.recordings;
+    if (!api || !capture) return;
+    let cancelled = false;
+    setSavedBindings(null);
+    void api.getComboInputBindings({ recordingId: recording.id }).then(
+      (bindings) => {
+        if (!cancelled) setSavedBindings(bindings);
+      },
+      (reason) => {
+        if (!cancelled)
+          setProcessingError(reason instanceof Error ? reason.message : String(reason));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [recording.id, capture]);
+  const hiddenInputCount =
+    processed?.presses.filter((press) => press.manualEdit?.hidden).length ?? 0;
   const rightFacingPresses =
-    processed?.presses.filter((press) => press.interpretations.right.notation) ?? [];
+    processed?.presses.filter(
+      (press) =>
+        (press.manualEdit?.hidden && showHiddenInputs) ||
+        (!press.manualEdit?.hidden && Boolean(press.interpretations.right.notation)),
+    ) ?? [];
   const processedRows = useMemo(() => {
     if (!processed) return [];
     return [
       ...processed.directionChanges.map((event) => ({ kind: "direction" as const, ...event })),
-      ...processed.presses.map((event) => ({ kind: "press" as const, ...event })),
+      ...processed.presses
+        .filter((press) => showHiddenInputs || !press.manualEdit?.hidden)
+        .map((event) => ({ kind: "press" as const, ...event })),
     ].sort(
       (left, right) =>
         left.timeMs - right.timeMs ||
         left.sourceStateIndex - right.sourceStateIndex ||
         (left.kind === right.kind ? 0 : left.kind === "direction" ? -1 : 1),
     );
-  }, [processed]);
+  }, [processed, showHiddenInputs]);
 
   useEffect(() => {
     if (
@@ -302,11 +337,46 @@ export function ComboInputInspector({
     }
   };
 
+  const saveBindings = async (bindings: ControllerBindings) => {
+    if (processing || !capture) return;
+    const api = window.electronAPI?.recordings;
+    if (!api) throw new Error("Recording controls are unavailable.");
+    setProcessing(true);
+    flushInProgress.current = true;
+    setProcessingError(null);
+    setProcessingNotice(null);
+    if (deferredTimer.current) clearTimeout(deferredTimer.current);
+    deferredTimer.current = null;
+    try {
+      await saveQueue.current;
+      const result = await api.setComboInputBindings({ recordingId: recording.id, bindings });
+      hasDeferredEdits.current = false;
+      previewRef.current = result;
+      setPreview(result);
+      setSavedBindings(bindings);
+      await onUpdated();
+      onEdited?.();
+      onProcessingComplete?.();
+      setBindingsOpen(false);
+      setProcessingNotice("Saved controller bindings and rebuilt processed inputs.");
+    } catch (error) {
+      setProcessingError(error instanceof Error ? error.message : String(error));
+      if (hasDeferredEdits.current && !deferredTimer.current) {
+        deferredTimer.current = setTimeout(() => void reprocess(), CHIP_EDIT_IDLE_DELAY_MS);
+      }
+      throw error;
+    } finally {
+      flushInProgress.current = false;
+      setProcessing(false);
+    }
+  };
+
   const openPressEditor = (press: ProcessedComboInput["presses"][number]) => {
     setEditingPress(press);
     setEditNotation(press.manualEdit?.notation ?? "");
     setEditSeparator(press.manualEdit?.separator ?? " ");
     setEditPosition(press.manualEdit?.positionAfter ?? "keep");
+    setEditHidden(Boolean(press.manualEdit?.hidden));
     setProcessingError(null);
   };
 
@@ -339,9 +409,12 @@ export function ComboInputInspector({
       onEdited?.();
       onProcessingComplete?.();
       setEditingPress(null);
-      if (updated.processorVersion < CHIP_EDIT_PROCESSOR_VERSION && edit?.togglePosition) {
+      if (
+        updated.processorVersion < CHIP_EDIT_PROCESSOR_VERSION &&
+        (edit?.togglePosition || edit?.toggleFacing)
+      ) {
         setProcessingError(
-          `Saved the position toggle, but this Electron window is running processor v${updated.processorVersion}. Restart Labatar to load the current chip processor.`,
+          `Saved the toggle, but this Electron window is running processor v${updated.processorVersion}. Restart Labatar to load the current chip processor.`,
         );
       } else {
         setProcessingNotice("Saved the track edit and rebuilt processed inputs.");
@@ -359,6 +432,8 @@ export function ComboInputInspector({
     change:
       | "separator"
       | "togglePosition"
+      | "toggleFacing"
+      | "hidden"
       | "anyAttack"
       | "delay"
       | "charged"
@@ -384,6 +459,12 @@ export function ComboInputInspector({
     } else if (change === "togglePosition") {
       if (edit.togglePosition) delete edit.togglePosition;
       else edit.togglePosition = true;
+    } else if (change === "toggleFacing") {
+      if (edit.toggleFacing) delete edit.toggleFacing;
+      else edit.toggleFacing = true;
+    } else if (change === "hidden") {
+      if (edit.hidden) delete edit.hidden;
+      else edit.hidden = true;
     } else if (change === "charged") {
       if (edit.charged) delete edit.charged;
       else edit.charged = true;
@@ -566,6 +647,8 @@ export function ComboInputInspector({
           ...(editSeparator === "~" ? { separator: "~" as const } : {}),
           ...(editPosition !== "keep" ? { positionAfter: editPosition } : {}),
           ...(editingPress.manualEdit?.togglePosition ? { togglePosition: true as const } : {}),
+          ...(editingPress.manualEdit?.toggleFacing ? { toggleFacing: true as const } : {}),
+          ...(editHidden ? { hidden: true as const } : {}),
           ...(editingPress.manualEdit?.charged ? { charged: true as const } : {}),
           ...(editingPress.manualEdit?.delay ? { delay: true as const } : {}),
           ...(editingPress.manualEdit?.anyAttack ? { anyAttack: true as const } : {}),
@@ -602,6 +685,13 @@ export function ComboInputInspector({
 
   return (
     <Paper variant="outlined" sx={{ p: 1.5 }}>
+      <ControllerBindingsDialog
+        open={bindingsOpen}
+        bindings={effectiveBindings}
+        busy={processing}
+        onClose={() => setBindingsOpen(false)}
+        onSave={saveBindings}
+      />
       <Stack
         direction={{ xs: "column", sm: "row" }}
         spacing={1}
@@ -633,6 +723,19 @@ export function ComboInputInspector({
             : hasDeferredEdits.current
               ? "Apply pending edits now"
               : "Reprocess clip inputs"}
+        </Button>
+        {hiddenInputCount > 0 && (compact || view === "processed") && (
+          <Button size="small" onClick={() => setShowHiddenInputs((current) => !current)}>
+            {showHiddenInputs ? "Hide hidden inputs" : `Show hidden inputs (${hiddenInputCount})`}
+          </Button>
+        )}
+        <Button
+          size="small"
+          variant="text"
+          disabled={processing || !capture || !savedBindings}
+          onClick={() => setBindingsOpen(true)}
+        >
+          Edit bindings
         </Button>
         <Button
           size="small"
@@ -670,7 +773,7 @@ export function ComboInputInspector({
         (processed ? (
           rightFacingPresses.length ? (
             <Box
-              aria-label="Facing right combo input track"
+              aria-label="Combo input track starting right"
               sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 0.5, mt: 1 }}
             >
               {rightFacingPresses.map((press, index) => (
@@ -688,9 +791,16 @@ export function ComboInputInspector({
                     disabled={processing}
                     size="small"
                     color={press.context.position === "airborne" ? "secondary" : "default"}
-                    variant={press.manualEdit?.togglePosition ? "outlined" : "filled"}
-                    label={press.interpretations.right.notation}
-                    title={`${inputTime(press.timeMs)} · ${press.context.position} · Click to edit token; right-click for options`}
+                    variant={
+                      press.manualEdit?.togglePosition || press.manualEdit?.toggleFacing
+                        ? "outlined"
+                        : "filled"
+                    }
+                    label={
+                      press.interpretations.right.notation ?? `Controller ${press.physicalButton}`
+                    }
+                    title={`${press.manualEdit?.hidden ? "Hidden · " : ""}${inputTime(press.timeMs)} · ${press.context.position} · Facing ${press.context.facing} · Click to edit token; right-click for options`}
+                    sx={{ opacity: press.manualEdit?.hidden ? 0.5 : 1 }}
                     onMouseEnter={(event) => {
                       hoveredChip.current = {
                         timeMs: press.timeMs,
@@ -712,7 +822,9 @@ export function ComboInputInspector({
             </Box>
           ) : (
             <Typography variant="body2" color="text.secondary">
-              No mapped presses
+              {hiddenInputCount && !showHiddenInputs
+                ? "No visible mapped presses. Use Show hidden inputs to restore them."
+                : "No mapped presses"}
             </Typography>
           )
         ) : (
@@ -755,6 +867,15 @@ export function ComboInputInspector({
           {view === "processed" &&
             (processed ? (
               <>
+                {savedBindings &&
+                  JSON.stringify(savedBindings) !== JSON.stringify(capture?.bindings ?? {}) && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                      Processed with edited bindings:{" "}
+                      {Object.entries(savedBindings)
+                        .map(([button, action]) => `${button} → ${action}`)
+                        .join(", ") || "None"}
+                    </Typography>
+                  )}
                 {processed.processorVersion < CHIP_EDIT_PROCESSOR_VERSION && (
                   <Alert severity="warning" sx={{ mb: 1 }}>
                     This Electron window is running combo processor v{processed.processorVersion}.
@@ -763,11 +884,11 @@ export function ComboInputInspector({
                   </Alert>
                 )}
                 <Typography variant="body2" sx={{ mb: 0.5 }}>
-                  Facing right
+                  Starts facing right
                 </Typography>
                 {rightFacingPresses.length ? (
                   <Box
-                    aria-label="Facing right combo input track"
+                    aria-label="Combo input track starting right"
                     sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 0.5 }}
                   >
                     {rightFacingPresses.map((press, index) => (
@@ -785,10 +906,18 @@ export function ComboInputInspector({
                           disabled={processing}
                           size="small"
                           color={press.context.position === "airborne" ? "secondary" : "default"}
-                          variant={press.manualEdit?.togglePosition ? "outlined" : "filled"}
-                          label={press.interpretations.right.notation}
-                          title={`${inputTime(press.timeMs)} · ${press.context.position} · Click to edit token; right-click for options`}
-                          aria-label={`${press.interpretations.right.notation}, ${press.context.position}, ${inputTime(press.timeMs)}. Click to edit; right-click for options.`}
+                          variant={
+                            press.manualEdit?.togglePosition || press.manualEdit?.toggleFacing
+                              ? "outlined"
+                              : "filled"
+                          }
+                          label={
+                            press.interpretations.right.notation ??
+                            `Controller ${press.physicalButton}`
+                          }
+                          title={`${press.manualEdit?.hidden ? "Hidden · " : ""}${inputTime(press.timeMs)} · ${press.context.position} · Facing ${press.context.facing} · Click to edit token; right-click for options`}
+                          aria-label={`${press.manualEdit?.hidden ? "Hidden input: " : ""}${press.interpretations.right.notation ?? `Controller ${press.physicalButton}`}, ${press.context.position}, facing ${press.context.facing}, ${inputTime(press.timeMs)}. Click to edit; right-click for options.`}
+                          sx={{ opacity: press.manualEdit?.hidden ? 0.5 : 1 }}
                           onMouseEnter={(event) => {
                             hoveredChip.current = {
                               timeMs: press.timeMs,
@@ -810,14 +939,16 @@ export function ComboInputInspector({
                   </Box>
                 ) : (
                   <Typography variant="body2" color="text.secondary">
-                    No mapped presses
+                    {hiddenInputCount && !showHiddenInputs
+                      ? "No visible mapped presses. Use Show hidden inputs to restore them."
+                      : "No mapped presses"}
                   </Typography>
                 )}
                 <Typography
                   variant="body2"
                   sx={{ fontFamily: "monospace", overflowWrap: "anywhere" }}
                 >
-                  Facing left: {processed.routes.left || "No mapped presses"}
+                  Starts facing left: {processed.routes.left || "No mapped presses"}
                 </Typography>
                 <Typography
                   variant="caption"
@@ -828,11 +959,10 @@ export function ComboInputInspector({
                   facing right, grounded · Source SHA-256: {processed.source.sha256}
                 </Typography>
                 <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                  Click a chip to edit its move token. Right-click a chip to make it a ~ follow-up
-                  or flip airborne/grounded for that chip and every later chip, or mark its button
-                  charged with [], mark it critical with !, or prefix it with dl. for delay.
-                  Airborne chips use j.; outlined chips mark a position toggle. The menu also
-                  replaces or removes a leading direction. Edits survive reprocessing and trimming.
+                  Click a chip to edit its move token. Use the right-click menu to toggle facing or
+                  airborne/grounded from that chip onward, adjust its direction, or apply a move
+                  marker. Airborne chips use j. Outlined chips mark a position or facing toggle.
+                  Edits survive reprocessing and trimming.
                 </Typography>
                 <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
                   File: {recording.name}.combo-inputs.processed.json
@@ -867,8 +997,8 @@ export function ComboInputInspector({
                             </TableCell>
                             <TableCell>
                               {event.kind === "press"
-                                ? `${event.interpretations.right.notation ?? "Unmapped"} (left: ${event.interpretations.left.notation ?? "Unmapped"}) · ${event.context.position}${event.positionAfter ? ` → ${event.positionAfter} after move` : ""} · Controller ${event.physicalButton} → ${event.gameAction ?? "unmapped"}`
-                                : `Direction ${event.direction}${event.heldButtons.length ? ` · Held ${event.heldGameButtons.join("+") || event.heldButtons.join("+")} (controller ${event.heldButtons.join("+")})` : ""}`}
+                                ? `${event.manualEdit?.hidden ? "Hidden · " : ""}${event.interpretations.right.notation ?? "Unmapped"} (left: ${event.interpretations.left.notation ?? "Unmapped"}) · ${event.context.position}${event.positionAfter ? ` → ${event.positionAfter} after move` : ""} · Controller ${event.physicalButton} → ${event.gameAction ?? "unmapped"}`
+                                : `Raw direction ${event.direction}${event.heldButtons.length ? ` · Held ${event.heldGameButtons.join("+") || event.heldButtons.join("+")} (controller ${event.heldButtons.join("+")})` : ""}`}
                             </TableCell>
                             <TableCell>{event.sourceStateIndex}</TableCell>
                             <TableCell>
@@ -961,6 +1091,33 @@ export function ComboInputInspector({
             shortcut={shortcutBindings.togglePosition}
             label="Toggle airborne/grounded from here"
           />
+        </MenuItem>
+        <MenuItem
+          selected={Boolean(chipMenu?.press.manualEdit?.toggleFacing)}
+          disabled={
+            processing ||
+            !chipMenu ||
+            !processed ||
+            processed.processorVersion < CHIP_EDIT_PROCESSOR_VERSION
+          }
+          onClick={() => chipMenu && changeChipEdit(chipMenu.press, "toggleFacing")}
+        >
+          <ShortcutMenuLabel
+            shortcut={shortcutBindings.toggleFacing}
+            label="Toggle left/right from here"
+          />
+        </MenuItem>
+        <MenuItem
+          selected={Boolean(chipMenu?.press.manualEdit?.hidden)}
+          disabled={
+            processing ||
+            !chipMenu ||
+            !processed ||
+            processed.processorVersion < CHIP_EDIT_PROCESSOR_VERSION
+          }
+          onClick={() => chipMenu && changeChipEdit(chipMenu.press, "hidden")}
+        >
+          {chipMenu?.press.manualEdit?.hidden ? "Show input" : "Hide input"}
         </MenuItem>
         <MenuItem
           disabled={
@@ -1218,6 +1375,15 @@ export function ComboInputInspector({
               <MenuItem value="grounded">Grounded</MenuItem>
             </Select>
           </FormControl>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={editHidden}
+                onChange={(event) => setEditHidden(event.target.checked)}
+              />
+            }
+            label="Hide input from route and overlay"
+          />
           {processingError && <Alert severity="error">{processingError}</Alert>}
         </DialogContent>
         <DialogActions>

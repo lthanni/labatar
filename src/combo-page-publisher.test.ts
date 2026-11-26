@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 import { initialPublisherForm, publisherDraft } from "./CombosPage";
-import { comboItems, localRevisionDraft } from "./combo-gameplan";
+import { applyComboCharacterAssignments } from "./combo-character-compatibility";
+import {
+  catalogSnapshot,
+  comboItems,
+  localRevisionDraft,
+  parseComboWorkspace,
+} from "./combo-gameplan";
 import { publishedComboFromDraft } from "./publish-combo-draft";
 import type { PublishedCombo } from "./published-catalog";
 
@@ -25,6 +31,59 @@ const published: PublishedCombo = {
 };
 
 describe("local catalog revision publishing", () => {
+  it("keeps both matchup lists through reload and publication, including an explicit clear", () => {
+    const characterCompatibility = { whitelist: ["korra", "katara"], blacklist: ["toph"] };
+    const source = comboItems([{ ...published, characterCompatibility }], [], [])[0];
+    const local = localRevisionDraft(source, "local-matchups")!;
+    const restored = parseComboWorkspace(
+      JSON.parse(
+        JSON.stringify({
+          version: 1,
+          localCombos: [local],
+          snapshots: { [published.id]: catalogSnapshot(source) },
+        }),
+      ),
+    );
+    const [draft, snapshot] = comboItems([], [], restored.localCombos, restored.snapshots);
+    expect(draft.characterCompatibility).toEqual(characterCompatibility);
+    expect(snapshot.characterCompatibility).toEqual(characterCompatibility);
+    expect(
+      publishedComboFromDraft(publisherDraft(draft, initialPublisherForm(draft)))
+        ?.characterCompatibility,
+    ).toEqual(characterCompatibility);
+
+    const updated = applyComboCharacterAssignments(
+      draft.characterCompatibility,
+      new Map([
+        ["korra", "blacklist"],
+        ["toph", "whitelist"],
+        ["katara", null],
+        ["zuko", "whitelist"],
+      ]),
+    );
+    const [updatedDraft] = comboItems(
+      [],
+      [],
+      [{ ...restored.localCombos[0], characterCompatibility: updated }],
+    );
+    expect(
+      publishedComboFromDraft(publisherDraft(updatedDraft, initialPublisherForm(updatedDraft)))
+        ?.characterCompatibility,
+    ).toEqual({ whitelist: ["toph", "zuko"], blacklist: ["korra"] });
+    expect(draft.characterCompatibility).toEqual(characterCompatibility);
+
+    const cleared = { whitelist: [], blacklist: [] };
+    const [edited] = comboItems(
+      [],
+      [],
+      [{ ...restored.localCombos[0], characterCompatibility: cleared }],
+    );
+    expect(
+      publishedComboFromDraft(publisherDraft(edited, initialPublisherForm(edited)))
+        ?.characterCompatibility,
+    ).toEqual(cleared);
+  });
+
   it("carries the candidate ID into the published record", () => {
     const local = localRevisionDraft(comboItems([published], [], [])[0], "local-candidate")!;
     local.candidateOriginId = "12345678-1234-1234-1234-123456789abc";

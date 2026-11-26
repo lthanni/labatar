@@ -1,10 +1,14 @@
 import type { ComboItem, ComboWorkspaceData, LocalCombo } from "./combo-gameplan";
 import { comboItems, localRevisionDraft, slugComboText } from "./combo-gameplan";
-import { comboStarterFromRoute } from "./combo-starter";
+import { comboStarter } from "./combo-starter";
 import { normalizeComboNotes } from "./combo-notes";
 import type { TechResourceCosts } from "./tech-types";
 import type { ProcessedComboInput, RecordedVideo } from "./recording-types";
 import type { PublishedCombo } from "./published-catalog";
+import {
+  sameComboCharacterCompatibility,
+  type ComboCharacterCompatibility,
+} from "./combo-character-compatibility";
 
 export type CandidateCombo = {
   id: string;
@@ -13,8 +17,10 @@ export type CandidateCombo = {
   name?: string;
   difficulty?: number;
   route: string;
+  starterOverride?: string;
   starterIsNonAttackStance?: boolean;
   routingMode?: "autopilot" | "unique";
+  characterCompatibility?: ComboCharacterCompatibility;
   moveIds: string[];
   screenPosition: string;
   damage: string;
@@ -54,7 +60,12 @@ function sameComboIdentity(combo: CandidateCombo, published: PublishedCombo): bo
     combo.route.trim().replace(/\s+/g, " ") === published.route.trim().replace(/\s+/g, " ") &&
     combo.damage === published.damage &&
     combo.screenPosition === published.screenPosition &&
+    sameComboCharacterCompatibility(
+      combo.characterCompatibility,
+      published.characterCompatibility,
+    ) &&
     Boolean(combo.starterIsNonAttackStance) === Boolean(published.starterIsNonAttackStance) &&
+    (combo.starterOverride ?? "") === (published.starterOverride ?? "") &&
     sortedEntries(combo.resourceCosts) === sortedEntries(published.resourceCosts) &&
     sortedMechanics(combo.mechanics) === sortedMechanics(published.mechanics)
   );
@@ -97,7 +108,11 @@ export function candidatePublicationMatches(
           local.supportId === published.supportId &&
           local.route === published.route &&
           local.damage === published.damage &&
-          local.screenPosition === published.screenPosition);
+          local.screenPosition === published.screenPosition &&
+          sameComboCharacterCompatibility(
+            localDraft.characterCompatibility,
+            published.characterCompatibility,
+          ));
     return [{ localId: local.id, published, readyToReplace }];
   });
 }
@@ -140,8 +155,11 @@ export function countCandidates(
       candidate.combo.characterId === characterId &&
       (!supportId || candidate.combo.supportId === supportId) &&
       (!starter ||
-        comboStarterFromRoute(candidate.combo.route, candidate.combo.starterIsNonAttackStance) ===
-          starter),
+        comboStarter(
+          candidate.combo.route,
+          candidate.combo.starterOverride,
+          candidate.combo.starterIsNonAttackStance,
+        ) === starter),
   ).length;
 }
 
@@ -156,10 +174,11 @@ export function candidateItem(candidate: ComboCandidate): ComboItem {
     source: "Candidate",
     characterId: combo.characterId,
     supportId: combo.supportId,
-    starter: comboStarterFromRoute(combo.route, combo.starterIsNonAttackStance),
+    starter: comboStarter(combo.route, combo.starterOverride, combo.starterIsNonAttackStance),
     name: combo.name?.trim() ?? "",
     route: combo.route,
     screenPosition: combo.screenPosition,
+    characterCompatibility: combo.characterCompatibility,
     damage: combo.damage,
     pips: combo.resourceCosts.pips ?? 0,
     flow: combo.resourceCosts.flow ?? 0,
@@ -184,6 +203,10 @@ export function candidateMatchesItem(item: ComboItem, candidate: ComboCandidate)
     item.supportId === candidate.combo.supportId &&
     item.route === candidate.combo.route &&
     item.damage === candidate.combo.damage &&
+    sameComboCharacterCompatibility(
+      item.characterCompatibility,
+      candidate.combo.characterCompatibility,
+    ) &&
     item.pips === (candidate.combo.resourceCosts.pips ?? 0) &&
     item.flow === (candidate.combo.resourceCosts.flow ?? 0)
   );
@@ -235,6 +258,7 @@ export function localComboFromUploadedCandidate(candidate: ComboCandidate, id: s
     characterId: item.characterId,
     supportId: item.supportId,
     starter: item.starter,
+    starterOverride: combo.starterOverride ?? "",
     name: item.name,
     route: item.route,
     screenPosition: item.screenPosition,
@@ -250,6 +274,7 @@ export function localComboFromUploadedCandidate(candidate: ComboCandidate, id: s
     moveIds: [...combo.moveIds],
     routingMode: combo.routingMode ?? "autopilot",
     editorNotes: normalizeComboNotes(combo.notes),
+    characterCompatibility: combo.characterCompatibility,
   };
 }
 
@@ -351,7 +376,13 @@ export function candidateComboFromItem(item: ComboItem): CandidateCombo {
     ...(difficulty ? { difficulty } : {}),
     route: item.route,
     ...(base?.starterIsNonAttackStance ? { starterIsNonAttackStance: true } : {}),
+    ...((local?.starterOverride ?? base?.starterOverride)?.trim()
+      ? { starterOverride: (local?.starterOverride ?? base?.starterOverride)?.trim() }
+      : {}),
     routingMode: local?.routingMode ?? base?.routingMode ?? "autopilot",
+    characterCompatibility: local
+      ? (local.characterCompatibility ?? base?.characterCompatibility)
+      : item.characterCompatibility,
     moveIds: local?.moveIds ?? base?.moveIds ?? [],
     screenPosition: item.screenPosition,
     damage: item.damage,

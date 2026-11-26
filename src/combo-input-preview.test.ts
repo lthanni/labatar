@@ -72,6 +72,15 @@ const initial: ProcessedComboInput = {
 };
 
 describe("combo chip preview", () => {
+  it("hides a press from the preview route and restores it", () => {
+    const first = initial.presses[0];
+    const hidden = previewComboChipEdit(initial, first, { hidden: true });
+    expect(hidden.presses[0].manualEdit?.hidden).toBe(true);
+    expect(hidden.routes).toEqual({ right: "5A", left: "5A" });
+    const restored = previewComboChipEdit(hidden, first, {});
+    expect(restored.routes).toEqual(initial.routes);
+  });
+
   it("shows position, charge, and follow-up edits before deferred processing", () => {
     const first = initial.presses[0];
     const second = initial.presses[1];
@@ -86,6 +95,40 @@ describe("combo chip preview", () => {
       togglePosition: true,
     });
     expect(landed.routes.right).toBe("j.236[C]~5A");
+  });
+
+  it("mirrors both facing tracks from the selected press and composes with later edits", () => {
+    const first = initial.presses[0];
+    const later = { ...first, timeMs: 400, physicalButton: "X" };
+    const original = { ...initial, presses: [first, later] };
+    const pinned = previewComboChipEdit(original, later, {
+      notation: "236X",
+      delay: true,
+      separator: "~",
+    });
+    const switched = previewComboChipEdit(pinned, first, { toggleFacing: true });
+    expect(switched.routes).toEqual({ right: "214C~dl.236X", left: "236C dl.236C" });
+    expect(switched.presses[1].interpretations.right.directionPath).toBe("214");
+    expect(switched.presses.map((press) => press.context.facing)).toEqual(["left", "left"]);
+
+    const airborne = previewComboChipEdit(switched, first, {
+      toggleFacing: true,
+      togglePosition: true,
+    });
+    expect(airborne.routes).toEqual({ right: "j.214C~dl.j.236X", left: "j.236C dl.j.236C" });
+    const unflipped = previewComboChipEdit(airborne, later, {
+      ...airborne.presses[1].manualEdit,
+      toggleFacing: true,
+    });
+    expect(unflipped.routes).toEqual({ right: "j.214C~dl.j.236X", left: "j.236C dl.j.214C" });
+    expect(unflipped.presses[0]).toBe(airborne.presses[0]);
+    expect(unflipped.presses[1].context).toEqual({ facing: "right", position: "airborne" });
+    expect(unflipped.directionChanges).toBe(initial.directionChanges);
+    expect(previewComboChipEdit(switched, first, {}).routes).toEqual(pinned.routes);
+    expect(
+      previewComboChipEdit(initial, first, { notation: "dl.j.236X", toggleFacing: true }).routes
+        .right,
+    ).toBe("dl.j.236X 5A");
   });
 
   it("adds and removes a critical suffix alongside charge and position edits", () => {

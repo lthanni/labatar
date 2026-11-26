@@ -147,7 +147,7 @@ function runFfmpeg(executable, args) {
   });
 }
 
-async function probeChapters(executable, videoPath) {
+async function probeMedia(executable, videoPath) {
   const result = await runFfmpeg(executable, [
     "-nostdin",
     "-hide_banner",
@@ -161,9 +161,35 @@ async function probeChapters(executable, videoPath) {
     "ffmetadata",
     "-",
   ]);
-  const durationMs = parseDurationMs(result.stderr);
-  const metadata = parseChapterMetadata(result.stdout);
-  return { ...metadata, durationMs };
+  const input = result.stderr.split(/^Output #/m)[0];
+  const videoStream = input
+    .split(/^[ \t]*Stream #0:/m)
+    .slice(1)
+    .find(
+      (stream) =>
+        stream.split(/\r?\n/, 1)[0].includes(": Video:") && !stream.includes("(attached pic)"),
+    );
+  const videoLine = videoStream?.split(/\r?\n/, 1)[0];
+  const dimensions = videoLine?.match(/\b([1-9]\d*)x([1-9]\d*)(?=\s|,|\[)/);
+  const sar = videoLine?.match(/\bSAR ([1-9]\d*):([1-9]\d*)\b/);
+  const rotation = Number(videoStream?.match(/rotation of (-?[\d.]+) degrees/)?.[1] ?? 0);
+  const rotated = Math.abs((Math.abs(rotation) % 180) - 90) < 1;
+  const aspectRatio =
+    dimensions && Number(dimensions[2]) > 0
+      ? (Number(dimensions[1]) / Number(dimensions[2])) *
+        (sar ? Number(sar[1]) / Number(sar[2]) : 1)
+      : null;
+  return {
+    ...parseChapterMetadata(result.stdout),
+    durationMs: parseDurationMs(result.stderr),
+    hasAudio: /^\s*Stream #0:[^\r\n]*: Audio:/m.test(input),
+    displayAspectRatio: aspectRatio && rotated ? 1 / aspectRatio : aspectRatio,
+  };
+}
+
+async function probeChapters(executable, videoPath) {
+  const { creationTime, chapters, durationMs } = await probeMedia(executable, videoPath);
+  return { creationTime, chapters, durationMs };
 }
 
 async function addGameChaptersToMp4({ executable, videoPath, manifest }) {
@@ -284,6 +310,7 @@ async function addChaptersToMp4({
 }
 
 module.exports = {
+  probeMedia,
   chapterTimeForGame,
   planGameChapters,
   parseChapterMetadata,

@@ -75,6 +75,29 @@ describe("combo input video overlay", () => {
       expect(subtitle).toContain(
         "0:00:00.60,0:00:00.85,Inputs,,0,0,0,,{\\an5\\pos(960,972)}{\\c&HFFFFFF&}5A {\\c&H0000FF&}5B",
       );
+      const hiddenSubtitle = buildComboInputOverlayAss(
+        {
+          ...processed,
+          presses: [
+            { ...processed.presses[0], manualEdit: { hidden: true } },
+            processed.presses[1],
+          ],
+        },
+        capture,
+        1000,
+      );
+      expect(hiddenSubtitle).not.toContain("}5A");
+      expect(hiddenSubtitle).toContain("}5B");
+      const allHiddenSubtitle = buildComboInputOverlayAss(
+        {
+          ...processed,
+          presses: processed.presses.map((press) => ({ ...press, manualEdit: { hidden: true } })),
+        },
+        capture,
+        1000,
+      );
+      expect(allHiddenSubtitle).not.toContain("}5A");
+      expect(allHiddenSubtitle).not.toContain("}5B");
       await writeFile(path.join(directory, "overlay.ass"), subtitle);
       runFfmpeg(
         [
@@ -144,6 +167,35 @@ describe("combo input video overlay", () => {
       expect(firstFrame[topCenter + 2]).toBeLessThan(40);
       const footerCorner = (340 * 640 + 10) * 3;
       expect(Math.max(...firstFrame.subarray(footerCorner, footerCorner + 3))).toBeLessThan(20);
+      await writeFile(path.join(directory, "hidden.ass"), allHiddenSubtitle);
+      const hiddenOutput = path.join(directory, "hidden.mp4");
+      runFfmpeg(
+        buildClipExportFfmpegArgs({
+          sourcePath: source,
+          startTime: 0,
+          duration: 1,
+          outputPath: hiddenOutput,
+          videoFilter: buildComboInputVideoFilter(640, 360, "hidden.ass"),
+        }),
+        directory,
+      );
+      const blankFrame = runFfmpeg(
+        [
+          "-ss",
+          "0.5",
+          "-i",
+          hiddenOutput,
+          "-frames:v",
+          "1",
+          "-f",
+          "rawvideo",
+          "-pix_fmt",
+          "rgb24",
+          "-",
+        ],
+        directory,
+      );
+      expect(pixelCounts(blankFrame, layout.footerTop)).toEqual({ red: 0, white: 0 });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

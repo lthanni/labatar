@@ -153,13 +153,13 @@ function portraitPlayerNameHints(recordings) {
   return hints;
 }
 
-function portraitSide(character, support, playerName, catalog, slot) {
+function portraitSide(character, support, playerName, catalog, slot, steamId) {
   const name = typeof playerName === "string" ? playerName.trim() : "";
+  const identity = { slot, playerName: name || `Player ${slot}`, ...(steamId ? { steamId } : {}) };
   const characterId = characterIdForName(character);
   if (!characterId)
     return {
-      slot,
-      playerName: name || `Player ${slot}`,
+      ...identity,
       character: "Unknown",
       support: null,
       portraitUrl: null,
@@ -168,8 +168,7 @@ function portraitSide(character, support, playerName, catalog, slot) {
   const supportId = supportIdForName(character, support);
   const artwork = portraitArtwork(character, support, catalog);
   return {
-    slot,
-    playerName: name || `Player ${slot}`,
+    ...identity,
     character: String(character).trim(),
     support: supportId ? String(support).trim() : null,
     ...artwork,
@@ -188,15 +187,17 @@ function portraitMatchup(recording, catalog, playerNameHints = new Map()) {
   const p1 = replay?.player1Character ?? metadata?.player1Character;
   const p2 = replay?.player2Character ?? metadata?.player2Character;
   if (!p1 && !p2) return null;
+  const steamId = (slot) =>
+    replay?.[`player${slot}SteamId`] || metadata?.[`player${slot}SteamId`] || null;
   const playerName = (slot) =>
     usefulPlayerName(replay?.[`player${slot}`]) ??
     usefulPlayerName(metadata?.[`player${slot}Name`]) ??
-    playerNameHints.get(metadata?.[`player${slot}SteamId`]) ??
+    playerNameHints.get(steamId(slot)) ??
     null;
   return {
     players: [
-      portraitSide(p1, replay?.player1Support, playerName(1), catalog, 1),
-      portraitSide(p2, replay?.player2Support, playerName(2), catalog, 2),
+      portraitSide(p1, replay?.player1Support, playerName(1), catalog, 1, steamId(1)),
+      portraitSide(p2, replay?.player2Support, playerName(2), catalog, 2, steamId(2)),
     ],
     gameCount: games.length,
     gameNumber: linkedGame?.gameNumber ?? null,

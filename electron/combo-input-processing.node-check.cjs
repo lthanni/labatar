@@ -78,6 +78,38 @@ void test("processes 2, 3, 6, 6+C as 236C with physical-button evidence", () => 
   assert.equal(result.presses[2].interpretations.right.notation, null);
 });
 
+void test("keeps both Tiger Knee paths in the route for either facing", () => {
+  for (const [forward, backward] of [
+    ["2369", "2147"],
+    ["23698", "21478"],
+  ]) {
+    const directions = [5, ...Array.from(forward, Number)];
+    const pressTimeMs = directions.length * 30;
+    const input = {
+      ...capture,
+      states: [
+        ...directions.map((direction, index) => ({
+          timeMs: index * 30,
+          direction,
+          stickDirection: 5,
+          buttons: [],
+        })),
+        { timeMs: pressTimeMs, direction: 5, stickDirection: 5, buttons: ["B"] },
+      ],
+    };
+    const result = processComboInputCapture(input);
+    assert.deepEqual(result.routes, { right: `${forward}C`, left: `${backward}C` });
+    assert.equal(result.presses[0].interpretations.right.motion, forward);
+    assert.equal(result.presses[0].interpretations.left.motion, backward);
+
+    const edited = processComboInputCapture(input, undefined, 0, {
+      schemaVersion: 1,
+      presses: { [pressEditKey(pressTimeMs, "B")]: { toggleFacing: true, togglePosition: true } },
+    });
+    assert.deepEqual(edited.routes, { right: `j.${backward}C`, left: `j.${forward}C` });
+  }
+});
+
 void test("manual move labels and position changes survive reprocessing and a later trim", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "labatar-combo-edits-"));
   const videoPath = path.join(directory, "combo.mp4");
@@ -176,6 +208,70 @@ void test("chip position toggles flip the selected press and every later press",
   );
 });
 
+void test("hidden presses stay in processed evidence but leave both routes", () => {
+  const hidden = processComboInputCapture(capture, undefined, 0, {
+    schemaVersion: 1,
+    presses: { [pressEditKey(220, "B")]: { hidden: true, togglePosition: true } },
+  });
+  assert.equal(hidden.presses.length, 3);
+  assert.equal(hidden.presses[0].manualEdit.hidden, true);
+  assert.equal(hidden.presses[0].interpretations.right.notation, "j.236C");
+  assert.equal(hidden.routes.right, "j.2A");
+  assert.equal(hidden.routes.left, "j.2A");
+  assert.equal(hidden.presses[1].context.position, "airborne");
+  const restored = processComboInputCapture(capture, undefined, 0, {
+    schemaVersion: 1,
+    presses: { [pressEditKey(220, "B")]: { togglePosition: true } },
+  });
+  assert.equal(restored.routes.right, "j.236C j.2A");
+});
+
+void test("left-right toggles mirror the selected press onward and survive a trim", () => {
+  const input = {
+    ...capture,
+    states: [
+      ...capture.states.slice(0, 6),
+      { timeMs: 500, direction: 9, stickDirection: 5, buttons: ["X"], actions: ["Atk1"] },
+      { timeMs: 600, direction: 5, stickDirection: 5, buttons: [], actions: [] },
+      { timeMs: 750, direction: 4, stickDirection: 5, buttons: ["B"], actions: ["Atk3"] },
+      { timeMs: 800, direction: 5, stickDirection: 5, buttons: [], actions: [] },
+      { timeMs: 900, direction: 6, stickDirection: 5, buttons: ["X"], actions: ["Atk1"] },
+    ],
+  };
+  const edits = {
+    schemaVersion: 1,
+    presses: {
+      [pressEditKey(500, "X")]: { toggleFacing: true, togglePosition: true },
+      [pressEditKey(750, "B")]: { directionOverride: "6", charged: true },
+      [pressEditKey(900, "X")]: { toggleFacing: true },
+    },
+  };
+  const unedited = processComboInputCapture(input, undefined, 0);
+  const result = processComboInputCapture(input, undefined, 0, edits);
+  assert.deepEqual(result.routes, {
+    right: "236C j.7A j.6[C] j.6A",
+    left: "214C j.9A j.4[C] j.4A",
+  });
+  assert.deepEqual(
+    result.presses.map((press) => press.context.facing),
+    ["right", "left", "left", "right"],
+  );
+  assert.equal(result.presses[2].interpretations.right.direction, 6);
+  assert.deepEqual(result.directionChanges, unedited.directionChanges);
+  assert.equal(result.source.sha256, unedited.source.sha256);
+  const afterTrim = processComboInputCapture(
+    trimComboInputCapture(input, 0.7, 1),
+    undefined,
+    700,
+    edits,
+  );
+  assert.equal(afterTrim.routes.right, "j.6[C] j.6A");
+  assert.deepEqual(
+    afterTrim.presses.map((press) => press.context.facing),
+    ["left", "right"],
+  );
+});
+
 void test("charged edits bracket the button in grounded and airborne notation", () => {
   const grounded = processComboInputCapture(capture, undefined, 0, {
     schemaVersion: 1,
@@ -211,11 +307,13 @@ void test("delay edit prefixes one move and survives saved reprocessing", async 
   try {
     await writeComboInputEdits(videoPath, {
       schemaVersion: 1,
-      presses: { [pressEditKey(220, "B")]: { delay: true, togglePosition: true } },
+      presses: {
+        [pressEditKey(220, "B")]: { delay: true, togglePosition: true, toggleFacing: true },
+      },
     });
     const processed = await ensureProcessedComboInput(videoPath, capture, 0);
-    assert.equal(processed.routes.right, "dl.j.236C j.2A");
-    assert.equal(processed.routes.left, "dl.j.214C j.2A");
+    assert.equal(processed.routes.right, "dl.j.214C j.2A");
+    assert.equal(processed.routes.left, "dl.j.236C j.2A");
     assert.equal(
       (await ensureProcessedComboInput(videoPath, capture, 0, { force: true })).routes.right,
       processed.routes.right,

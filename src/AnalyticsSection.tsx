@@ -5,8 +5,10 @@ import {
   Card,
   CardContent,
   Checkbox,
+  FormControlLabel,
   Pagination,
   Stack,
+  Switch,
   Table,
   TableBody,
   TableCell,
@@ -96,6 +98,7 @@ type MatchupData = {
   supportsByCharacter: Map<string, SupportStats[]>;
   supportsByOpponentCharacter: Map<string, SupportStats[]>;
   cells: Map<string, MatchupStats>;
+  supportCells: Map<string, MatchupStats>;
 };
 
 function parseTimestamp(timestamp: string | null) {
@@ -130,6 +133,10 @@ function getMatchupKey(game: ReplayRow, poi: string) {
 
 function getPoiSupportKey(character: string, support: string) {
   return `${character}\u0000${support}`;
+}
+
+function getSupportMatchupKey(character: string, opponentCharacter: string, support: string) {
+  return `${character}\u0000${opponentCharacter}\u0000${support}`;
 }
 
 function isWin(game: ReplayRow, poi: string) {
@@ -184,6 +191,7 @@ function buildPerformance(
 
 function buildMatchupData(games: ReplayRow[], poi: string): MatchupData {
   const pairStats = new Map<string, MatchupStats>();
+  const supportPairStats = new Map<string, MatchupStats>();
   const rowCounts = new Map<string, number>();
   const columnCounts = new Map<string, number>();
   const supportCounts = new Map<string, Map<string, number>>();
@@ -211,6 +219,12 @@ function buildMatchupData(games: ReplayRow[], poi: string): MatchupData {
     if (isWin(game, poi)) current.wins += 1;
     else if (isLoss(game, poi)) current.losses += 1;
     pairStats.set(key, current);
+    const supportKey = getSupportMatchupKey(row, column, opponentSupport);
+    const supportCurrent = supportPairStats.get(supportKey) ?? { games: 0, wins: 0, losses: 0 };
+    supportCurrent.games += 1;
+    if (isWin(game, poi)) supportCurrent.wins += 1;
+    else if (isLoss(game, poi)) supportCurrent.losses += 1;
+    supportPairStats.set(supportKey, supportCurrent);
   }
   return {
     rows: [...rowCounts.entries()].sort((left, right) => right[1] - left[1]).map(([name]) => name),
@@ -244,6 +258,7 @@ function buildMatchupData(games: ReplayRow[], poi: string): MatchupData {
       ]),
     ),
     cells: pairStats,
+    supportCells: supportPairStats,
   };
 }
 
@@ -511,14 +526,18 @@ function CollapsedCharacterRows({
   rows,
   data,
   getPortrait,
+  groupEnemySupports,
   disabledMatchups,
+  disabledSupportMatchups,
   disabledPoiSupports,
   onExpand,
 }: {
   rows: string[];
   data: MatchupData;
   getPortrait: AnalyticsSectionProps["getPortrait"];
+  groupEnemySupports: boolean;
   disabledMatchups: Set<string>;
+  disabledSupportMatchups: Set<string>;
   disabledPoiSupports: Set<string>;
   onExpand: () => void;
 }) {
@@ -550,10 +569,14 @@ function CollapsedCharacterRows({
       {visibleRows.map((row, index) => {
         const supports = supportFilters(row, data.supportsByCharacter.get(row) ?? []);
         const portraitUrl = getPortrait(row, "Support #1")?.portraitUrl ?? null;
-        const selected = data.columns.some(
-          (column) =>
-            data.cells.has(`${row}\u0000${column}`) &&
-            !disabledMatchups.has(`${row}\u0000${column}`),
+        const selected = data.columns.some((column) =>
+          groupEnemySupports
+            ? data.cells.has(`${row}\u0000${column}`) &&
+              !disabledMatchups.has(`${row}\u0000${column}`)
+            : (data.supportsByOpponentCharacter.get(column) ?? []).some(({ name }) => {
+                const key = getSupportMatchupKey(row, column, name);
+                return data.supportCells.has(key) && !disabledSupportMatchups.has(key);
+              }),
         );
         return (
           <Box
@@ -681,20 +704,16 @@ function CollapsedCharacterRows({
 function MatchupHeatmap({
   data,
   getPortrait,
-  playerOfInterest,
-  playerCounts,
-  playerOverride,
-  onPlayerOverrideChange,
-  opponentPlayers,
-  selectedOpponentPlayers,
-  onOpponentPlayersChange,
+  groupEnemySupports,
   disabledMatchups,
+  disabledSupportMatchups,
   disabledOpponentCharacters,
   disabledOpponentSupports,
   disabledPoiSupports,
   charactersCollapsed,
   onCharactersCollapsedChange,
   onToggle,
+  onToggleSupportMatchup,
   onToggleOpponentCharacter,
   onToggleAllOpponentCharacters,
   onToggleOpponentSupport,
@@ -703,20 +722,16 @@ function MatchupHeatmap({
 }: {
   data: MatchupData;
   getPortrait: AnalyticsSectionProps["getPortrait"];
-  playerOfInterest: string | null;
-  playerCounts: Record<string, number>;
-  playerOverride: string | null;
-  onPlayerOverrideChange: (value: string | null) => void;
-  opponentPlayers: string[];
-  selectedOpponentPlayers: string[];
-  onOpponentPlayersChange: (value: string[]) => void;
+  groupEnemySupports: boolean;
   disabledMatchups: Set<string>;
+  disabledSupportMatchups: Set<string>;
   disabledOpponentCharacters: Set<string>;
   disabledOpponentSupports: Set<string>;
   disabledPoiSupports: Set<string>;
   charactersCollapsed: boolean;
   onCharactersCollapsedChange: (collapsed: boolean) => void;
   onToggle: (key: string) => void;
+  onToggleSupportMatchup: (key: string) => void;
   onToggleOpponentCharacter: (value: string) => void;
   onToggleAllOpponentCharacters: (selectAll: boolean) => void;
   onToggleOpponentSupport: (value: string) => void;
@@ -739,10 +754,20 @@ function MatchupHeatmap({
     activeOpponentColumns.length > 0 &&
     activeOpponentColumns.every((column) => !disabledOpponentCharacters.has(column));
   const collapsedStats = columns.map((column) => {
-    const stats = rows
-      .filter((row) => !disabledMatchups.has(`${row}\u0000${column}`))
-      .map((row) => cells.get(`${row}\u0000${column}`))
-      .filter((cell): cell is MatchupStats => Boolean(cell));
+    const stats = groupEnemySupports
+      ? rows
+          .filter((row) => !disabledMatchups.has(`${row}\u0000${column}`))
+          .map((row) => cells.get(`${row}\u0000${column}`))
+          .filter((cell): cell is MatchupStats => Boolean(cell))
+      : rows
+          .flatMap((row) =>
+            (supportsByOpponentCharacter.get(column) ?? [])
+              .filter(
+                ({ name }) => !disabledSupportMatchups.has(getSupportMatchupKey(row, column, name)),
+              )
+              .map(({ name }) => data.supportCells.get(getSupportMatchupKey(row, column, name))),
+          )
+          .filter((cell): cell is MatchupStats => Boolean(cell));
     return {
       column,
       games: stats.reduce((total, cell) => total + cell.games, 0),
@@ -797,18 +822,6 @@ function MatchupHeatmap({
         textAlign: "left",
       }}
     >
-      <OpponentAutocomplete
-        label="Opponent"
-        values={opponentPlayers}
-        selected={selectedOpponentPlayers}
-        onChange={onOpponentPlayersChange}
-      />
-      <PlayerAutocomplete
-        playerCounts={playerCounts}
-        playerOfInterest={playerOfInterest}
-        playerOverride={playerOverride}
-        onChange={onPlayerOverrideChange}
-      />
       {rows.length > 1 && (
         <Box
           component="button"
@@ -843,10 +856,28 @@ function MatchupHeatmap({
     );
   }
   return (
-    <Box sx={{ overflowX: "auto", overflowY: rows.length > 1 ? "auto" : "hidden", height: "100%" }}>
+    <Box
+      role="region"
+      aria-label="Character matchup percentages"
+      tabIndex={0}
+      sx={{
+        width: "100%",
+        minWidth: 0,
+        height: "100%",
+        overflowX: "auto",
+        overflowY: rows.length > 1 ? "auto" : "hidden",
+        scrollbarWidth: "auto",
+        scrollbarColor: "#777 #252a34",
+        "&::-webkit-scrollbar": { width: 12, height: 12 },
+        "&::-webkit-scrollbar-track": { bgcolor: "action.hover" },
+        "&::-webkit-scrollbar-thumb": { bgcolor: "text.disabled", borderRadius: 1 },
+      }}
+    >
       <Box
         sx={{
           display: "grid",
+          width: "max-content",
+          minWidth: "100%",
           gridTemplateColumns: `212px 56px repeat(${columns.length}, 160px)`,
           gap: 0.5,
         }}
@@ -950,7 +981,9 @@ function MatchupHeatmap({
               rows={rows}
               data={data}
               getPortrait={getPortrait}
+              groupEnemySupports={groupEnemySupports}
               disabledMatchups={disabledMatchups}
+              disabledSupportMatchups={disabledSupportMatchups}
               disabledPoiSupports={disabledPoiSupports}
               onExpand={() => onCharactersCollapsedChange(false)}
             />
@@ -976,7 +1009,14 @@ function MatchupHeatmap({
             })
             .filter((entry): entry is { key: string; cell: MatchupStats } => Boolean(entry.cell));
           const rowKeys = rowCells.map(({ key }) => key);
-          const rowSelected = rowKeys.some((key) => !disabledMatchups.has(key));
+          const rowSelected = groupEnemySupports
+            ? rowKeys.some((key) => !disabledMatchups.has(key))
+            : columns.some((column) =>
+                (supportsByOpponentCharacter.get(column) ?? []).some(({ name }) => {
+                  const key = getSupportMatchupKey(row, column, name);
+                  return data.supportCells.has(key) && !disabledSupportMatchups.has(key);
+                }),
+              );
           const rowWins = rowCells.reduce((total, { cell }) => total + cell.wins, 0);
           const rowLosses = rowCells.reduce((total, { cell }) => total + cell.losses, 0);
           const overallRate = rowWins + rowLosses > 0 ? getWinRate(rowWins, rowLosses) : null;
@@ -1073,6 +1113,79 @@ function MatchupHeatmap({
               {columns.map((column) => {
                 const key = `${row}\u0000${column}`;
                 const cell = cells.get(key);
+                if (!groupEnemySupports) {
+                  const supportOptions = supportFilters(
+                    column,
+                    supportsByOpponentCharacter.get(column) ?? [],
+                  );
+                  const supports = [
+                    ...supportOptions.slots.map(({ name }) => name),
+                    ...supportOptions.extra.map(({ name }) => name),
+                  ];
+                  return (
+                    <Box
+                      key={`${row}-${column}`}
+                      sx={{
+                        display: "grid",
+                        gridTemplateColumns: `repeat(${supports.length}, minmax(0, 1fr))`,
+                        gap: 0.25,
+                        minHeight: 42,
+                      }}
+                    >
+                      {supports.map((name) => {
+                        const supportKey = getSupportMatchupKey(row, column, name);
+                        const supportCell = data.supportCells.get(supportKey);
+                        const supportDisabled =
+                          disabledSupportMatchups.has(supportKey) ||
+                          disabledOpponentCharacters.has(column) ||
+                          disabledOpponentSupports.has(getPoiSupportKey(column, name));
+                        const supportRate = supportCell
+                          ? getWinRate(supportCell.wins, supportCell.losses)
+                          : null;
+                        const supportColor =
+                          supportRate === null
+                            ? "rgba(255,255,255,0.04)"
+                            : supportRate >= 50
+                              ? "144,202,249"
+                              : "239,154,154";
+                        const supportOpacity =
+                          supportRate === null ? 1 : 0.2 + Math.abs(supportRate - 50) / 100;
+                        return (
+                          <Box
+                            key={name}
+                            component="button"
+                            type="button"
+                            disabled={!supportCell}
+                            aria-label={`${row} vs ${column} with ${name}: ${supportCell?.games ?? 0} games, ${supportRate === null ? "no decided games" : `${supportRate}% win rate`}`}
+                            aria-pressed={supportCell ? !supportDisabled : undefined}
+                            title={`${row} vs ${column} with ${name}: ${supportCell?.games ?? 0} games, ${supportRate === null ? "no decided games" : `${supportRate}% win rate`}`}
+                            onClick={() => onToggleSupportMatchup(supportKey)}
+                            sx={{
+                              minWidth: 0,
+                              border: 0,
+                              borderRadius: 0.5,
+                              p: 0.25,
+                              color: "inherit",
+                              backgroundColor: supportDisabled
+                                ? "#424242"
+                                : `rgba(${supportColor}, ${supportOpacity})`,
+                              cursor: supportCell ? "pointer" : "default",
+                              "&:hover": supportCell ? { filter: "brightness(1.15)" } : undefined,
+                              "&:focus-visible": {
+                                outline: "2px solid",
+                                outlineColor: "primary.light",
+                              },
+                            }}
+                          >
+                            <Typography variant="caption" noWrap sx={{ display: "block" }}>
+                              {supportRate === null ? "—" : `${supportRate}%`}
+                            </Typography>
+                          </Box>
+                        );
+                      })}
+                    </Box>
+                  );
+                }
                 const disabled =
                   cell && (disabledMatchups.has(key) || disabledOpponentCharacters.has(column));
                 const rate = cell ? getWinRate(cell.wins, cell.losses) : null;
@@ -1184,10 +1297,13 @@ export function AnalyticsSection({
             supportsByCharacter: new Map<string, SupportStats[]>(),
             supportsByOpponentCharacter: new Map<string, SupportStats[]>(),
             cells: new Map<string, MatchupStats>(),
+            supportCells: new Map<string, MatchupStats>(),
           },
     [analysisGames, playerOfInterest],
   );
   const [disabledMatchups, setDisabledMatchups] = useState<Set<string>>(new Set());
+  const [disabledSupportMatchups, setDisabledSupportMatchups] = useState<Set<string>>(new Set());
+  const [groupEnemySupports, setGroupEnemySupports] = useState(true);
   const [disabledOpponentCharacters, setDisabledOpponentCharacters] = useState<Set<string>>(
     new Set(),
   );
@@ -1201,6 +1317,10 @@ export function AnalyticsSection({
   useEffect(() => {
     setDisabledMatchups((current) => {
       const next = new Set([...current].filter((key) => matchupData.cells.has(key)));
+      return next.size === current.size ? current : next;
+    });
+    setDisabledSupportMatchups((current) => {
+      const next = new Set([...current].filter((key) => matchupData.supportCells.has(key)));
       return next.size === current.size ? current : next;
     });
     setDisabledOpponentCharacters((current) => {
@@ -1228,6 +1348,14 @@ export function AnalyticsSection({
   }, [matchupData]);
   const toggleMatchup = (key: string) => {
     setDisabledMatchups((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const toggleSupportMatchup = (key: string) => {
+    setDisabledSupportMatchups((current) => {
       const next = new Set(current);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -1262,15 +1390,20 @@ export function AnalyticsSection({
     });
   };
   const toggleMatchupRow = (row: string, selectAll: boolean) => {
-    setDisabledMatchups((current) => {
+    const update = (current: Set<string>, keys: Iterable<string>) => {
       const next = new Set(current);
-      for (const key of matchupData.cells.keys()) {
+      for (const key of keys) {
         if (!key.startsWith(`${row}\u0000`)) continue;
         if (selectAll) next.delete(key);
         else next.add(key);
       }
       return next;
-    });
+    };
+    if (groupEnemySupports) {
+      setDisabledMatchups((current) => update(current, matchupData.cells.keys()));
+    } else {
+      setDisabledSupportMatchups((current) => update(current, matchupData.supportCells.keys()));
+    }
   };
   const togglePoiSupport = (key: string) => {
     setDisabledPoiSupports((current) => {
@@ -1289,7 +1422,11 @@ export function AnalyticsSection({
             const opponentCharacter = getOpponentCharacter(game, playerOfInterest) || "Unknown";
             const opponentSupport = getOpponentSupport(game, playerOfInterest) || "Unknown";
             return (
-              !disabledMatchups.has(getMatchupKey(game, playerOfInterest)) &&
+              (groupEnemySupports
+                ? !disabledMatchups.has(getMatchupKey(game, playerOfInterest))
+                : !disabledSupportMatchups.has(
+                    getSupportMatchupKey(character, opponentCharacter, opponentSupport),
+                  )) &&
               !disabledOpponentCharacters.has(opponentCharacter) &&
               !disabledOpponentSupports.has(getPoiSupportKey(opponentCharacter, opponentSupport)) &&
               !disabledPoiSupports.has(getPoiSupportKey(character, support))
@@ -1299,9 +1436,11 @@ export function AnalyticsSection({
     [
       analysisGames,
       disabledMatchups,
+      disabledSupportMatchups,
       disabledOpponentCharacters,
       disabledOpponentSupports,
       disabledPoiSupports,
+      groupEnemySupports,
       playerOfInterest,
     ],
   );
@@ -1315,7 +1454,11 @@ export function AnalyticsSection({
         const opponentSupport = getOpponentSupport(game, playerOfInterest) || "Unknown";
         return (
           !disabledOpponents.has(getOpponent(game, playerOfInterest)) &&
-          !disabledMatchups.has(getMatchupKey(game, playerOfInterest)) &&
+          (groupEnemySupports
+            ? !disabledMatchups.has(getMatchupKey(game, playerOfInterest))
+            : !disabledSupportMatchups.has(
+                getSupportMatchupKey(character, opponentCharacter, opponentSupport),
+              )) &&
           !disabledOpponentCharacters.has(opponentCharacter) &&
           !disabledOpponentSupports.has(getPoiSupportKey(opponentCharacter, opponentSupport)) &&
           !disabledPoiSupports.has(getPoiSupportKey(character, support))
@@ -1324,11 +1467,13 @@ export function AnalyticsSection({
       .map((game) => game.id);
   }, [
     disabledMatchups,
+    disabledSupportMatchups,
     disabledOpponents,
     disabledOpponentCharacters,
     disabledOpponentSupports,
     disabledPoiSupports,
     games,
+    groupEnemySupports,
     playerOfInterest,
   ]);
   useEffect(() => {
@@ -1404,27 +1549,51 @@ export function AnalyticsSection({
       sx={{
         mb: 2,
         textAlign: "left",
-        ...(fillHeight && { flex: "1 1 0", minHeight: 0 }),
+        ...(fillHeight && { flex: "1 1 0", minHeight: { xs: "auto", xl: 0 } }),
       }}
     >
+      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, width: "100%", alignItems: "center" }}>
+        <Box sx={{ flex: "1 1 260px", minWidth: 190, maxWidth: 360 }}>
+          <OpponentAutocomplete
+            label="Opponent"
+            values={opponentFilterValues.players}
+            selected={selectedOpponentPlayers}
+            onChange={onOpponentPlayersChange}
+          />
+        </Box>
+        <Box sx={{ flex: "1 1 260px", minWidth: 190, maxWidth: 360 }}>
+          <PlayerAutocomplete
+            playerCounts={playerCounts}
+            playerOfInterest={playerOfInterest}
+            playerOverride={playerOverride}
+            onChange={onPlayerOverrideChange}
+          />
+        </Box>
+        <FormControlLabel
+          control={
+            <Switch
+              checked={groupEnemySupports}
+              onChange={(_, checked) => setGroupEnemySupports(checked)}
+            />
+          }
+          label="Group all enemy supports under character"
+          sx={{ m: 0, whiteSpace: "nowrap" }}
+        />
+      </Box>
       <ChartPanel height={matchupPanelHeight}>
         <MatchupHeatmap
           data={chartMatchupData}
           getPortrait={getPortrait}
-          playerOfInterest={playerOfInterest}
-          playerCounts={playerCounts}
-          playerOverride={playerOverride}
-          onPlayerOverrideChange={onPlayerOverrideChange}
-          opponentPlayers={opponentFilterValues.players}
-          selectedOpponentPlayers={selectedOpponentPlayers}
-          onOpponentPlayersChange={onOpponentPlayersChange}
+          groupEnemySupports={groupEnemySupports}
           disabledMatchups={disabledMatchups}
+          disabledSupportMatchups={disabledSupportMatchups}
           disabledOpponentCharacters={disabledOpponentCharacters}
           disabledOpponentSupports={disabledOpponentSupports}
           disabledPoiSupports={disabledPoiSupports}
           charactersCollapsed={charactersCollapsed}
           onCharactersCollapsedChange={setCharactersCollapsed}
           onToggle={toggleMatchup}
+          onToggleSupportMatchup={toggleSupportMatchup}
           onToggleOpponentCharacter={toggleOpponentCharacter}
           onToggleAllOpponentCharacters={toggleAllOpponentCharacters}
           onToggleOpponentSupport={toggleOpponentSupport}
@@ -1435,17 +1604,23 @@ export function AnalyticsSection({
       <Box
         sx={{
           display: "grid",
-          gridTemplateColumns: { xs: "minmax(0, 1fr)", lg: "repeat(2, minmax(0, 1fr))" },
+          gridTemplateColumns: { xs: "minmax(0, 1fr)", xl: "repeat(2, minmax(0, 1fr))" },
           gap: 2,
           alignItems: fillHeight ? "stretch" : "start",
           ...(fillHeight && {
-            flex: "1 1 0",
-            minHeight: 260,
-            overflow: "hidden",
+            flex: { xs: "0 0 auto", xl: "1 1 0" },
+            minHeight: { xs: 0, xl: 260 },
+            overflow: { xs: "visible", xl: "hidden" },
           }),
         }}
       >
-        <Box sx={{ minWidth: 0, minHeight: 0, height: fillHeight ? "100%" : undefined }}>
+        <Box
+          sx={{
+            minWidth: 0,
+            minHeight: 0,
+            height: fillHeight ? { xs: 360, xl: "100%" } : undefined,
+          }}
+        >
           {tableContent}
         </Box>
         <Stack
@@ -1453,8 +1628,8 @@ export function AnalyticsSection({
           sx={{
             minWidth: 0,
             minHeight: 0,
-            height: fillHeight ? "100%" : undefined,
-            overflowY: fillHeight ? "auto" : undefined,
+            height: fillHeight ? { xs: "auto", xl: "100%" } : undefined,
+            overflowY: fillHeight ? { xs: "visible", xl: "auto" } : undefined,
           }}
         >
           <Card
@@ -1462,27 +1637,27 @@ export function AnalyticsSection({
             sx={{
               minWidth: 0,
               ...(fillHeight && {
-                flex: { lg: "1 1 0" },
-                minHeight: { lg: 0 },
-                display: { lg: "flex" },
-                flexDirection: { lg: "column" },
+                flex: { xl: "1 1 0" },
+                minHeight: { xl: 0 },
+                display: { xl: "flex" },
+                flexDirection: { xl: "column" },
               }),
             }}
           >
             <CardContent
               sx={{
                 ...(fillHeight && {
-                  flex: { lg: "1 1 0" },
-                  minHeight: { lg: 0 },
-                  display: { lg: "flex" },
-                  flexDirection: { lg: "column" },
+                  flex: { xl: "1 1 0" },
+                  minHeight: { xl: 0 },
+                  display: { xl: "flex" },
+                  flexDirection: { xl: "column" },
                 }),
               }}
             >
               <TableContainer
                 sx={{
-                  maxHeight: { xs: 360, lg: fillHeight ? "none" : 360 },
-                  ...(fillHeight && { flex: { lg: "1 1 0" }, minHeight: { lg: 0 } }),
+                  maxHeight: { xs: 360, xl: fillHeight ? "none" : 360 },
+                  ...(fillHeight && { flex: { xl: "1 1 0" }, minHeight: { xl: 0 } }),
                 }}
               >
                 <Table

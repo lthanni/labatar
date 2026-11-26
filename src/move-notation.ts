@@ -1,4 +1,18 @@
-export const MOVE_BUTTONS = ["A", "AA", "B", "C", "F", "EX", "SUP", "TH", "X"] as const;
+export const MOVE_BUTTONS = [
+  "A",
+  "AA",
+  "B",
+  "C",
+  "F",
+  "EX",
+  "SUP",
+  "TH",
+  "X",
+  "B+C",
+  "A+B+C",
+  "A+F",
+  "C+F",
+] as const;
 
 export type MoveButton = (typeof MOVE_BUTTONS)[number];
 
@@ -15,7 +29,7 @@ export type ParsedMoveNotation = {
 export type MoveNotationResult = ({ ok: true } & ParsedMoveNotation) | { ok: false; error: string };
 
 const INVALID_MOVE_NOTATION_MESSAGE =
-  "Use TH or j.TH for throws, or j.1-9, 1-9, 214, 236, or 22 followed by A, AA, B, C, F, EX, SUP, TH, or X; 1-9X matches any numbered direction with A/B/C. Charged buttons use brackets, such as 5[C].";
+  "Use TH or j.TH for throws, or a direction or motion such as 2, j.2, 214, 236, 22, 2369, or 23698 followed by A, AA, B, C, F, EX, SUP, TH, X, B+C, A+B+C, A+F, or C+F. 1-9X matches any numbered direction with A/B/C. Charged buttons use brackets, such as 5[C].";
 
 export type MoveNotationOptions = {
   /** Bare buttons other than TH are only valid as stance followups. */
@@ -37,7 +51,7 @@ export function parseMoveNotation(
 ): MoveNotationResult {
   const compact = compactMoveInput(input);
   const match =
-    /^(j\.)?(214|236|22|1-9|[1-9])?(\[(?:EX|SUP|A|B|C|F|X)\]|EX|SUP|TH|AA|A|B|C|F|X)$/i.exec(
+    /^(j\.)?(214(?:78?)?|236(?:98?)?|22|1-9|[1-9])?(\[(?:EX|SUP|A|B|C|F|X)\]|A\+B\+C|B\+C|A\+F|C\+F|EX|SUP|TH|AA|A|B|C|F|X)$/i.exec(
       compact,
     );
   if (!match) {

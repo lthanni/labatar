@@ -10,12 +10,18 @@ import {
 import { buildRecordingReplayIndex, recordingIdForSet } from "./recording-replay-links";
 import { displayGroupedPlayerName } from "./replay-player-identity";
 import type { RecordedVideo } from "./recording-types";
-import type { ReplayStagingPreview, ReplayStagingStatus } from "./replay-staging-types";
+import type {
+  ReplayStagingOptions,
+  ReplayStagingPreview,
+  ReplayStagingStatus,
+} from "./replay-staging-types";
+import { ReplayStagingDialog } from "./ReplayStagingDialog";
 import { techSelectedRecordingStorageKey, techSelectRecordingEvent } from "./tech-types";
 import {
   Alert,
   Box,
   Button,
+  Checkbox,
   Dialog,
   DialogActions,
   DialogContent,
@@ -74,6 +80,8 @@ type SessionRow = {
   playerMmrAtStart: string;
   playerMmrChange: string;
   games: ReplayRow[];
+  combinedRecordingId?: string;
+  combinedSourceCount?: number;
 };
 type DisplayRow =
   | (SessionRow & { kind: "session" })
@@ -619,6 +627,54 @@ function projectSession(session: SessionRow, games: ReplayRow[], poi: string | n
   };
 }
 
+function replayKeyForRow(game: ReplayRow) {
+  return game.contentHash && /^[a-f0-9]{64}$/i.test(game.contentHash)
+    ? `sha256:${game.contentHash.toLowerCase()}`
+    : null;
+}
+
+export function applyCombinedSets(
+  sessions: SessionRow[],
+  recordings: RecordedVideo[],
+  poi: string | null,
+) {
+  const result = [...sessions];
+  for (const recording of recordings) {
+    const sources = recording.combinedSets?.sourceSets;
+    if (!sources?.length) continue;
+    const selected: SessionRow[] = [];
+    for (const source of sources) {
+      const expected = new Set(source.replayKeys);
+      const session = result.find(
+        (candidate) =>
+          candidate.games.length === expected.size &&
+          candidate.games.every((game) => {
+            const key = replayKeyForRow(game);
+            return key !== null && expected.has(key);
+          }),
+      );
+      if (!session || selected.includes(session)) {
+        selected.length = 0;
+        break;
+      }
+      selected.push(session);
+    }
+    if (selected.length !== sources.length) continue;
+    const firstIndex = Math.min(...selected.map((session) => result.indexOf(session)));
+    const games = selected
+      .flatMap((session) => session.games)
+      .sort((a, b) => (b.timestamp ?? "").localeCompare(a.timestamp ?? ""));
+    const combined = projectSession(selected[0], games, poi);
+    combined.id = `combined:${recording.id}`;
+    combined.mode = getSessionMode(games);
+    combined.combinedRecordingId = recording.id;
+    combined.combinedSourceCount = selected.length;
+    for (const session of selected) result.splice(result.indexOf(session), 1);
+    result.splice(firstIndex, 0, combined);
+  }
+  return result;
+}
+
 export function AvatarGrid({
   rowData,
   replayFolder,
@@ -677,6 +733,10 @@ export function AvatarGrid({
   const [stagingBusy, setStagingBusy] = useState(false);
   const [selectedMatchupGameIds, setSelectedMatchupGameIds] = useState<string[] | null>(null);
   const [recordings, setRecordings] = useState<RecordedVideo[]>([]);
+  const [selectedSetIds, setSelectedSetIds] = useState<Set<string>>(new Set());
+  const [combineConfirmationOpen, setCombineConfirmationOpen] = useState(false);
+  const [splitRecordingId, setSplitRecordingId] = useState<string | null>(null);
+  const [combineBusy, setCombineBusy] = useState(false);
   const [portraits, setPortraits] = useState<Record<string, PortraitUrls>>({});
   const visiblePortraits = webMode ? webPortraits : portraits;
   useEffect(() => {
@@ -755,8 +815,8 @@ export function AvatarGrid({
     let cancelled = false;
     void window.electronAPI.recordings
       .list()
-      .then(({ recordings: nextRecordings }) => {
-        if (!cancelled) setRecordings(nextRecordings);
+      .then((next) => {
+        if (!cancelled) setRecordings(next.recordings);
       })
       .catch(() => {
         if (!cancelled) setRecordings([]);
@@ -805,6 +865,95 @@ export function AvatarGrid({
   useEffect(() => {
     setSelectedMatchupGameIds(null);
   }, [playerOfInterest]);
+  const combinedSessionRows = useMemo(
+    () => applyCombinedSets(sessionRows, recordings, playerOfInterest),
+    [sessionRows, recordings, playerOfInterest],
+  );
+  const selectedSets = useMemo(
+    () => combinedSessionRows.filter((session) => selectedSetIds.has(session.id)),
+    [combinedSessionRows, selectedSetIds],
+  );
+  useEffect(() => {
+    setSelectedSetIds((current) => {
+      const available = new Set(combinedSessionRows.map((session) => session.id));
+      const next = new Set([...current].filter((id) => available.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [combinedSessionRows]);
+  const selectedRecordingSets = useMemo(
+    () =>
+      [...selectedSets]
+        .sort((a, b) => (a.started ?? "").localeCompare(b.started ?? ""))
+        .map((session) => ({
+          recordingId: recordingIdForSet(
+            session.games.map((game) => game.id),
+            replayFolder,
+            recordingReplayIndex,
+            replayHashesById,
+          ),
+          replayKeys: session.games.map(replayKeyForRow),
+        })),
+    [selectedSets, replayFolder, recordingReplayIndex, replayHashesById],
+  );
+  const canCombineSelected =
+    selectedSets.length >= 2 &&
+    selectedSets.length <= 12 &&
+    selectedSets.every(
+      (session) => !session.combinedRecordingId && session.opponent === selectedSets[0].opponent,
+    ) &&
+    selectedRecordingSets.every((set) => set.recordingId && set.replayKeys.every(Boolean)) &&
+    new Set(selectedRecordingSets.map((set) => set.recordingId)).size ===
+      selectedRecordingSets.length;
+  const confirmCombineSets = async () => {
+    if (!canCombineSelected || !window.electronAPI?.recordings) return;
+    setCombineBusy(true);
+    try {
+      await window.electronAPI.recordings.combineSets({
+        sets: selectedRecordingSets.map((set) => ({
+          recordingId: set.recordingId!,
+          replayKeys: set.replayKeys as string[],
+        })),
+      });
+      setSelectedSetIds(new Set());
+      setCombineConfirmationOpen(false);
+      const next = await window.electronAPI.recordings.list({ analysisScope: "none" });
+      setRecordings(next.recordings);
+      setExportMessage({
+        severity: "success",
+        text: "Combined set recording created. The original recordings remain available for splitting.",
+      });
+    } catch (error) {
+      setExportMessage({
+        severity: "error",
+        text: `Could not combine sets: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      setCombineBusy(false);
+    }
+  };
+  const splitCombinedSet = async () => {
+    if (!splitRecordingId || !window.electronAPI?.recordings) return;
+    setCombineBusy(true);
+    try {
+      const result = await window.electronAPI.recordings.splitSets({
+        recordingId: splitRecordingId,
+      });
+      const next = await window.electronAPI.recordings.list({ analysisScope: "none" });
+      setRecordings(next.recordings);
+      setSplitRecordingId(null);
+      setExportMessage({
+        severity: "success",
+        text: `Restored ${result.sourceCount} original sets and recordings.`,
+      });
+    } catch (error) {
+      setExportMessage({
+        severity: "error",
+        text: `Could not split sets: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      setCombineBusy(false);
+    }
+  };
   const matchesOtherFilters = (session: SessionRow, ignored: keyof typeof filters) =>
     ignored === "opponent" ||
     filters.opponent.length === 0 ||
@@ -816,19 +965,21 @@ export function AvatarGrid({
     ) =>
       [
         ...new Set(
-          sessionRows.filter((session) => matchesOtherFilters(session, ignored)).flatMap(getValues),
+          combinedSessionRows
+            .filter((session) => matchesOtherFilters(session, ignored))
+            .flatMap(getValues),
         ),
       ].sort();
     return {
       opponent: valuesFor("opponent", (session) => [session.opponent]),
     };
-  }, [sessionRows, filters]);
+  }, [combinedSessionRows, filters]);
   const filteredSessions = useMemo(
     () =>
-      sessionRows.filter(
+      combinedSessionRows.filter(
         (session) => filters.opponent.length === 0 || filters.opponent.includes(session.opponent),
       ),
-    [sessionRows, filters],
+    [combinedSessionRows, filters],
   );
   const tableSessions = useMemo(() => {
     if (invalidDateRange) return [];
@@ -869,6 +1020,10 @@ export function AvatarGrid({
           : []),
       ]),
     [expandedSessions, pagedSessions],
+  );
+  const combinedRecordingBySession = useMemo(
+    () => new Map(pagedSessions.map((session) => [session.id, session.combinedRecordingId])),
+    [pagedSessions],
   );
   const filteredGames = useMemo(
     () => filteredSessions.flatMap((session) => session.games),
@@ -936,17 +1091,22 @@ export function AvatarGrid({
       });
     }
   };
-  const confirmStageReplays = async () => {
+  const confirmStageReplays = async (options: ReplayStagingOptions) => {
     if (!stageRequest || !window.electronAPI?.replays) return;
     setStagingBusy(true);
     try {
-      const result = await window.electronAPI.replays.stage({ ids: stageRequest.ids });
+      const result = await window.electronAPI.replays.stage({ ids: stageRequest.ids, ...options });
       setStagingStatus(result);
       setStageRequest(null);
       onReplaysChanged();
+      const prepared = `Prepared ${result.selectedCount} replay${result.selectedCount === 1 ? "" : "s"} for in-game playback.`;
       setExportMessage({
-        severity: "success",
-        text: `Prepared ${result.selectedCount} replay${result.selectedCount === 1 ? "" : "s"} for in-game playback.`,
+        severity: result.issue || result.gameOpenError ? "error" : "success",
+        text:
+          result.issue ??
+          [prepared, result.gameOpenError ?? (result.gameOpened ? "Opened Avatar Legends." : "")]
+            .filter(Boolean)
+            .join(" "),
       });
     } catch (error) {
       setExportMessage({
@@ -987,22 +1147,25 @@ export function AvatarGrid({
       {
         colId: "actions",
         headerName: "Player",
-        width: webMode ? 272 : 360,
-        minWidth: webMode ? 250 : 340,
+        width: webMode ? 272 : 400,
+        minWidth: webMode ? 250 : 380,
         sortable: false,
         filter: false,
         cellRenderer: (params: ICellRendererParams<DisplayRow>) => {
           const data = params.data;
           if (!data) return null;
           const isSession = data.kind === "session";
-          const recordingId = isSession
-            ? recordingIdForSet(
-                data.games.map((game) => game.id),
-                replayFolder,
-                recordingReplayIndex,
-                replayHashesById,
-              )
-            : null;
+          const combinedRecordingId = isSession
+            ? data.combinedRecordingId
+            : combinedRecordingBySession.get(data.sessionId);
+          const recordingId =
+            combinedRecordingId ??
+            recordingIdForSet(
+              isSession ? data.games.map((game) => game.id) : [data.id],
+              replayFolder,
+              recordingReplayIndex,
+              replayHashesById,
+            );
           const { mmr, change } = getPlayerMmrParts(data, playerOfInterest, showMmrInUnrankedGames);
           return (
             <Box
@@ -1016,6 +1179,28 @@ export function AvatarGrid({
               }}
             >
               <Stack direction="row" spacing={0.5} sx={{ flexShrink: 0, alignItems: "center" }}>
+                {!webMode && isSession && (
+                  <Checkbox
+                    size="small"
+                    checked={selectedSetIds.has(data.id)}
+                    disabled={combineBusy || Boolean(data.combinedRecordingId)}
+                    slotProps={{
+                      input: {
+                        "aria-label": `Select set against ${displayGroupedPlayerName(data.opponent)} from ${formatReplayTimestamp(data.started)}`,
+                      },
+                    }}
+                    onChange={(_, checked) =>
+                      setSelectedSetIds((current) => {
+                        const next = new Set(current);
+                        if (checked) next.add(data.id);
+                        else next.delete(data.id);
+                        return next;
+                      })
+                    }
+                    sx={{ p: 0 }}
+                  />
+                )}
+                {!webMode && !isSession && <Box sx={{ width: 24, flexShrink: 0 }} />}
                 {isSession ? (
                   <button
                     type="button"
@@ -1043,7 +1228,7 @@ export function AvatarGrid({
                         aria-label={
                           isSession
                             ? `Open recording for set against ${displayGroupedPlayerName(data.opponent)}`
-                            : "Open set recording"
+                            : "Open match recording"
                         }
                         title="Open set recording"
                         onClick={() => openRecording(recordingId)}
@@ -1133,6 +1318,15 @@ export function AvatarGrid({
                 <Box component="span" sx={{ color, fontWeight: 600 }}>
                   {data.record}
                 </Box>
+                {data.combinedRecordingId && (
+                  <Button
+                    size="small"
+                    disabled={combineBusy}
+                    onClick={() => setSplitRecordingId(data.combinedRecordingId!)}
+                  >
+                    Split {data.combinedSourceCount} sets
+                  </Button>
+                )}
               </Stack>
             );
           }
@@ -1153,7 +1347,7 @@ export function AvatarGrid({
           );
         },
         minWidth: 175,
-        maxWidth: 290,
+        maxWidth: 320,
       },
       {
         colId: "opponent",
@@ -1225,8 +1419,11 @@ export function AvatarGrid({
       playerOfInterest,
       visiblePortraits,
       recordingReplayIndex,
+      combinedRecordingBySession,
       replayFolder,
       replayHashesById,
+      selectedSetIds,
+      combineBusy,
       webMode,
       showMmrInUnrankedGames,
     ],
@@ -1313,6 +1510,30 @@ export function AvatarGrid({
               minHeight: 0,
             }}
           >
+            {!webMode && selectedSets.length > 0 && (
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mb: 1, alignItems: "center" }}>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  disabled={!canCombineSelected || combineBusy}
+                  onClick={() => setCombineConfirmationOpen(true)}
+                >
+                  Combine selected sets ({selectedSets.length})
+                </Button>
+                <Button
+                  size="small"
+                  disabled={combineBusy}
+                  onClick={() => setSelectedSetIds(new Set())}
+                >
+                  Clear selection
+                </Button>
+                {!canCombineSelected && (
+                  <Typography variant="caption" color="text.secondary">
+                    Choose 2–12 sets against the same opponent, each with its own linked MP4.
+                  </Typography>
+                )}
+              </Box>
+            )}
             <div
               className="ag-theme-quartz-dark"
               style={{ flex: "1 1 auto", minHeight: 0, width: "100%" }}
@@ -1419,32 +1640,73 @@ export function AvatarGrid({
         <MenuItem onClick={() => void prepareContextReplays()} disabled={stagingBusy}>
           Prepare {contextMenu?.data.kind === "session" ? "set" : "game"} for in-game playback
         </MenuItem>
+        {contextMenu?.data.kind === "session" && contextMenu.data.combinedRecordingId && (
+          <MenuItem
+            onClick={() => {
+              setSplitRecordingId(
+                contextMenu.data.kind === "session"
+                  ? (contextMenu.data.combinedRecordingId ?? null)
+                  : null,
+              );
+              setContextMenu(null);
+            }}
+            disabled={combineBusy}
+          >
+            Split into original sets and recordings
+          </MenuItem>
+        )}
       </Menu>
-      <Dialog open={stageRequest !== null} onClose={() => !stagingBusy && setStageRequest(null)}>
-        <DialogTitle>Prepare replays for in-game playback</DialogTitle>
+      <Dialog
+        open={combineConfirmationOpen}
+        onClose={() => !combineBusy && setCombineConfirmationOpen(false)}
+      >
+        <DialogTitle>Combine {selectedSets.length} sets?</DialogTitle>
         <DialogContent>
           <Typography variant="body2">
-            Close the game first. Labatar will preserve the existing replay folder and place only
-            the {stageRequest?.preview.selectedCount} replay
-            {stageRequest?.preview.selectedCount === 1 ? "" : "s"} from this {stageRequest?.label}
-            in the game’s replay folder.
-          </Typography>
-          <Typography variant="body2" sx={{ mt: 1 }}>
-            {stageRequest?.preview.switching
-              ? "The original replay tree remains preserved."
-              : `${stageRequest?.preview.archivedCount} existing replays will remain available in Labatar.`}{" "}
-            Any new replays saved afterward will be kept when you switch or restore.
+            Labatar will create one playable MP4 with a chapter for each set and show one combined
+            match history record. The original MP4s and metadata remain on disk so you can split the
+            sets later.
           </Typography>
         </DialogContent>
         <DialogActions>
-          <Button disabled={stagingBusy} onClick={() => setStageRequest(null)}>
+          <Button disabled={combineBusy} onClick={() => setCombineConfirmationOpen(false)}>
             Cancel
           </Button>
-          <Button disabled={stagingBusy} onClick={() => void confirmStageReplays()}>
-            Prepare replays
+          <Button
+            disabled={!canCombineSelected || combineBusy}
+            onClick={() => void confirmCombineSets()}
+          >
+            Combine sets
           </Button>
         </DialogActions>
       </Dialog>
+      <Dialog
+        open={splitRecordingId !== null}
+        onClose={() => !combineBusy && setSplitRecordingId(null)}
+      >
+        <DialogTitle>Split combined sets?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            Labatar will remove the generated combined MP4 and show the original sets and recordings
+            again. Their files and metadata have remained unchanged.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={combineBusy} onClick={() => setSplitRecordingId(null)}>
+            Cancel
+          </Button>
+          <Button disabled={combineBusy} onClick={() => void splitCombinedSet()}>
+            Split sets
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <ReplayStagingDialog
+        preview={stageRequest?.preview ?? null}
+        selectionLabel={`this ${stageRequest?.label ?? "game"}`}
+        busy={stagingBusy}
+        onClose={() => setStageRequest(null)}
+        onConfirm={(options) => void confirmStageReplays(options)}
+      />
       <Dialog
         open={restoreConfirmationOpen}
         onClose={() => !stagingBusy && setRestoreConfirmationOpen(false)}

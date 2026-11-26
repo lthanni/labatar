@@ -24,16 +24,29 @@ import {
   Paper,
   Stack,
   Switch,
-  Tab,
-  Tabs,
   TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
 import supportMap from "../electron/support-map.json";
+import { CharacterTabActions } from "./CharacterTabActions";
 import { ComboRouteText } from "./ComboRouteText";
+import {
+  ComboCharacterCompatibilityFields,
+  ComboCharacterPortraits,
+  ComboCompatibilityEditor,
+  type ComboCompatibilityEdit,
+} from "./ComboCharacterCompatibility";
+import {
+  applyComboCharacterAssignments,
+  isComboCharacterCompatibility,
+} from "./combo-character-compatibility";
+import type { GetScopePortrait } from "./ScopePortrait";
+import { characterTechOpenComboEvent } from "./character-tech";
 import { ComboInputInspector } from "./ComboInputInspector";
+import { ControllerBindingsDialog, type ControllerBindings } from "./ControllerBindingsDialog";
 import { ComboRecordButton } from "./ComboRecordButton";
+import { VideoPicker } from "./VideoPicker";
 import {
   comboScreenPositions,
   comboScreenPositionOrEmpty,
@@ -52,7 +65,12 @@ import {
   savedCandidateRecording,
   type ComboCandidate,
 } from "./combo-candidates";
-import { comboStarterFromRoute, comboStarterGroup, comboStarterGroups } from "./combo-starter";
+import {
+  comboStarter,
+  comboStarterFromRoute,
+  comboStarterGroup,
+  comboStarterGroups,
+} from "./combo-starter";
 import { routeAuditTargets } from "./combo-route-audit";
 import { candidateRecordingTitle, formatComboRecordingBaseName } from "./combo-recording-name";
 import {
@@ -102,7 +120,13 @@ import {
   type PublishedCatalog,
 } from "./published-catalog";
 import { publishedComboFromDraft, type PublishComboDraft } from "./publish-combo-draft";
-import { comboMediaGap, comboYouTubeVideo, isLocalMp4, type ComboMediaGap } from "./combo-media";
+import {
+  comboHasNoInputRecording,
+  comboMediaGap,
+  comboYouTubeVideo,
+  isLocalMp4,
+  type ComboMediaGap,
+} from "./combo-media";
 import type { RecordedVideo } from "./recording-types";
 import type { WebArtworkLibrary } from "./web/artwork";
 import {
@@ -250,7 +274,7 @@ const rawColumns = [
   ["status", "Status"],
   ["media", "Media"],
   ["route", "Route"],
-  ["tags", "My tags"],
+  ["tags", "Tags"],
 ] as const;
 type RawColumn = (typeof rawColumns)[number][0];
 const browserRawColumns = rawColumns.filter(
@@ -262,6 +286,7 @@ function field(
   entry: PersonalComboEntry,
   column: RawColumn,
   gap: ComboMediaGap,
+  tags: readonly string[] = entry.tags,
 ): string | number | null {
   switch (column) {
     case "source":
@@ -299,7 +324,7 @@ function field(
     case "route":
       return item.route;
     case "tags":
-      return entry.tags.join(", ");
+      return tags.join(", ");
   }
 }
 
@@ -308,12 +333,13 @@ function matchesRaw(
   entry: PersonalComboEntry,
   filters: RawFilters,
   gap: ComboMediaGap,
+  tags: readonly string[] = entry.tags,
 ): boolean {
   const search = filters.search.trim().toLowerCase();
   if (
     search &&
-    ![item.name, entry.name, item.route, item.starter, item.screenPosition, ...entry.tags].some(
-      (value) => value.toLowerCase().includes(search),
+    ![item.name, entry.name, item.route, item.starter, item.screenPosition, ...tags].some((value) =>
+      value.toLowerCase().includes(search),
     )
   )
     return false;
@@ -381,7 +407,7 @@ function SelectField({
   );
 }
 
-function ComboSourceCounts({ local, candidates }: { local: number; candidates: number }) {
+export function ComboSourceCounts({ local, candidates }: { local: number; candidates: number }) {
   if (local === 0 && candidates === 0) return null;
   return (
     <Stack direction="row" spacing={0.75} sx={{ justifyContent: "center", mt: 0.5 }}>
@@ -521,7 +547,7 @@ function ComboFlowMeter({ flow }: { flow: number }) {
   );
 }
 
-function PortraitPicker({
+export function PortraitPicker({
   open,
   kind,
   options,
@@ -705,8 +731,9 @@ function LocalComboDialog({
       setFormError("Complete the highlighted fields before submitting or publishing.");
       return;
     }
-    const starter = comboStarterFromRoute(
+    const starter = comboStarter(
       route,
+      form.starterOverride,
       form.publishedBase?.starterIsNonAttackStance ?? false,
     );
     if (!form.characterId.trim() || !form.supportId.trim() || (!starter && !pendingRoute)) return;
@@ -722,6 +749,10 @@ function LocalComboDialog({
       setFormError("The combo name, route, or position is too long.");
       return;
     }
+    if ((form.starterOverride?.trim().length ?? 0) > 100) {
+      setFormError("The starter override must be at most 100 characters.");
+      return;
+    }
     if ((form.editorName?.length ?? 0) > 160 || (form.editorNotes?.length ?? 0) > 20) {
       setFormError("An editor field is too long, or the draft has more than 20 editor notes.");
       return;
@@ -734,6 +765,7 @@ function LocalComboDialog({
         supportId: slugComboText(form.supportId),
         name: form.originCatalog ? form.editorName?.trim() || "" : form.name.trim(),
         starter: pendingRoute ? "Pending input" : starter,
+        starterOverride: form.starterOverride?.trim() ?? "",
         route,
         ...(form.routeSource
           ? { routeSource: route !== draft.route ? ("manual" as const) : form.routeSource }
@@ -807,7 +839,15 @@ function LocalComboDialog({
               required={!form.recordingDraft}
               value={form.route}
               onChange={(e) => update("route", e.target.value)}
-              helperText={`Saved routes use one space between moves; ~ marks a stance followup. Inputs use casing like 2B and j.2C. Starter: ${comboStarterFromRoute(form.route, form.publishedBase?.starterIsNonAttackStance ?? false) || "Enter a route"}`}
+              helperText={`Saved routes use one space between moves; ~ marks a stance followup. Inputs use casing like 2B and j.2C. Input starter: ${comboStarterFromRoute(form.route, form.publishedBase?.starterIsNonAttackStance ?? false) || "Enter a route"}`}
+              sx={{ gridColumn: { sm: "span 2" } }}
+            />
+            <TextField
+              label="Starter move override"
+              value={form.starterOverride ?? ""}
+              onChange={(e) => update("starterOverride", e.target.value)}
+              helperText="Optional. Name the move that came out when the first route input produced a different move."
+              slotProps={{ htmlInput: { maxLength: 100 } }}
               sx={{ gridColumn: { sm: "span 2" } }}
             />
             {form.route && form.route !== formatComboRoute(form.route) && (
@@ -863,6 +903,10 @@ function LocalComboDialog({
                 damageInvalid ? "Enter damage before submitting or publishing." : undefined
               }
               onChange={(e) => update("damage", e.target.value)}
+            />
+            <ComboCharacterCompatibilityFields
+              value={form.characterCompatibility ?? form.publishedBase?.characterCompatibility}
+              onChange={(value) => update("characterCompatibility", value)}
             />
             <TextField
               label="Pips"
@@ -1045,6 +1089,7 @@ function LocalComboDialog({
                     <Button
                       type="button"
                       size="small"
+                      variant="contained"
                       color="info"
                       onClick={() =>
                         update("editorNotes", [
@@ -1154,8 +1199,12 @@ export function publisherDraft(
       ...(form.name.trim() ? { name: form.name.trim() } : {}),
       ...(form.difficulty ? { difficulty: Number(form.difficulty) } : {}),
       route: item.route,
+      ...((item.local?.starterOverride ?? base?.starterOverride)?.trim()
+        ? { starterOverride: (item.local?.starterOverride ?? base?.starterOverride)?.trim() }
+        : {}),
       ...(base?.starterIsNonAttackStance ? { starterIsNonAttackStance: true } : {}),
       ...(form.routingMode === "unique" ? { routingMode: "unique" } : {}),
+      characterCompatibility: item.local.characterCompatibility ?? base?.characterCompatibility,
       moveIds: form.moveIds
         .split(/\r?\n/)
         .map((value) => value.trim())
@@ -1494,7 +1543,8 @@ function PublishDialog({
                   label="Made for kids"
                 />
                 <Button
-                  variant="outlined"
+                  variant={youtubeConnected ? "contained" : "outlined"}
+                  color={youtubeConnected ? "secondary" : "primary"}
                   onClick={() => void (youtubeConnected ? uploadLinkedMp4() : connectYouTube())}
                   disabled={busy || youtubeChecking}
                   sx={{ alignSelf: "flex-start" }}
@@ -1578,15 +1628,41 @@ function PublishDialog({
 export function CombosPage({
   active,
   readOnly = false,
-  webArtwork,
-  guideStep = null,
+  getScopePortrait,
+  characterId,
+  supportId,
+  onSelectionChange,
+  onSourceDataChange,
 }: {
   active: boolean;
   readOnly?: boolean;
-  webArtwork?: WebArtworkLibrary | null;
-  guideStep?: number | null;
+  getScopePortrait: GetScopePortrait;
+  characterId?: string;
+  supportId?: string;
+  onSelectionChange?: (selection: { characterId: string; supportId: string }) => void;
+  onSourceDataChange?: (localCombos: LocalCombo[], candidates: ComboCandidate[]) => void;
 }) {
   const { state: obsState, settings: obsSettings, busy: obsBusy, moveCapture } = useObsRecording();
+  const [controllerBindings, setControllerBindings] = useState<ControllerBindings | null>(null);
+  const [controllerBindingsOpen, setControllerBindingsOpen] = useState(false);
+  const [controllerBindingsBusy, setControllerBindingsBusy] = useState(false);
+  const [controllerBindingsError, setControllerBindingsError] = useState("");
+  useEffect(() => {
+    if (readOnly || !window.electronAPI?.obs) return;
+    let cancelled = false;
+    window.electronAPI.obs.getComboInputBindings().then(
+      (bindings) => {
+        if (!cancelled) setControllerBindings(bindings);
+      },
+      (reason) => {
+        if (!cancelled)
+          setControllerBindingsError(reason instanceof Error ? reason.message : String(reason));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [readOnly]);
   const [catalog, setCatalog] = useState<PublishedCatalog | null>(null);
   const catalogRef = useRef(catalog);
   catalogRef.current = catalog;
@@ -1603,12 +1679,25 @@ export function CombosPage({
   workspaceRef.current = workspace;
   const [storageError, setStorageError] = useState("");
   const [savedSelection] = useState(() => (readOnly ? null : readSelectedCombo()));
-  const [tab, setTab] = useState<"gameplan" | "raw">(savedSelection?.tab ?? "gameplan");
-  useEffect(() => {
-    if (guideStep !== null && guideStep >= 2) setTab("gameplan");
-  }, [guideStep]);
+  const [tab, setTab] = useState<"gameplan" | "raw">("gameplan");
   const [selectedId, setSelectedId] = useState<string | null>(savedSelection?.id ?? null);
-  const [picker, setPicker] = useState<"character" | "support" | null>(null);
+  const [pendingOpenComboId, setPendingOpenComboId] = useState<string | null>(null);
+  useEffect(() => {
+    const openCombo = (event: Event) => {
+      const id = (event as CustomEvent<unknown>).detail;
+      if (typeof id === "string") setPendingOpenComboId(id);
+    };
+    window.addEventListener(characterTechOpenComboEvent, openCombo);
+    return () => window.removeEventListener(characterTechOpenComboEvent, openCombo);
+  }, []);
+  useEffect(() => {
+    if (readOnly || !characterId) return;
+    setWorkspace((old) =>
+      old.characterId === characterId && old.supportId === (supportId ?? "")
+        ? old
+        : { ...old, characterId, supportId: supportId ?? "", starter: "" },
+    );
+  }, [characterId, supportId, readOnly]);
   const [localDraft, setLocalDraft] = useState<LocalCombo | null>(null);
   const [highlightSubmissionFields, setHighlightSubmissionFields] = useState(false);
   const [routeAudit, setRouteAudit] = useState<
@@ -1621,6 +1710,9 @@ export function CombosPage({
   const [publishId, setPublishId] = useState<string | null>(null);
   const [upstreamCandidates, setUpstreamCandidates] = useState<ComboCandidate[]>([]);
   const [candidatesLoaded, setCandidatesLoaded] = useState(false);
+  useEffect(() => {
+    onSourceDataChange?.(workspace.localCombos, candidatesLoaded ? upstreamCandidates : []);
+  }, [onSourceDataChange, workspace.localCombos, candidatesLoaded, upstreamCandidates]);
   const [candidatesLoading, setCandidatesLoading] = useState(false);
   const [candidateAvailable, setCandidateAvailable] = useState(false);
   const [candidateSubmitting, setCandidateSubmitting] = useState(false);
@@ -1681,7 +1773,6 @@ export function CombosPage({
     message: string;
   } | null>(null);
   const [recordingPickerId, setRecordingPickerId] = useState<string | null>(null);
-  const [recordingSearch, setRecordingSearch] = useState("");
   const [importingMp4, setImportingMp4] = useState(false);
   const [pendingRecordingChange, setPendingRecordingChange] = useState<{
     comboId: string;
@@ -1988,7 +2079,7 @@ export function CombosPage({
           return {
             ...combo,
             route,
-            starter: route ? comboStarterFromRoute(route) : "Pending input",
+            starter: route ? comboStarter(route, combo.starterOverride) : "Pending input",
             recordingDraft: !route,
           };
         });
@@ -2236,6 +2327,23 @@ export function CombosPage({
   const itemById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
   itemByIdRef.current = itemById;
   useEffect(() => {
+    if (!pendingOpenComboId) return;
+    const item = itemById.get(pendingOpenComboId);
+    if (!item) return;
+    onSelectionChange?.({ characterId: item.characterId, supportId: item.supportId });
+    setWorkspace((old) => ({
+      ...old,
+      characterId: item.characterId,
+      supportId: item.supportId,
+      starter: item.starter,
+    }));
+    setStatusFilter("all");
+    setCandidateOnly(false);
+    setTagFilter("all");
+    setSelectedId(item.id);
+    setPendingOpenComboId(null);
+  }, [pendingOpenComboId, itemById, onSelectionChange]);
+  useEffect(() => {
     if (readOnly || !selectedId || !catalog || itemById.has(selectedId)) return;
     if (selectedId.startsWith("candidate:") && !candidatesLoaded) return;
     setSelectedId(null);
@@ -2304,7 +2412,10 @@ export function CombosPage({
             ...next,
             characterId: selectedPromotion.published.characterId,
             supportId: selectedPromotion.published.supportId,
-            starter: comboStarterFromRoute(selectedPromotion.published.route),
+            starter: comboStarter(
+              selectedPromotion.published.route,
+              selectedPromotion.published.starterOverride,
+            ),
           }
         : next;
     });
@@ -2421,6 +2532,14 @@ export function CombosPage({
     (id: string) => workspace.entries[id] ?? emptyPersonalEntry(),
     [workspace.entries],
   );
+  const noInputRecordingFor = (id: string) => {
+    const link = workspace.recordingLinks[id];
+    return comboHasNoInputRecording(link, recordingsById.get(link?.recordingId ?? "") ?? null);
+  };
+  const tagsFor = (id: string) =>
+    noInputRecordingFor(id)
+      ? [...new Set([...entry(id).tags, "no input recording"])]
+      : entry(id).tags;
   const updateEntry = (id: string, patch: Partial<PersonalComboEntry>) =>
     setWorkspace((old) => ({
       ...old,
@@ -2456,9 +2575,11 @@ export function CombosPage({
     [items, readOnly],
   );
   const preferredItem = items.find((item) => entry(item.id).status === "Using") ?? items[0];
-  const character = characters.includes(workspace.characterId)
-    ? workspace.characterId
-    : (preferredItem?.characterId ?? characters[0] ?? "");
+  const character =
+    characterId ||
+    (characters.includes(workspace.characterId)
+      ? workspace.characterId
+      : (preferredItem?.characterId ?? characters[0] ?? ""));
   const supports = useMemo(() => {
     const mapped = readOnly
       ? []
@@ -2472,51 +2593,15 @@ export function CombosPage({
       ]),
     ].sort();
   }, [character, items, readOnly]);
-  const support = supports.includes(workspace.supportId)
-    ? workspace.supportId
-    : (items.find((item) => item.characterId === character && entry(item.id).status === "Using")
-        ?.supportId ??
-      items.find((item) => item.characterId === character)?.supportId ??
-      supports[0] ??
-      "");
-  const [selectedPortraits, setSelectedPortraits] = useState<{
-    character: string | null;
-    support: string | null;
-  }>({ character: null, support: null });
-  useEffect(() => {
-    setSelectedPortraits({ character: null, support: null });
-    if (
-      !active ||
-      !character ||
-      !support ||
-      webArtwork ||
-      !window.electronAPI?.replays?.resolvePortraits
-    )
-      return;
-    let cancelled = false;
-    void window.electronAPI.replays
-      .resolvePortraits({
-        pairs: [{ character: displayName(character), support: displayName(support) }],
-      })
-      .then(([portrait]) => {
-        if (!cancelled)
-          setSelectedPortraits({
-            character: portrait?.portraitUrl ?? null,
-            support: portrait?.supportUrl ?? null,
-          });
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [active, character, support, webArtwork]);
-  const visibleSelectedPortraits =
-    webArtwork && character && support
-      ? (() => {
-          const portrait = webArtwork.portraitArtwork(displayName(character), displayName(support));
-          return { character: portrait.portraitUrl, support: portrait.supportUrl };
-        })()
-      : selectedPortraits;
+  const support =
+    supportId ||
+    (supports.includes(workspace.supportId)
+      ? workspace.supportId
+      : (items.find((item) => item.characterId === character && entry(item.id).status === "Using")
+          ?.supportId ??
+        items.find((item) => item.characterId === character)?.supportId ??
+        supports[0] ??
+        ""));
   const starters = useMemo(
     () => comboStarterOptions(items, workspace.entries, character, support, candidateOnly),
     [items, character, support, candidateOnly, workspace.entries],
@@ -2553,7 +2638,7 @@ export function CombosPage({
         left.name.localeCompare(right.name),
     );
   const tracked = scopedForView.filter((item) => entry(item.id).status);
-  const gameplanTags = [...new Set(tracked.flatMap((item) => entry(item.id).tags))].sort();
+  const gameplanTags = [...new Set(tracked.flatMap((item) => tagsFor(item.id)))].sort();
   const effectiveTagFilter = gameplanTags.includes(tagFilter) ? tagFilter : "all";
   const shown = readOnly
     ? [...scoped].sort(
@@ -2565,7 +2650,7 @@ export function CombosPage({
           (statusFilter === "gameplan"
             ? entry(item.id).status !== "Dismissed"
             : statusFilter === "all" || entry(item.id).status === statusFilter) &&
-          (effectiveTagFilter === "all" || entry(item.id).tags.includes(effectiveTagFilter)),
+          (effectiveTagFilter === "all" || tagsFor(item.id).includes(effectiveTagFilter)),
       );
   const showNewCombos = ["gameplan", "all"].includes(statusFilter) && effectiveTagFilter === "all";
   const positionColumns = comboScreenPositions.map((position) => ({
@@ -2595,20 +2680,42 @@ export function CombosPage({
     : [];
   const filtered = useMemo(
     () =>
-      items
-        .filter((item) => matchesRaw(item, entry(item.id), raw, mediaGaps.get(item.id) ?? null))
-        .sort((left, right) => {
-          const a = field(left, entry(left.id), sort.column, mediaGaps.get(left.id) ?? null);
-          const b = field(right, entry(right.id), sort.column, mediaGaps.get(right.id) ?? null);
-          if (a === null || a === "") return b === null || b === "" ? 0 : 1;
-          if (b === null || b === "") return -1;
-          const result =
-            typeof a === "number" && typeof b === "number"
-              ? a - b
-              : String(a).localeCompare(String(b), undefined, { numeric: true });
-          return sort.descending ? -result : result;
-        }),
-    [items, entry, raw, sort, mediaGaps],
+      tab === "raw"
+        ? items
+            .filter((item) =>
+              matchesRaw(
+                item,
+                entry(item.id),
+                raw,
+                mediaGaps.get(item.id) ?? null,
+                tagsFor(item.id),
+              ),
+            )
+            .sort((left, right) => {
+              const a = field(
+                left,
+                entry(left.id),
+                sort.column,
+                mediaGaps.get(left.id) ?? null,
+                tagsFor(left.id),
+              );
+              const b = field(
+                right,
+                entry(right.id),
+                sort.column,
+                mediaGaps.get(right.id) ?? null,
+                tagsFor(right.id),
+              );
+              if (a === null || a === "") return b === null || b === "" ? 0 : 1;
+              if (b === null || b === "") return -1;
+              const result =
+                typeof a === "number" && typeof b === "number"
+                  ? a - b
+                  : String(a).localeCompare(String(b), undefined, { numeric: true });
+              return sort.descending ? -result : result;
+            })
+        : [],
+    [items, entry, raw, sort, mediaGaps, tab],
   );
   useEffect(() => {
     if (!candidatesLoaded || tab !== "raw" || raw.source !== "Candidate") return;
@@ -2665,20 +2772,23 @@ export function CombosPage({
   const updateRaw = (key: keyof RawFilters, value: string) =>
     setRaw((old) => ({ ...old, [key]: value }));
 
-  const openLocalEdit = (combo: LocalCombo, highlightRequiredFields = false) => {
+  const localComboWithVisibleVideo = (combo: LocalCombo) => {
     const removed = [
       ...(workspace.removedYouTubeVideoIds[combo.id] ?? []),
       ...(workspace.removedYouTubeVideoIds[combo.publishedId ?? ""] ?? []),
     ];
     const videoId = youtubeVideoId(combo.youtubeUrl);
-    setHighlightSubmissionFields(highlightRequiredFields);
-    setLocalDraft(videoId && removed.includes(videoId) ? { ...combo, youtubeUrl: "" } : combo);
+    return videoId && removed.includes(videoId) ? { ...combo, youtubeUrl: "" } : combo;
   };
+  const openLocalEdit = (combo: LocalCombo, highlightRequiredFields = false) => {
+    setHighlightSubmissionFields(highlightRequiredFields);
+    setLocalDraft(localComboWithVisibleVideo(combo));
+  };
+  const savedRevisionFor = (publishedId: string) =>
+    workspace.localCombos.find((combo) => combo.originCatalog && combo.publishedId === publishedId);
   const openRevisionDraft = (item: ComboItem, highlightRequiredFields = false) => {
     if (!item.published) return;
-    const existing = workspace.localCombos.find(
-      (combo) => combo.originCatalog && combo.publishedId === item.id,
-    );
+    const existing = savedRevisionFor(item.id);
     if (existing) return openLocalEdit(existing, highlightRequiredFields);
     const draft = localRevisionDraft(item, `local-${crypto.randomUUID()}`);
     if (!draft) {
@@ -2738,6 +2848,90 @@ export function CombosPage({
     setHighlightSubmissionFields(false);
     setMessage(combo.publishedId ? "Local revision saved." : "Local combo saved.");
   };
+  const compatibilityLocal =
+    detail?.local ?? (detail?.published ? savedRevisionFor(detail.id) : undefined);
+  const compatibilityCandidate =
+    detail && !compatibilityLocal && !detail.published ? detail.candidate : undefined;
+  const candidateEditor = window.electronAPI?.comboCandidates;
+  const canEditCandidateCompatibility =
+    candidateEditor?.edit && compatibilityCandidate && isActiveCandidate(compatibilityCandidate);
+  const savesCompatibilityAsRevision = Boolean(detail?.published && !detail.local);
+  const catalogRevision = detail?.published?.revision;
+  const canStageCompatibility =
+    Number.isSafeInteger(catalogRevision) && Number(catalogRevision) > 0;
+  const compatibilityBaseline = compatibilityLocal
+    ? (compatibilityLocal.characterCompatibility ??
+      compatibilityLocal.publishedBase?.characterCompatibility)
+    : detail?.published
+      ? detail.published.characterCompatibility
+      : detail?.characterCompatibility;
+
+  const compatibilityEdit: ComboCompatibilityEdit | undefined =
+    !readOnly &&
+    detail &&
+    (compatibilityLocal || canStageCompatibility || canEditCandidateCompatibility)
+      ? {
+          value: compatibilityBaseline,
+          savesLocalRevision: savesCompatibilityAsRevision,
+          onSave: async (assignments) => {
+            const latestLocal = compatibilityLocal
+              ? workspaceRef.current.localCombos.find((combo) => combo.id === compatibilityLocal.id)
+              : undefined;
+            if (compatibilityLocal && !latestLocal)
+              throw new Error("This local combo was removed.");
+            const characterCompatibility = applyComboCharacterAssignments(
+              latestLocal
+                ? (latestLocal.characterCompatibility ??
+                    latestLocal.publishedBase?.characterCompatibility)
+                : compatibilityBaseline,
+              assignments,
+            );
+            if (!isComboCharacterCompatibility(characterCompatibility)) {
+              throw new Error("The matchup lists changed. Review the assignments before saving.");
+            }
+
+            if (compatibilityCandidate && candidateEditor) {
+              const updated = await candidateEditor.edit({
+                id: compatibilityCandidate.id,
+                updatedAt: compatibilityCandidate.updatedAt,
+                combo: { ...compatibilityCandidate.combo, characterCompatibility },
+              });
+              updateCandidate(updated);
+              setMessage("Candidate matchups saved.");
+              return;
+            }
+
+            if (latestLocal) {
+              setWorkspace((old) => ({
+                ...old,
+                localCombos: old.localCombos.map((combo) =>
+                  combo.id === latestLocal.id ? { ...combo, characterCompatibility } : combo,
+                ),
+              }));
+              setSelectedId(latestLocal.id);
+              setMessage("Opponent compatibility saved.");
+            } else {
+              const draft = localRevisionDraft(detail, `local-${crypto.randomUUID()}`);
+              if (!draft) throw new Error("Refresh the catalog before saving a local revision.");
+              saveLocal(
+                {
+                  ...localComboWithVisibleVideo(draft),
+                  characterCompatibility,
+                },
+                emptyPersonalEntry(),
+              );
+            }
+            if (savesCompatibilityAsRevision && tab === "gameplan" && !showNewCombos) {
+              setStatusFilter("all");
+              setTagFilter("all");
+            }
+            if (savesCompatibilityAsRevision || detail.candidate) {
+              setCandidateOnly(false);
+              if (tab === "raw") setRaw((old) => ({ ...old, source: "all" }));
+            }
+          },
+        }
+      : undefined;
   const deleteLocal = (id: string) => {
     if (!window.confirm("Delete this local combo and its personal tracking?")) return;
     if (pendingComboLabRecordingRef.current?.comboId === id) {
@@ -3240,7 +3434,7 @@ export function CombosPage({
     }
     if (
       !window.confirm(
-        `Submit ${item.route} and ${recording.name} for editor review? The MP4 and catalog-facing combo details will be uploaded.`,
+        `Submit ${item.route} and ${recording.name} for editor review? The MP4, catalog-facing combo details, and processed controller inputs when available will be uploaded.`,
       )
     )
       return;
@@ -3312,30 +3506,6 @@ export function CombosPage({
       setCandidateRequestingAccess(false);
     }
   };
-  const importMp4 = async () => {
-    if (!recordingPickerId || !window.electronAPI?.recordings) return;
-    setImportingMp4(true);
-    setRecordingsError("");
-    try {
-      const recordingId = await window.electronAPI.recordings.importComboMp4();
-      if (!recordingId) return;
-      const latest = await window.electronAPI.recordings.list();
-      setRecordings(latest.recordings);
-      const recording = latest.recordings.find((item) => item.id === recordingId);
-      if (!recording) throw new Error("The imported MP4 did not appear in the recording library.");
-      linkRecording(recordingPickerId, recording);
-    } catch (reason) {
-      setRecordingsError(reason instanceof Error ? reason.message : "Could not import MP4.");
-    } finally {
-      setImportingMp4(false);
-    }
-  };
-  const pickerRecordings = recordings
-    .filter(isLocalMp4)
-    .filter((recording) =>
-      `${recording.name} ${recording.id}`.toLowerCase().includes(recordingSearch.toLowerCase()),
-    );
-  const imageOptions = picker === "character" ? characters : supports;
   const visibleRawColumns = readOnly ? browserRawColumns : rawColumns;
   const recordComboButton = !readOnly && window.electronAPI?.obs && (
     <Tooltip
@@ -3359,46 +3529,64 @@ export function CombosPage({
       </span>
     </Tooltip>
   );
+  const controllerBindingsButton = !readOnly && window.electronAPI?.obs && (
+    <Button
+      size="small"
+      variant="outlined"
+      disabled={!controllerBindings || comboLabRecordingActive}
+      onClick={() => setControllerBindingsOpen(true)}
+    >
+      Controller bindings
+    </Button>
+  );
 
   return (
     <Stack spacing={2} sx={{ pb: 5, textAlign: "left" }}>
-      <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center" }}>
-        <Tabs
-          value={tab}
-          onChange={(_, value: "gameplan" | "raw") => {
-            setTab(value);
+      {controllerBindings && (
+        <ControllerBindingsDialog
+          open={controllerBindingsOpen}
+          bindings={controllerBindings}
+          busy={controllerBindingsBusy}
+          onClose={() => setControllerBindingsOpen(false)}
+          onSave={async (bindings) => {
+            setControllerBindingsBusy(true);
+            try {
+              const saved = await window.electronAPI!.obs.setComboInputBindings(bindings);
+              setControllerBindings(saved);
+              setControllerBindingsOpen(false);
+              setControllerBindingsError("");
+            } finally {
+              setControllerBindingsBusy(false);
+            }
           }}
-          aria-label="Combo views"
-        >
-          <Tab value="gameplan" label={readOnly ? "Browse by starter" : "My gameplan"} />
-          <Tab value="raw" label="Raw" />
-        </Tabs>
-        <Stack direction="row" spacing={1}>
-          {!readOnly && (
-            <Button size="small" onClick={() => void recheckRoutes()} disabled={routeAuditChecking}>
-              {routeAuditChecking ? "Checking routes…" : "Recheck route formats"}
-            </Button>
-          )}
-          {!readOnly && window.electronAPI?.comboCandidates && (
-            <Button
-              size="small"
-              color="secondary"
-              data-guide-anchor="combo-upstream-candidates"
-              onClick={enableCandidates}
-              disabled={candidatesLoading}
-            >
-              {candidatesLoading
-                ? "Loading candidates…"
-                : candidatesLoaded
-                  ? "Refresh candidates"
-                  : "Upstream candidates"}
-            </Button>
-          )}
-          <Button size="small" onClick={() => void refresh()} disabled={refreshing}>
-            {refreshing ? "Refreshing…" : "Refresh"}
+        />
+      )}
+      {controllerBindingsError && <Alert severity="error">{controllerBindingsError}</Alert>}
+      <CharacterTabActions>
+        {!readOnly && (
+          <Button size="small" onClick={() => void recheckRoutes()} disabled={routeAuditChecking}>
+            {routeAuditChecking ? "Checking routes…" : "Recheck route formats"}
           </Button>
-        </Stack>
-      </Stack>
+        )}
+        {!readOnly && window.electronAPI?.comboCandidates && (
+          <Button
+            size="small"
+            color="secondary"
+            data-guide-anchor="combo-upstream-candidates"
+            onClick={enableCandidates}
+            disabled={candidatesLoading}
+          >
+            {candidatesLoading
+              ? "Loading candidates…"
+              : candidatesLoaded
+                ? "Refresh candidates"
+                : "Upstream candidates"}
+          </Button>
+        )}
+        <Button size="small" onClick={() => void refresh()} disabled={refreshing}>
+          {refreshing ? "Refreshing…" : "Refresh"}
+        </Button>
+      </CharacterTabActions>
       {comboLabRecordingActive && (
         <Alert severity="info">
           Recording controller inputs for {displayName(character)} with {displayName(support)}. Stop
@@ -3422,8 +3610,7 @@ export function CombosPage({
       )}
       {readOnly && tab === "gameplan" && (
         <Typography variant="body2" color="text.secondary">
-          Browse published combos by character, support, and starter. Your selections reset when you
-          leave this tab.
+          Browse published combos by character, support, and starter.
         </Typography>
       )}
       {storageError && <Alert severity="warning">{storageError}</Alert>}
@@ -3521,7 +3708,7 @@ export function CombosPage({
                   ...replaceLocalComboWithCatalog(old, localId, published),
                   characterId: published.characterId,
                   supportId: published.supportId,
-                  starter: comboStarterFromRoute(published.route),
+                  starter: comboStarter(published.route, published.starterOverride),
                 }));
                 setSelectedId(published.id);
                 setMessage("Published candidate replaced your edited local draft.");
@@ -3581,80 +3768,11 @@ export function CombosPage({
         <>
           <Paper variant="outlined" sx={{ p: 2 }}>
             <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 2 }}>
-              <Stack
-                direction="row"
-                spacing={1}
-                sx={{ flexWrap: "wrap" }}
-                data-guide-anchor="combo-pairing"
+              <Paper
+                variant="outlined"
+                data-guide-anchor="combo-starters"
+                sx={{ flex: "1 1 380px", minWidth: 0, p: 1.5 }}
               >
-                {(
-                  [
-                    ["character", character, visibleSelectedPortraits.character],
-                    ["support", support, visibleSelectedPortraits.support],
-                  ] as const
-                ).map(([kind, id, portrait]) => {
-                  const localTotal =
-                    kind === "character"
-                      ? countLocalCombos(workspace.localCombos, id)
-                      : countLocalCombos(workspace.localCombos, character, id);
-                  const candidateTotal = candidatesLoaded
-                    ? kind === "character"
-                      ? countCandidates(upstreamCandidates, id)
-                      : countCandidates(upstreamCandidates, character, id)
-                    : 0;
-                  return (
-                    <Box key={kind}>
-                      <Typography
-                        variant="caption"
-                        color="text.secondary"
-                        sx={{ display: "block" }}
-                      >
-                        {kind === "character" ? "Character" : "Support"}
-                      </Typography>
-                      <Button
-                        variant="outlined"
-                        aria-label={`Choose ${kind}: ${displayName(id)}${localTotal > 0 ? `; ${localTotal} local combos` : ""}${candidateTotal > 0 ? `; ${candidateTotal} candidates` : ""}`}
-                        title={displayName(id)}
-                        onClick={() => setPicker(kind)}
-                        sx={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 1,
-                          textTransform: "none",
-                        }}
-                      >
-                        {portrait ? (
-                          <Box
-                            component="img"
-                            src={portrait}
-                            alt=""
-                            sx={{ width: 42, height: 48, objectFit: "contain" }}
-                          />
-                        ) : (
-                          <Box
-                            aria-hidden="true"
-                            sx={{
-                              width: 42,
-                              height: 48,
-                              display: "grid",
-                              placeItems: "center",
-                              bgcolor: "action.hover",
-                              borderRadius: 1,
-                            }}
-                          >
-                            {displayName(id).slice(0, 2).toUpperCase()}
-                          </Box>
-                        )}
-                        <Typography aria-hidden="true" color="text.secondary">
-                          ⌄
-                        </Typography>
-                      </Button>
-                      <ComboSourceCounts local={localTotal} candidates={candidateTotal} />
-                    </Box>
-                  );
-                })}
-              </Stack>
-              <Paper variant="outlined" sx={{ flex: "1 1 380px", minWidth: 0, p: 1.5 }}>
                 {starters.length ? (
                   <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 2 }}>
                     {comboStarterGroups.map(({ id, label }) => {
@@ -3755,7 +3873,10 @@ export function CombosPage({
                       "Starter combos"
                     )}
                   </Typography>
-                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>{recordComboButton}</Box>
+                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+                    {recordComboButton}
+                    {controllerBindingsButton}
+                  </Box>
                 </Stack>
                 {!readOnly && (
                   <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap" }}>
@@ -3795,7 +3916,7 @@ export function CombosPage({
                     sx={{ flexWrap: "wrap", alignItems: "center" }}
                   >
                     <Typography variant="caption" color="text.secondary">
-                      My tags
+                      Tags
                     </Typography>
                     <Chip
                       size="small"
@@ -3868,14 +3989,14 @@ export function CombosPage({
                           ? "No routes match the current status or tag filter."
                           : readOnly
                             ? "No published routes for this starter yet."
-                            : "No routes for this starter yet. Add a local combo or browse Raw."}
+                            : "No routes for this starter yet. Add a local combo or choose another starter."}
                     </Alert>
                   )}
                 {starter && (
                   <Box
                     sx={{
                       display: "grid",
-                      gridTemplateColumns: { xs: "1fr", md: "repeat(3, minmax(0, 1fr))" },
+                      gridTemplateColumns: { xs: "1fr", lg: "repeat(3, minmax(0, 1fr))" },
                       gap: 1.5,
                     }}
                   >
@@ -3895,7 +4016,7 @@ export function CombosPage({
                         key={label}
                         sx={{
                           minWidth: 0,
-                          gridColumn: label === "Other positions" ? { md: "1 / -1" } : undefined,
+                          gridColumn: label === "Other positions" ? { lg: "1 / -1" } : undefined,
                         }}
                       >
                         <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1 }}>
@@ -3970,6 +4091,10 @@ export function CombosPage({
                                         </Typography>
                                       )}
                                     </Box>
+                                    <ComboCharacterPortraits
+                                      value={item.characterCompatibility}
+                                      getScopePortrait={getScopePortrait}
+                                    />
                                   </Box>
                                   <Box
                                     sx={{
@@ -4052,6 +4177,13 @@ export function CombosPage({
                                     {item.published && locallyEditedCatalogIds.has(item.id) && (
                                       <Chip size="small" label="Local edits" color="info" />
                                     )}
+                                    {noInputRecordingFor(item.id) && (
+                                      <Chip
+                                        size="small"
+                                        label="No input recording"
+                                        color="warning"
+                                      />
+                                    )}
                                     {gapFor(item.id) && (
                                       <Chip
                                         size="small"
@@ -4117,6 +4249,10 @@ export function CombosPage({
                                       {item.screenPosition || "Position unknown"}
                                     </Typography>
                                   </Box>
+                                  <ComboCharacterPortraits
+                                    value={item.characterCompatibility}
+                                    getScopePortrait={getScopePortrait}
+                                  />
                                 </Box>
                                 <Box
                                   sx={{
@@ -4196,6 +4332,9 @@ export function CombosPage({
                                   {item.published && locallyEditedCatalogIds.has(item.id) && (
                                     <Chip size="small" label="Local edits" color="info" />
                                   )}
+                                  {noInputRecordingFor(item.id) && (
+                                    <Chip size="small" label="No input recording" color="warning" />
+                                  )}
                                   {gapFor(item.id) && (
                                     <Chip
                                       size="small"
@@ -4218,6 +4357,8 @@ export function CombosPage({
             <ComboDetail
               active={active}
               readOnly={readOnly}
+              getScopePortrait={getScopePortrait}
+              compatibilityEdit={compatibilityEdit}
               item={scopeSelected}
               hasLocalEdits={Boolean(
                 scopeSelected?.published && locallyEditedCatalogIds.has(scopeSelected.id),
@@ -4250,7 +4391,6 @@ export function CombosPage({
               recordingsError={recordingsError}
               onChooseRecording={() => {
                 if (!scopeSelected) return;
-                setRecordingSearch("");
                 setRecordingPickerId(scopeSelected.id);
                 void refreshRecordings();
               }}
@@ -4312,7 +4452,10 @@ export function CombosPage({
                   All combos · {filtered.length} of {items.length}
                 </Typography>
                 {!readOnly && (
-                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>{recordComboButton}</Box>
+                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+                    {recordComboButton}
+                    {controllerBindingsButton}
+                  </Box>
                 )}
               </Stack>
               <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
@@ -4584,7 +4727,13 @@ export function CombosPage({
                               ) : id === "damage" ? (
                                 item.damage || "—"
                               ) : (
-                                (field(item, entry(item.id), id, gapFor(item.id)) ?? "—")
+                                (field(
+                                  item,
+                                  entry(item.id),
+                                  id,
+                                  gapFor(item.id),
+                                  tagsFor(item.id),
+                                ) ?? "—")
                               )}
                             </td>
                           ))}
@@ -4606,6 +4755,8 @@ export function CombosPage({
             <ComboDetail
               active={active}
               readOnly={readOnly}
+              getScopePortrait={getScopePortrait}
+              compatibilityEdit={compatibilityEdit}
               item={selected}
               hasLocalEdits={Boolean(
                 selected?.published && locallyEditedCatalogIds.has(selected.id),
@@ -4636,7 +4787,6 @@ export function CombosPage({
               recordingsError={recordingsError}
               onChooseRecording={() => {
                 if (!selected) return;
-                setRecordingSearch("");
                 setRecordingPickerId(selected.id);
                 void refreshRecordings();
               }}
@@ -4722,36 +4872,6 @@ export function CombosPage({
           </Box>
         </>
       )}
-      <PortraitPicker
-        open={Boolean(picker)}
-        kind={picker ?? "character"}
-        options={imageOptions}
-        character={character}
-        webArtwork={webArtwork}
-        localCount={(id) =>
-          picker === "support"
-            ? countLocalCombos(workspace.localCombos, character, id)
-            : countLocalCombos(workspace.localCombos, id)
-        }
-        candidateCount={
-          candidatesLoaded
-            ? (id) =>
-                picker === "support"
-                  ? countCandidates(upstreamCandidates, character, id)
-                  : countCandidates(upstreamCandidates, id)
-            : undefined
-        }
-        onClose={() => setPicker(null)}
-        onChoose={(id) => {
-          setWorkspace((old) =>
-            picker === "character"
-              ? { ...old, characterId: id, supportId: "", starter: "" }
-              : { ...old, characterId: character, supportId: id, starter: "" },
-          );
-          setSelectedId(null);
-          setPicker(null);
-        }}
-      />
       <Dialog
         open={routeAudit !== null}
         onClose={() => setRouteAudit(null)}
@@ -4791,8 +4911,21 @@ export function CombosPage({
                     size="small"
                     sx={{ alignSelf: "flex-start" }}
                     onClick={() => {
-                      setRaw(emptyRaw());
-                      setTab("raw");
+                      const item = itemById.get(issue.id);
+                      if (item) {
+                        onSelectionChange?.({
+                          characterId: item.characterId,
+                          supportId: item.supportId,
+                        });
+                        setWorkspace((old) => ({
+                          ...old,
+                          characterId: item.characterId,
+                          supportId: item.supportId,
+                          starter: item.starter,
+                        }));
+                        setStatusFilter("all");
+                        setCandidateOnly(false);
+                      }
                       setSelectedId(issue.id);
                       setRouteAudit(null);
                     }}
@@ -4857,56 +4990,29 @@ export function CombosPage({
       >
         <DialogTitle>Link a local MP4</DialogTitle>
         <DialogContent dividers>
-          <Stack spacing={1.5}>
-            <TextField
-              label="Search recordings"
-              size="small"
-              value={recordingSearch}
-              onChange={(event) => setRecordingSearch(event.target.value)}
-              autoFocus
-            />
-            {recordingsError && <Alert severity="error">{recordingsError}</Alert>}
-            <Button
-              onClick={() => void refreshRecordings()}
-              disabled={!window.electronAPI?.recordings}
-              sx={{ alignSelf: "flex-start" }}
-            >
-              Refresh library
-            </Button>
-            <Box sx={{ maxHeight: 360, overflowY: "auto" }}>
-              {pickerRecordings.length === 0 && (
-                <Typography variant="body2" color="text.secondary">
-                  {recordingSearch
-                    ? "No MP4s match this search."
-                    : "No MP4s in the recording library yet. You can import one from disk."}
-                </Typography>
-              )}
-              {pickerRecordings.map((recording) => (
-                <Button
-                  key={recording.id}
-                  fullWidth
-                  onClick={() => recordingPickerId && linkRecording(recordingPickerId, recording)}
-                  sx={{ display: "block", textAlign: "left", overflowWrap: "anywhere" }}
-                >
-                  {recording.name}
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                    {recording.id} · {new Date(recording.modifiedAt).toLocaleDateString()}
-                  </Typography>
-                </Button>
-              ))}
-            </Box>
-          </Stack>
+          <VideoPicker
+            label="Local MP4"
+            disableClearable
+            autoFocus
+            localMp4Only
+            recordings={recordings}
+            onRecordingsChanged={setRecordings}
+            onBusyChange={setImportingMp4}
+            recordingId={workspace.recordingLinks[recordingPickerId ?? ""]?.recordingId ?? ""}
+            onChange={(selection) => {
+              if (recordingPickerId && selection?.kind === "recording") {
+                setRecordings((current) => [
+                  ...current.filter((item) => item.id !== selection.recording.id),
+                  selection.recording,
+                ]);
+                linkRecording(recordingPickerId, selection.recording);
+              }
+            }}
+          />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setRecordingPickerId(null)} disabled={importingMp4}>
             Cancel
-          </Button>
-          <Button
-            onClick={() => void importMp4()}
-            disabled={importingMp4 || !window.electronAPI?.recordings}
-            variant="contained"
-          >
-            {importingMp4 ? "Importing…" : "Import MP4 from disk"}
           </Button>
         </DialogActions>
       </Dialog>
@@ -4985,9 +5091,105 @@ export function CombosPage({
   );
 }
 
+function ComboDetailSummary({
+  item,
+  personal,
+  tagInput,
+  setTagInput,
+  onTagsChange,
+}: {
+  item: ComboItem;
+  personal: PersonalComboEntry;
+  tagInput: string;
+  setTagInput: (value: string) => void;
+  onTagsChange?: (tags: string[]) => void;
+}) {
+  const difficulty = effectiveDifficulty(item, personal);
+  return (
+    <Stack spacing={1} sx={{ alignItems: "flex-end", ml: "auto", minWidth: 0, maxWidth: "100%" }}>
+      <Stack
+        direction="row"
+        useFlexGap
+        sx={{ flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 1.5 }}
+      >
+        <Stack spacing={0.5} sx={{ alignItems: "flex-end" }}>
+          <Chip size="small" label={`Difficulty ${difficulty ?? "—"}`} variant="outlined" />
+          {difficulty !== null && (
+            <Typography variant="caption" color="text.secondary">
+              {personal.difficulty !== null ? "My difficulty" : "Editor difficulty"}
+            </Typography>
+          )}
+        </Stack>
+        <Stack spacing={0.5} sx={{ alignItems: "flex-end" }}>
+          <ComboPipIcons pips={item.pips} />
+          <ComboFlowMeter flow={item.flow} />
+        </Stack>
+        <Box sx={{ textAlign: "right" }}>
+          <Typography variant="h5" sx={{ fontWeight: 800 }}>
+            {item.damage || "—"}
+          </Typography>
+          <Typography variant="caption">damage</Typography>
+        </Box>
+      </Stack>
+      {onTagsChange && (
+        <Box
+          component="form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const tag = tagInput.trim().replace(/^#/, "").toLowerCase();
+            if (tag && !personal.tags.includes(tag)) onTagsChange([...personal.tags, tag]);
+            setTagInput("");
+          }}
+          sx={{ display: "flex", gap: 1, width: "100%", maxWidth: 250 }}
+        >
+          <TextField
+            size="small"
+            label="Add tag"
+            value={tagInput}
+            onChange={(event) => setTagInput(event.target.value)}
+            sx={{ flex: 1, minWidth: 0 }}
+          />
+          <Button type="submit" size="small" variant="contained" color="info">
+            Add
+          </Button>
+        </Box>
+      )}
+      {personal.tags.length > 0 && (
+        <Stack
+          direction="row"
+          useFlexGap
+          sx={{
+            flexWrap: "wrap",
+            justifyContent: "flex-end",
+            maxWidth: "min(100%, 280px)",
+            gap: 0.5,
+          }}
+        >
+          {personal.tags.map((tag) => (
+            <Chip
+              key={tag}
+              size="small"
+              label={`#${tag}`}
+              variant="outlined"
+              onDelete={
+                onTagsChange
+                  ? () => onTagsChange(personal.tags.filter((value) => value !== tag))
+                  : undefined
+              }
+              sx={{ maxWidth: "100%" }}
+            />
+          ))}
+        </Stack>
+      )}
+    </Stack>
+  );
+}
+
 function ComboDetail({
   active,
   readOnly = false,
+  getScopePortrait,
+  compatibilityEdit,
   item,
   hasLocalEdits,
   mediaGap,
@@ -5031,6 +5233,8 @@ function ComboDetail({
 }: {
   active: boolean;
   readOnly?: boolean;
+  getScopePortrait: GetScopePortrait;
+  compatibilityEdit?: ComboCompatibilityEdit;
   item: ComboItem | null;
   hasLocalEdits: boolean;
   mediaGap: ComboMediaGap;
@@ -5170,7 +5374,7 @@ function ComboDetail({
                   <span>
                     <Button
                       size="small"
-                      variant="outlined"
+                      variant="contained"
                       color="info"
                       onClick={onRecord}
                       disabled={Boolean(recordingDisabledReason)}
@@ -5182,7 +5386,7 @@ function ComboDetail({
               )}
               <Button
                 size="small"
-                variant="outlined"
+                variant={recordingLink ? "outlined" : "contained"}
                 color="info"
                 onClick={onChooseRecording}
                 disabled={!recordingApiAvailable}
@@ -5209,6 +5413,105 @@ function ComboDetail({
         </Typography>
       )}
     </Stack>
+  );
+  const mediaContent = (
+    <>
+      {(videoUrl || recordingLink) && (
+        <Box>
+          {displayedRecording && recordingApiAvailable ? (
+            <Suspense fallback={<CircularProgress size={26} />}>
+              <RecordingViewer
+                key={displayedRecording.id}
+                active={active}
+                refreshToken={displayedRecording.modifiedAt}
+                mode="recordings"
+                panelOnly
+                embeddedCombo
+                selectedRecordingId={displayedRecording.id}
+                onPlaybackTimeMs={setLocalVideoTimeMs}
+              />
+            </Suspense>
+          ) : (
+            videoUrl && (
+              <Box
+                component="video"
+                key={`${videoUrl}:${displayedRecording?.modifiedAt ?? 0}`}
+                src={
+                  displayedRecording ? `${videoUrl}?v=${displayedRecording.modifiedAt}` : videoUrl
+                }
+                controls
+                preload="metadata"
+                onTimeUpdate={(event) =>
+                  setLocalVideoTimeMs(Math.round(event.currentTarget.currentTime * 1000))
+                }
+                sx={{ width: "100%", maxHeight: 360, bgcolor: "black" }}
+              />
+            )
+          )}
+          {recordingLink &&
+            !recording &&
+            (linkedRecording ? (
+              <Alert severity="info">Linked recording has no local MP4.</Alert>
+            ) : recordingApiAvailable && !recordingsLoaded && !recordingsError ? (
+              <Typography variant="body2" color="text.secondary">
+                Loading local video…
+              </Typography>
+            ) : (
+              <Alert severity="warning">Linked video unavailable.</Alert>
+            ))}
+          {recordingsError && recordingLink && <Alert severity="error">{recordingsError}</Alert>}
+        </Box>
+      )}
+      {youtubeVideo?.videoId && youtubeVideo.source !== "Catalog" && (
+        <Typography variant="subtitle2">{youtubeVideo.source} YouTube video</Typography>
+      )}
+      {youtubeVideo?.videoId ? (
+        youtubeError ? (
+          <Alert severity="warning">
+            <Stack spacing={1}>
+              <Typography variant="body2">{youtubeError}</Typography>
+              <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
+                <Button size="small" onClick={() => setFailedYouTube(null)}>
+                  Retry
+                </Button>
+                {!readOnly && (
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      onRemoveYouTubeVideo(youtubeVideo.videoId!);
+                      setFailedYouTube(null);
+                    }}
+                  >
+                    Remove YouTube link
+                  </Button>
+                )}
+              </Stack>
+            </Stack>
+          </Alert>
+        ) : (
+          <Box sx={{ width: "100%", aspectRatio: "16 / 9" }}>
+            <YouTubeRecordingPlayer
+              key={youtubeKey}
+              videoId={youtubeVideo.videoId}
+              title={`Combo video: ${item.route}`}
+              startSeconds={youtubeVideo.startSeconds}
+              privacyEnhanced
+              sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
+              onError={(message) => setFailedYouTube({ key: youtubeKey, message })}
+            />
+          </Box>
+        )
+      ) : youtubeVideo ? (
+        <Alert severity="warning">
+          The {youtubeVideo.source.toLowerCase()} YouTube link is invalid. Review it before
+          publishing.
+        </Alert>
+      ) : (
+        <Typography variant="body2" color="text.secondary">
+          No YouTube video linked.
+        </Typography>
+      )}
+    </>
   );
   return (
     <Paper variant="outlined" sx={{ p: 2, minWidth: 0 }}>
@@ -5264,7 +5567,7 @@ function ComboDetail({
                   {recording && recordingApiAvailable && window.electronAPI?.comboCandidates && (
                     <Button
                       size="small"
-                      variant="outlined"
+                      variant="contained"
                       color="secondary"
                       data-guide-anchor="combo-submit-candidate"
                       onClick={onSubmitCandidate}
@@ -5284,7 +5587,16 @@ function ComboDetail({
                     (item.local.needsCatalogPublication ||
                       youtubeVideo?.videoId ||
                       labatarYouTubeReady) && (
-                      <Button size="small" variant="outlined" color="secondary" onClick={onPublish}>
+                      <Button
+                        size="small"
+                        variant={
+                          item.local.needsCatalogPublication || !youtubeVideo?.videoId
+                            ? "contained"
+                            : "outlined"
+                        }
+                        color="secondary"
+                        onClick={onPublish}
+                      >
                         {item.local.needsCatalogPublication
                           ? "Publish candidate"
                           : youtubeVideo?.videoId
@@ -5301,144 +5613,18 @@ function ComboDetail({
                 )}
               </Stack>
             )}
-          <Box
-            sx={{
-              display: "flex",
-              flexWrap: "wrap",
-              alignItems: "center",
-              justifyContent: "flex-end",
-              gap: 1.5,
-              ml: "auto",
-              maxWidth: "100%",
-            }}
-          >
-            <Stack spacing={0.5} sx={{ alignItems: "flex-end" }}>
-              <Chip
-                size="small"
-                label={`Difficulty ${effectiveDifficulty(item, personal) ?? "—"}`}
-                variant="outlined"
-              />
-              {effectiveDifficulty(item, personal) !== null && (
-                <Typography variant="caption" color="text.secondary">
-                  {personal.difficulty !== null ? "My difficulty" : "Editor difficulty"}
-                </Typography>
-              )}
-            </Stack>
-            <Stack spacing={0.5} sx={{ alignItems: "flex-end" }}>
-              <ComboPipIcons pips={item.pips} />
-              <ComboFlowMeter flow={item.flow} />
-            </Stack>
-            <Box sx={{ textAlign: "right" }}>
-              <Typography variant="h5" sx={{ fontWeight: 800 }}>
-                {item.damage || "—"}
-              </Typography>
-              <Typography variant="caption">damage</Typography>
-            </Box>
-          </Box>
+          <ComboDetailSummary
+            item={item}
+            personal={personal}
+            tagInput={tagInput}
+            setTagInput={setTagInput}
+            onTagsChange={readOnly ? undefined : (tags) => updateEntry(item.id, { tags })}
+          />
         </Box>
         <Box sx={{ p: 1.5 }}>
           <Stack spacing={1.5}>
             {!readOnly && hasVideoControls && videoControls}
-            {(videoUrl || recordingLink) && (
-              <Box>
-                {displayedRecording && recordingApiAvailable ? (
-                  <Suspense fallback={<CircularProgress size={26} />}>
-                    <RecordingViewer
-                      key={displayedRecording.id}
-                      active={active}
-                      refreshToken={displayedRecording.modifiedAt}
-                      mode="recordings"
-                      panelOnly
-                      embeddedCombo
-                      selectedRecordingId={displayedRecording.id}
-                      onPlaybackTimeMs={setLocalVideoTimeMs}
-                    />
-                  </Suspense>
-                ) : (
-                  videoUrl && (
-                    <Box
-                      component="video"
-                      key={`${videoUrl}:${displayedRecording?.modifiedAt ?? 0}`}
-                      src={
-                        displayedRecording
-                          ? `${videoUrl}?v=${displayedRecording.modifiedAt}`
-                          : videoUrl
-                      }
-                      controls
-                      preload="metadata"
-                      onTimeUpdate={(event) =>
-                        setLocalVideoTimeMs(Math.round(event.currentTarget.currentTime * 1000))
-                      }
-                      sx={{ width: "100%", maxHeight: 360, bgcolor: "black" }}
-                    />
-                  )
-                )}
-                {recordingLink &&
-                  !recording &&
-                  (linkedRecording ? (
-                    <Alert severity="info">Linked recording has no local MP4.</Alert>
-                  ) : recordingApiAvailable && !recordingsLoaded && !recordingsError ? (
-                    <Typography variant="body2" color="text.secondary">
-                      Loading local video…
-                    </Typography>
-                  ) : (
-                    <Alert severity="warning">Linked video unavailable.</Alert>
-                  ))}
-                {recordingsError && recordingLink && (
-                  <Alert severity="error">{recordingsError}</Alert>
-                )}
-              </Box>
-            )}
-            {youtubeVideo?.videoId && youtubeVideo.source !== "Catalog" && (
-              <Typography variant="subtitle2">{youtubeVideo.source} YouTube video</Typography>
-            )}
-            {youtubeVideo?.videoId ? (
-              youtubeError ? (
-                <Alert severity="warning">
-                  <Stack spacing={1}>
-                    <Typography variant="body2">{youtubeError}</Typography>
-                    <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
-                      <Button size="small" onClick={() => setFailedYouTube(null)}>
-                        Retry
-                      </Button>
-                      {!readOnly && (
-                        <Button
-                          size="small"
-                          onClick={() => {
-                            onRemoveYouTubeVideo(youtubeVideo.videoId!);
-                            setFailedYouTube(null);
-                          }}
-                        >
-                          Remove YouTube link
-                        </Button>
-                      )}
-                    </Stack>
-                  </Stack>
-                </Alert>
-              ) : (
-                <Box sx={{ width: "100%", aspectRatio: "16 / 9" }}>
-                  <YouTubeRecordingPlayer
-                    key={youtubeKey}
-                    videoId={youtubeVideo.videoId}
-                    title={`Combo video: ${item.route}`}
-                    startSeconds={youtubeVideo.startSeconds}
-                    privacyEnhanced
-                    sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
-                    onError={(message) => setFailedYouTube({ key: youtubeKey, message })}
-                  />
-                </Box>
-              )
-            ) : youtubeVideo ? (
-              <Alert severity="warning">
-                The {youtubeVideo.source.toLowerCase()} YouTube link is invalid. Review it before
-                publishing.
-              </Alert>
-            ) : (
-              <Typography variant="body2" color="text.secondary">
-                No YouTube video linked.
-              </Typography>
-            )}
-            {item.candidate && (
+            {item.candidate ? (
               <ComboCandidateReview
                 candidate={item.candidate}
                 onChanged={onCandidateChanged}
@@ -5446,7 +5632,10 @@ function ComboDetail({
                 onRecordingSaved={(recording) =>
                   onCandidateRecordingSaved(item.candidate!, recording)
                 }
+                media={mediaContent}
               />
+            ) : (
+              mediaContent
             )}
           </Stack>
         </Box>
@@ -5508,6 +5697,12 @@ function ComboDetail({
                 <ComboRouteText route={item.route} notes={notes} />
               </Typography>
             </Box>
+            <ComboCompatibilityEditor
+              key={item.id}
+              value={item.characterCompatibility}
+              getScopePortrait={getScopePortrait}
+              edit={compatibilityEdit}
+            />
             {!readOnly && recording?.comboInputCapture && (
               <Box data-guide-anchor="combo-input-track">
                 <ComboInputInspector
@@ -5580,9 +5775,9 @@ function ComboDetail({
               {item.counterhit === "yes" && (
                 <Chip size="small" label="Counterhit required" variant="outlined" />
               )}
-              {personal.tags.map((tag) => (
-                <Chip key={tag} size="small" label={`#${tag}`} variant="outlined" />
-              ))}
+              {comboHasNoInputRecording(recordingLink, recording) && (
+                <Chip size="small" label="No input recording" color="warning" />
+              )}
             </Stack>
             {personal.condition && (
               <Box>
@@ -5693,43 +5888,6 @@ function ComboDetail({
                   onChange={(e) => updateEntry(item.id, { note: e.target.value })}
                   sx={{ gridColumn: { sm: "span 2" } }}
                 />
-              </Box>
-              <Box>
-                <Typography variant="caption" color="text.secondary">
-                  My tags
-                </Typography>
-                <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap", mb: 1 }}>
-                  {personal.tags.map((tag) => (
-                    <Chip
-                      key={tag}
-                      size="small"
-                      label={`#${tag}`}
-                      onDelete={() =>
-                        updateEntry(item.id, {
-                          tags: personal.tags.filter((value) => value !== tag),
-                        })
-                      }
-                    />
-                  ))}
-                </Stack>
-                <Stack direction="row" spacing={1}>
-                  <TextField
-                    size="small"
-                    label="Add tag"
-                    value={tagInput}
-                    onChange={(e) => setTagInput(e.target.value)}
-                  />
-                  <Button
-                    onClick={() => {
-                      const tag = tagInput.trim().replace(/^#/, "").toLowerCase();
-                      if (tag && !personal.tags.includes(tag))
-                        updateEntry(item.id, { tags: [...personal.tags, tag] });
-                      setTagInput("");
-                    }}
-                  >
-                    Add
-                  </Button>
-                </Stack>
               </Box>
             </Stack>
           </Paper>

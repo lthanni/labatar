@@ -97,7 +97,11 @@ function buildComboInputOverlayAss(processed, capture, durationMs) {
   const durationCs = Math.ceil(durationMs / 10);
   const presses = processed.presses
     .filter(
-      (press) => Number.isFinite(press.timeMs) && press.timeMs >= 0 && press.timeMs < durationMs,
+      (press) =>
+        !press.manualEdit?.hidden &&
+        Number.isFinite(press.timeMs) &&
+        press.timeMs >= 0 &&
+        press.timeMs < durationMs,
     )
     .map((press, index) => {
       const state = capture.states[press.sourceStateIndex];
@@ -126,8 +130,6 @@ function buildComboInputOverlayAss(processed, capture, durationMs) {
         separator: index === 0 ? "" : press.manualEdit?.separator === "~" ? "~" : " ",
       };
     });
-  if (!presses.length) throw new Error("No button presses fall within this video.");
-
   const boundaries = [
     ...new Set([0, durationCs, ...presses.flatMap(({ start, end }) => [start, end])]),
   ].sort((left, right) => left - right);
@@ -170,6 +172,7 @@ function buildComboInputOverlayAss(processed, capture, durationMs) {
 }
 
 module.exports = {
+  assTime,
   buildComboInputOverlayAss,
   buildComboInputVideoFilter,
   comboInputVideoLayout,

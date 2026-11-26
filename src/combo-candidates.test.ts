@@ -578,6 +578,7 @@ describe("combo candidate snapshot", () => {
         counterhit: false,
         youtubeUrl: "",
         editorDifficulty: 2,
+        characterCompatibility: { whitelist: ["korra"], blacklist: ["toph"] },
       },
     };
     const personal: PersonalComboEntry = {
@@ -595,6 +596,7 @@ describe("combo candidate snapshot", () => {
       id: "aang-katara-5b-2fa-236b",
       name: "Reliable route",
       difficulty: 2,
+      characterCompatibility: { whitelist: ["korra"], blacklist: ["toph"] },
       resourceCosts: { pips: 1, flow: 0 },
       mechanics: ["Initial conversion hitconfirmable"],
     });

@@ -1,10 +1,34 @@
 import { describe, expect, it } from "vite-plus/test";
 import { comboItems } from "./combo-gameplan";
 import { candidateItem } from "./combo-candidates";
-import { comboMediaGap, comboYouTubeVideo, mediaGap } from "./combo-media";
+import {
+  comboHasNoInputRecording,
+  comboMediaGap,
+  comboYouTubeVideo,
+  mediaGap,
+} from "./combo-media";
 import type { RecordedVideo } from "./recording-types";
 
 describe("combo media gaps", () => {
+  it("marks a linked local MP4 only when controller input capture is absent", () => {
+    const link = { recordingId: "route.mp4", name: "route.mp4" };
+    const recording = {
+      id: "route.mp4",
+      name: "route.mp4",
+      mediaKind: "local",
+    } as RecordedVideo;
+    expect(comboHasNoInputRecording(link, recording)).toBe(true);
+    expect(comboHasNoInputRecording(undefined, recording)).toBe(false);
+    expect(comboHasNoInputRecording(link, null)).toBe(false);
+    expect(
+      comboHasNoInputRecording(link, {
+        ...recording,
+        comboInputCapture: {} as RecordedVideo["comboInputCapture"],
+      }),
+    ).toBe(false);
+    expect(comboHasNoInputRecording(link, { ...recording, mediaKind: "youtube" })).toBe(false);
+  });
+
   it("distinguishes no video from an MP4 that still needs YouTube", () => {
     expect(mediaGap(false, false)).toBe("No video");
     expect(mediaGap(true, false)).toBe("No YouTube video");

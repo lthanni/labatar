@@ -87,8 +87,10 @@ export const YouTubeRecordingPlayer = forwardRef<
     videoId: string;
     title: string;
     startSeconds?: number;
+    controls?: boolean;
     privacyEnhanced?: boolean;
     sandbox?: string;
+    onReady?: () => void;
     onDuration?: (seconds: number) => void;
     onTime?: (seconds: number) => void;
     onPlayingChange?: (playing: boolean) => void;
@@ -99,8 +101,10 @@ export const YouTubeRecordingPlayer = forwardRef<
     videoId,
     title,
     startSeconds = 0,
+    controls = true,
     privacyEnhanced = false,
     sandbox,
+    onReady,
     onDuration,
     onTime,
     onPlayingChange,
@@ -110,14 +114,14 @@ export const YouTubeRecordingPlayer = forwardRef<
 ) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<YouTubePlayerInstance | null>(null);
-  const callbacks = useRef({ onDuration, onTime, onPlayingChange, onError });
-  callbacks.current = { onDuration, onTime, onPlayingChange, onError };
+  const callbacks = useRef({ onReady, onDuration, onTime, onPlayingChange, onError });
+  callbacks.current = { onReady, onDuration, onTime, onPlayingChange, onError };
 
   useImperativeHandle(ref, () => ({
-    play: () => playerRef.current?.playVideo(),
-    pause: () => playerRef.current?.pauseVideo(),
-    seekTo: (seconds) => playerRef.current?.seekTo(seconds, true),
-    getCurrentTime: () => playerRef.current?.getCurrentTime() ?? 0,
+    play: () => playerRef.current?.playVideo?.(),
+    pause: () => playerRef.current?.pauseVideo?.(),
+    seekTo: (seconds) => playerRef.current?.seekTo?.(seconds, true),
+    getCurrentTime: () => playerRef.current?.getCurrentTime?.() ?? 0,
   }));
 
   useEffect(() => {
@@ -133,7 +137,7 @@ export const YouTubeRecordingPlayer = forwardRef<
       `https://${privacyEnhanced ? "www.youtube-nocookie.com" : "www.youtube.com"}/embed/${videoId}`,
     );
     playerUrl.searchParams.set("enablejsapi", "1");
-    playerUrl.searchParams.set("controls", "1");
+    playerUrl.searchParams.set("controls", controls ? "1" : "0");
     playerUrl.searchParams.set("playsinline", "1");
     if (startSeconds > 0) playerUrl.searchParams.set("start", String(startSeconds));
     if (origin.startsWith("http")) playerUrl.searchParams.set("origin", origin);
@@ -153,6 +157,7 @@ export const YouTubeRecordingPlayer = forwardRef<
           events: {
             onReady: () => {
               if (cancelled) return;
+              callbacks.current.onReady?.();
               interval = setInterval(() => {
                 const player = playerRef.current;
                 if (!player) return;
@@ -200,7 +205,7 @@ export const YouTubeRecordingPlayer = forwardRef<
       playerRef.current = null;
       host.replaceChildren();
     };
-  }, [videoId, startSeconds, privacyEnhanced, sandbox]);
+  }, [videoId, startSeconds, controls, privacyEnhanced, sandbox]);
 
   return <div ref={hostRef} title={title} style={{ width: "100%", height: "100%" }} />;
 });

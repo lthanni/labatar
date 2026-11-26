@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 
-async function importComboMp4(sourcePath, recordingFolder) {
+async function importMp4(sourcePath, recordingFolder, directoryName = "Imported Videos") {
   if (path.extname(sourcePath).toLowerCase() !== ".mp4") {
     throw new Error("Choose an MP4 file.");
   }
@@ -20,7 +20,7 @@ async function importComboMp4(sourcePath, recordingFolder) {
     return { recordingId: relative.split(path.sep).join("/"), imported: false };
   }
 
-  const targetDirectory = path.join(root, "Imported Combos");
+  const targetDirectory = path.join(root, directoryName);
   await fs.promises.mkdir(targetDirectory, { recursive: true });
   const resolvedTargetDirectory = await fs.promises.realpath(targetDirectory);
   if (resolvedTargetDirectory !== targetDirectory) {
@@ -39,4 +39,6 @@ async function importComboMp4(sourcePath, recordingFolder) {
   }
 }
 
-module.exports = { importComboMp4 };
+const importComboMp4 = (sourcePath, recordingFolder) =>
+  importMp4(sourcePath, recordingFolder, "Imported Combos");
+module.exports = { importMp4, importComboMp4 };

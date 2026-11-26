@@ -73,6 +73,8 @@ const inactiveMoveCapture: MoveCaptureState = { armed: null, active: null };
 
 type ObsRecordingContextValue = {
   state: ObsState;
+  obsAppRunning: boolean | null;
+  obsLaunchBusy: boolean;
   settings: ObsSettings;
   password: string;
   passwordFocused: boolean;
@@ -90,6 +92,7 @@ type ObsRecordingContextValue = {
   setPasswordFocused: (focused: boolean) => void;
   setRememberPassword: (remember: boolean) => void;
   connect: () => Promise<boolean>;
+  openObsApp: () => Promise<boolean>;
   clearPassword: () => Promise<void>;
   disconnect: () => Promise<void>;
   startManualRecording: (purpose?: RecordingStartPurpose) => Promise<void>;
@@ -106,7 +109,7 @@ type ObsRecordingContextValue = {
   toggleAutomaticRecording: (enabled: boolean) => Promise<void>;
   setupScenes: () => Promise<void>;
   setScene: (sceneName: string) => Promise<void>;
-  setSourceToggle: (key: ObsSourceToggleKey, enabled: boolean) => Promise<void>;
+  setSourceToggle: (key: ObsSourceToggleKey, enabled: boolean) => Promise<boolean>;
 };
 
 const ObsRecordingContext = createContext<ObsRecordingContextValue | null>(null);
@@ -117,6 +120,8 @@ function displayError(error: unknown) {
 
 export function ObsRecordingProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<ObsState>(disconnectedState);
+  const [obsAppRunning, setObsAppRunning] = useState<boolean | null>(null);
+  const [obsLaunchBusy, setObsLaunchBusy] = useState(false);
   const [settings, setSettings] = useState<ObsSettings>(defaultSettings);
   const [password, setPassword] = useState("");
   const [passwordFocused, setPasswordFocused] = useState(false);
@@ -128,24 +133,86 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [connectFailed, setConnectFailed] = useState(false);
 
+  const refreshObsAppState = useCallback(async () => {
+    if (!window.electronAPI?.obs) return;
+    try {
+      setObsAppRunning(await window.electronAPI.obs.getAppState());
+    } catch {
+      setObsAppRunning(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshObsAppState();
+    const timer = window.setInterval(() => void refreshObsAppState(), 5_000);
+    window.addEventListener("focus", refreshObsAppState);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshObsAppState);
+    };
+  }, [refreshObsAppState]);
+
+  const openObsApp = useCallback(async () => {
+    if (!window.electronAPI?.obs) return false;
+    setObsLaunchBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const opened = await window.electronAPI.obs.openApp();
+      if (opened) {
+        setObsAppRunning(true);
+        setNotice("OBS is open. Connect once its WebSocket server is ready.");
+      }
+      return opened;
+    } catch (launchError) {
+      setError(displayError(launchError));
+      return false;
+    } finally {
+      setObsLaunchBusy(false);
+      void refreshObsAppState();
+    }
+  }, [refreshObsAppState]);
+
   useEffect(() => {
     if (!window.electronAPI?.obs) return;
     let active = true;
+    let receivedState = false;
     const unsubscribe = window.electronAPI.obs.onState((nextState) => {
+      receivedState = true;
       if (active) setState(nextState);
     });
-    void Promise.all([
-      window.electronAPI.obs.getState(),
-      window.electronAPI.obs.getSettings(),
-    ]).then(([nextState, nextSettings]) => {
-      if (!active) return;
-      setState(nextState);
-      setSettings(nextSettings);
-      setRememberPassword(nextSettings.passwordSaved);
-    });
+    void window.electronAPI.obs
+      .getState()
+      .then((nextState) => {
+        if (active && !receivedState) setState(nextState);
+      })
+      .catch(() => undefined);
+    void window.electronAPI.obs
+      .getSettings()
+      .then((nextSettings) => {
+        if (!active) return;
+        setSettings(nextSettings);
+        setRememberPassword(nextSettings.passwordSaved);
+      })
+      .catch(() => undefined);
+    const refreshSharedRecordingDirectory = () => {
+      void window.electronAPI?.obs
+        .getSettings()
+        .then((nextSettings) => {
+          if (active) {
+            setSettings((current) => ({
+              ...current,
+              recordDirectory: nextSettings.recordDirectory,
+            }));
+          }
+        })
+        .catch(() => undefined);
+    };
+    window.addEventListener("focus", refreshSharedRecordingDirectory);
     return () => {
       active = false;
       unsubscribe();
+      window.removeEventListener("focus", refreshSharedRecordingDirectory);
     };
   }, []);
 
@@ -360,8 +427,18 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
         profileName: settings.profileName,
         recordDirectory: settings.recordDirectory,
       });
+      const videoNotice = result.monitorCapture
+        ? "Monitor capture is selected."
+        : result.outputResolution
+          ? `Output resized to ${result.outputResolution.width}×${result.outputResolution.height}.`
+          : "Open the game and run setup again to resize output to the game source.";
+      const framebarNotice = result.monitorCapture
+        ? ""
+        : result.pressureFramebarReady
+          ? "The P2 crop can be switched on."
+          : "Open the game and run setup again to place the P2 crop.";
       setNotice(
-        `The Labatar game scene is ready in the ${result.sceneCollectionName} scene collection. Game audio uses ${result.gameAudioMode === "separate" ? "a separate application audio source" : "the window capture source"}. ${result.outputResolution ? `Output resized to ${result.outputResolution.width}×${result.outputResolution.height}.` : "Open the game and run setup again to resize output to the game source."} ${result.pressureFramebarReady ? "The P2 crop can be switched on." : "Open the game and run setup again to place the P2 crop."}`,
+        `The Labatar game scene is ready in the ${result.sceneCollectionName} scene collection. Game audio uses ${result.gameAudioMode === "separate" ? "a separate application audio source" : "the window capture source"}. ${videoNotice} ${framebarNotice}`.trimEnd(),
       );
     } catch (setupError) {
       setError(displayError(setupError));
@@ -385,14 +462,16 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setSourceToggle = useCallback(async (key: ObsSourceToggleKey, enabled: boolean) => {
-    if (!window.electronAPI?.obs) return;
+    if (!window.electronAPI?.obs) return false;
     setBusy(true);
     setError(null);
     try {
       const nextState = await window.electronAPI.obs.setSourceToggle(key, enabled);
       setState(nextState);
+      return true;
     } catch (toggleError) {
       setError(displayError(toggleError));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -401,6 +480,8 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
   const value = useMemo<ObsRecordingContextValue>(
     () => ({
       state,
+      obsAppRunning,
+      obsLaunchBusy,
       settings,
       password,
       passwordFocused,
@@ -418,6 +499,7 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
       setPasswordFocused,
       setRememberPassword,
       connect,
+      openObsApp,
       clearPassword,
       disconnect,
       startManualRecording,
@@ -439,6 +521,9 @@ export function ObsRecordingProvider({ children }: { children: ReactNode }) {
       extractionCaptureActive,
       moveCapture,
       notice,
+      obsAppRunning,
+      obsLaunchBusy,
+      openObsApp,
       password,
       passwordFocused,
       rememberPassword,
@@ -469,6 +554,9 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
   const {
     busy,
     state,
+    obsAppRunning,
+    obsLaunchBusy,
+    openObsApp,
     connect,
     disconnect,
     startManualRecording,
@@ -523,6 +611,10 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
           onClick={() => {
             if (connected) {
               void disconnect();
+            } else if (obsAppRunning === false) {
+              void openObsApp().then((opened) => {
+                if (!opened) onOpenSettings();
+              });
             } else {
               void connect().then((succeeded) => {
                 if (!succeeded) onOpenSettings();
@@ -531,6 +623,7 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
           }}
           disabled={
             busy ||
+            obsLaunchBusy ||
             recording ||
             state.status === "connecting" ||
             (connected && automaticMoveRunOpen)
@@ -540,7 +633,11 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
             ? "Connecting..."
             : connected
               ? "Disconnect OBS"
-              : "Connect to OBS"}
+              : obsAppRunning === false
+                ? "Open OBS"
+                : obsAppRunning === null
+                  ? "Connect to OBS"
+                  : "OBS open · Connect"}
         </Button>
         <Stack direction="row" spacing={0.5}>
           {(
@@ -562,7 +659,15 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
             const unavailable =
               key === "pressureFramebar" && !state.sourceToggles?.pressureFramebarReady;
             const automaticFramebar = key === "pressureFramebar" && state.automation.enabled;
-            const disabled = busy || recording || !sceneReady || unavailable || automaticFramebar;
+            const monitorFramebar =
+              key === "pressureFramebar" && state.sourceToggles?.monitorCapture;
+            const disabled =
+              busy ||
+              recording ||
+              !sceneReady ||
+              unavailable ||
+              automaticFramebar ||
+              monitorFramebar;
             const tooltip = !connected
               ? "Connect to OBS to change scene sources."
               : !sceneReady
@@ -571,9 +676,11 @@ export function ObsRecordingControls({ onOpenSettings }: { onOpenSettings: () =>
                   ? "Stop recording before changing scene sources."
                   : automaticFramebar
                     ? "Stop automatic recording before turning on the P2 framebar."
-                    : unavailable
-                      ? "Open the game and apply OBS setup again to place the P2 crop."
-                      : `${label}: ${enabled ? "on" : "off"}`;
+                    : monitorFramebar
+                      ? "Select Game only to use the P2 framebar."
+                      : unavailable
+                        ? "Open the game and apply OBS setup again to place the P2 crop."
+                        : `${label}: ${enabled ? "on" : "off"}`;
             return (
               <Tooltip key={key} title={tooltip} arrow>
                 <span>

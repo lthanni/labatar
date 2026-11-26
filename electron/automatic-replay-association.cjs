@@ -1,3 +1,5 @@
+const pendingReplayTimeoutMs = 120_000;
+
 function takePendingReplayMatch(pendingRecordings, matchId) {
   if (typeof matchId !== "string" || !matchId.trim()) return null;
   const index = pendingRecordings.findIndex((pending) => pending.match?.matchId === matchId);
@@ -30,4 +32,9 @@ function replayRoundScore(fields) {
   return `${first ?? 0} - ${second ?? 0}`;
 }
 
-module.exports = { takePendingReplayMatch, replayMatchesGame, replayRoundScore };
+module.exports = {
+  pendingReplayTimeoutMs,
+  takePendingReplayMatch,
+  replayMatchesGame,
+  replayRoundScore,
+};

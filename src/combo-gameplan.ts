@@ -1,9 +1,13 @@
-import { comboStarterFromRoute } from "./combo-starter";
+import { comboStarter, comboStarterFromRoute } from "./combo-starter";
 import { normalizeComboNotes } from "./combo-notes";
 import { cleanPublishedCombo, isPublishedCombo } from "./published-catalog";
 import type { ComboNote } from "./tech-types";
 import type { PublishedCombo, PublishedMove } from "./published-catalog";
 import type { ComboCandidate } from "./combo-candidates";
+import {
+  isComboCharacterCompatibility,
+  type ComboCharacterCompatibility,
+} from "./combo-character-compatibility";
 
 export const comboWorkspaceKey = "labatar-combo-workspace-v1";
 const candidateIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -37,6 +41,7 @@ export type LocalCombo = {
   characterId: string;
   supportId: string;
   starter: string;
+  starterOverride?: string;
   name: string;
   route: string;
   screenPosition: string;
@@ -61,6 +66,7 @@ export type LocalCombo = {
   moveIds?: string[];
   routingMode?: "autopilot" | "unique";
   editorNotes?: ComboNote[];
+  characterCompatibility?: ComboCharacterCompatibility;
 };
 
 export type ComboRecordingLink = { recordingId: string; name: string };
@@ -95,6 +101,7 @@ export type ComboItem = {
   difficulty: number | null;
   hitconfirm: ConfirmFact;
   counterhit: ConfirmFact;
+  characterCompatibility?: ComboCharacterCompatibility;
   published?: PublishedCombo;
   local?: LocalCombo;
   candidate?: ComboCandidate;
@@ -115,6 +122,7 @@ export type CatalogComboSnapshot = Pick<
   | "difficulty"
   | "hitconfirm"
   | "counterhit"
+  | "characterCompatibility"
 >;
 
 export function catalogSnapshot(item: ComboItem): CatalogComboSnapshot {
@@ -132,6 +140,7 @@ export function catalogSnapshot(item: ComboItem): CatalogComboSnapshot {
     difficulty: item.difficulty,
     hitconfirm: item.hitconfirm,
     counterhit: item.counterhit,
+    characterCompatibility: item.characterCompatibility,
   };
 }
 
@@ -218,13 +227,22 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
             starter:
               item.recordingDraft === true && !text(item.route)
                 ? "Pending input"
-                : comboStarterFromRoute(
+                : comboStarter(
                     text(item.route),
+                    typeof item.starterOverride === "string"
+                      ? item.starterOverride
+                      : isPublishedCombo(item.publishedBase)
+                        ? item.publishedBase.starterOverride
+                        : undefined,
                     isPublishedCombo(item.publishedBase) &&
                       item.publishedBase.starterIsNonAttackStance,
                   ),
             name: text(item.name),
             route: text(item.route),
+            ...(typeof item.starterOverride === "string" &&
+            item.starterOverride.trim().length <= 100
+              ? { starterOverride: item.starterOverride.trim() }
+              : {}),
             screenPosition: text(item.screenPosition),
             damage: text(item.damage),
             pips: nonnegative(item.pips),
@@ -270,6 +288,9 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
               : {}),
             ...(Array.isArray(item.editorNotes)
               ? { editorNotes: normalizeComboNotes(item.editorNotes) }
+              : {}),
+            ...(isComboCharacterCompatibility(item.characterCompatibility)
+              ? { characterCompatibility: item.characterCompatibility }
               : {}),
           },
         ];
@@ -327,7 +348,7 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
         id,
         characterId: text(item.characterId),
         supportId: text(item.supportId),
-        starter: comboStarterFromRoute(text(item.route), text(item.starter).includes("~")),
+        starter: text(item.starter) || comboStarterFromRoute(text(item.route)),
         name: text(item.name) === text(item.route) ? "" : text(item.name),
         route: text(item.route),
         screenPosition: text(item.screenPosition),
@@ -339,6 +360,9 @@ export function parseComboWorkspace(value: unknown): ComboWorkspaceData {
           item.hitconfirm === "yes" || item.hitconfirm === "no" ? item.hitconfirm : "unknown",
         counterhit:
           item.counterhit === "yes" || item.counterhit === "no" ? item.counterhit : "unknown",
+        ...(isComboCharacterCompatibility(item.characterCompatibility)
+          ? { characterCompatibility: item.characterCompatibility }
+          : {}),
       };
     }
   }
@@ -382,6 +406,7 @@ export function localRevisionDraft(item: ComboItem, id: string): LocalCombo | nu
     characterId: item.characterId,
     supportId: item.supportId,
     starter: item.starter,
+    ...(base.starterOverride ? { starterOverride: base.starterOverride } : {}),
     name: base.name?.trim() || "",
     route: item.route,
     screenPosition: item.screenPosition,
@@ -402,6 +427,7 @@ export function localRevisionDraft(item: ComboItem, id: string): LocalCombo | nu
     moveIds: [...base.moveIds],
     routingMode: base.routingMode ?? "autopilot",
     editorNotes: normalizeComboNotes(base.notes),
+    characterCompatibility: base.characterCompatibility,
   };
 }
 
@@ -421,14 +447,16 @@ export function comboItems(
         source: "Catalog",
         characterId: combo.characterId,
         supportId: combo.supportId,
-        starter: comboStarterFromRoute(
+        starter: comboStarter(
           combo.route,
+          combo.starterOverride,
           combo.starterIsNonAttackStance ??
             (starterMove?.isStanceParent === true && starterMove.isNonAttack === true),
         ),
         name: combo.name?.trim() || "",
         route: combo.route,
         screenPosition: combo.screenPosition ?? "",
+        characterCompatibility: combo.characterCompatibility,
         damage: combo.damage,
         pips: combo.resourceCosts.pips ?? 0,
         flow: combo.resourceCosts.flow ?? 0,
@@ -454,8 +482,9 @@ export function comboItems(
       starter:
         combo.recordingDraft && !combo.route
           ? "Pending input"
-          : comboStarterFromRoute(
+          : comboStarter(
               combo.route,
+              combo.starterOverride ?? combo.publishedBase?.starterOverride,
               combo.publishedBase?.starterIsNonAttackStance ?? false,
             ),
       name: combo.originCatalog
@@ -463,6 +492,8 @@ export function comboItems(
         : combo.name.trim(),
       route: combo.route,
       screenPosition: combo.screenPosition,
+      characterCompatibility:
+        combo.characterCompatibility ?? combo.publishedBase?.characterCompatibility,
       damage: combo.damage,
       pips: combo.pips,
       flow: combo.flow,
@@ -587,8 +618,9 @@ export function countLocalCombos(
       combo.characterId === characterId &&
       (!supportId || combo.supportId === supportId) &&
       (!starter ||
-        comboStarterFromRoute(
+        comboStarter(
           combo.route,
+          combo.starterOverride ?? combo.publishedBase?.starterOverride,
           combo.publishedBase?.starterIsNonAttackStance ?? false,
         ) === starter),
   ).length;

@@ -1,6 +1,7 @@
 export const chipShortcutActions = [
   "followup",
   "togglePosition",
+  "toggleFacing",
   "removeDirection",
   "anyAttack",
   "delay",
@@ -14,6 +15,7 @@ export type ChipShortcutBindings = Record<ChipShortcutAction, string>;
 export const defaultChipShortcutBindings: ChipShortcutBindings = {
   followup: "`",
   togglePosition: "j",
+  toggleFacing: "l",
   removeDirection: "r",
   anyAttack: "x",
   delay: "d",
@@ -22,6 +24,12 @@ export const defaultChipShortcutBindings: ChipShortcutBindings = {
 };
 
 const storageKey = "labatar-combo-chip-shortcuts-v1";
+const newShortcutKeys = {
+  followup: ["`", "~", "f", "g", "h"],
+  anyAttack: ["x", "v", "z", "b", "n", "m"],
+  delay: ["d", "e", "q", "w", "s"],
+  toggleFacing: ["l", "h", "y", "u", "o", "p", "i", "k"],
+};
 
 export function normalizeChipShortcutKey(key: string): string | null {
   const normalized = key.toLowerCase();
@@ -43,17 +51,11 @@ export function parseChipShortcutBindings(value: unknown): ChipShortcutBindings 
   }
   const bindings: Partial<ChipShortcutBindings> = Object.fromEntries(entries);
   const used = new Set(keys);
-  for (const action of ["followup", "anyAttack", "delay"] as const) {
+  for (const action of ["followup", "anyAttack", "delay", "toggleFacing"] as const) {
     const stored = (value as Record<string, unknown>)[action];
-    const candidates =
-      action === "followup"
-        ? ["`", "~", "f", "g", "h"]
-        : action === "anyAttack"
-          ? ["x", "v", "z", "b", "n", "m"]
-          : ["d", "e", "q", "w", "s"];
     const key =
       stored === undefined
-        ? candidates.find((candidate) => !used.has(candidate))
+        ? newShortcutKeys[action].find((candidate) => !used.has(candidate))
         : typeof stored === "string"
           ? normalizeChipShortcutKey(stored)
           : null;

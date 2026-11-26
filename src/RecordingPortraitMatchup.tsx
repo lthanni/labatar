@@ -1,8 +1,21 @@
 import { Box, Stack, Tooltip, Typography } from "@mui/material";
 import YouTubeIcon from "@mui/icons-material/YouTube";
 import type { RecordingPortraitMatchup, RecordingPortraitSide } from "./recording-types";
+import {
+  recordingPlayerDisplayName,
+  recordingPlayersWithUserFirst,
+  type ReplayUser,
+} from "./replay-player-identity";
 
-function PortraitSide({ side, align }: { side: RecordingPortraitSide; align: "left" | "right" }) {
+function PortraitSide({
+  side,
+  align,
+  name,
+}: {
+  side: RecordingPortraitSide;
+  align: "left" | "right";
+  name: string;
+}) {
   const right = align === "right";
   return (
     <Stack
@@ -38,8 +51,8 @@ function PortraitSide({ side, align }: { side: RecordingPortraitSide; align: "le
         />
       )}
       <Box sx={{ minWidth: 0, textAlign: right ? "right" : "left" }}>
-        <Typography variant="body2" noWrap title={side.playerName}>
-          {side.playerName}
+        <Typography variant="body2" noWrap title={name}>
+          {name}
         </Typography>
       </Box>
     </Stack>
@@ -49,26 +62,37 @@ function PortraitSide({ side, align }: { side: RecordingPortraitSide; align: "le
 export function RecordingPortraitMatchupView({
   matchup,
   detail,
-  fileName,
+  label,
   youtubeLinked = false,
+  replayUser = null,
 }: {
   matchup: RecordingPortraitMatchup;
   detail: string;
-  fileName?: string;
+  label?: string;
   youtubeLinked?: boolean;
+  replayUser?: ReplayUser | null;
 }) {
+  const [left, right] = recordingPlayersWithUserFirst(matchup.players, replayUser);
   return (
     <Stack spacing={0.35} sx={{ flex: 1, minWidth: 0, py: 0.5 }}>
       <Stack direction="row" spacing={1} sx={{ alignItems: "center", minWidth: 0 }}>
-        <PortraitSide side={matchup.players[0]} align="left" />
+        <PortraitSide
+          side={left}
+          align="left"
+          name={recordingPlayerDisplayName(left, replayUser)}
+        />
         <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
           vs
         </Typography>
-        <PortraitSide side={matchup.players[1]} align="right" />
+        <PortraitSide
+          side={right}
+          align="right"
+          name={recordingPlayerDisplayName(right, replayUser)}
+        />
       </Stack>
-      {fileName && (
-        <Typography variant="caption" color="text.secondary" noWrap title={fileName}>
-          {fileName}
+      {label && (
+        <Typography variant="caption" color="text.secondary" noWrap title={label}>
+          {label}
         </Typography>
       )}
       <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", minWidth: 0 }}>

@@ -199,7 +199,46 @@ function createReplayStagingStore(userDataFolder) {
     return resolved;
   }
 
-  async function selectedFiles(gameFolder, ids, state) {
+  async function selectRecordedReplay(gameFolder, recordedReplay, state) {
+    const savedPath = recordedReplay?.path;
+    const expectedHash = recordedReplay?.contentHash;
+    if (
+      typeof savedPath !== "string" ||
+      !path.isAbsolute(savedPath) ||
+      !isWithin(gameFolder, savedPath) ||
+      !savedPath.toLowerCase().endsWith(".dlr")
+    ) {
+      throw new Error("The linked replay is outside the configured game folder or is invalid.");
+    }
+    if (
+      expectedHash != null &&
+      (typeof expectedHash !== "string" || !/^[a-f0-9]{64}$/i.test(expectedHash))
+    ) {
+      throw new Error("The linked replay has an invalid content hash.");
+    }
+
+    const id = path.relative(gameFolder, savedPath).split(path.sep).join("/");
+    const candidates = [id];
+    // A game saved during staging can share the original replay's filename.
+    if (state && expectedHash && id.startsWith("replays/")) {
+      candidates.push(`${LIVE_ID_PREFIX}${id.slice("replays/".length)}`);
+    }
+    for (const candidate of candidates) {
+      const source = await resolveSource(gameFolder, candidate, state).catch((error) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (!source) continue;
+      const hash = await fileHash(source);
+      if (!expectedHash || hash === expectedHash.toLowerCase()) {
+        return { source, name: path.basename(source), hash };
+      }
+    }
+    throw new Error("The linked replay is missing or has changed since it was recorded.");
+  }
+
+  async function selectedFiles(gameFolder, ids, state, recordedReplay) {
+    if (recordedReplay) return [await selectRecordedReplay(gameFolder, recordedReplay, state)];
     const requested = [...new Set(Array.isArray(ids) ? ids : [])];
     if (requested.length === 0) throw new Error("No replay files were selected.");
     const names = new Set();
@@ -267,7 +306,7 @@ function createReplayStagingStore(userDataFolder) {
     };
   }
 
-  async function preview(gameFolder, ids) {
+  async function preview(gameFolder, ids, recordedReplay) {
     const root = await fs.promises.realpath(gameFolder);
     const packages = await fs.promises.stat(path.join(root, "data_packages")).catch(() => null);
     if (!packages?.isDirectory()) {
@@ -296,7 +335,7 @@ function createReplayStagingStore(userDataFolder) {
     if (state && !(await exists(archiveFolder(root)))) {
       throw new Error("The original replay archive is missing. No files were changed.");
     }
-    const selected = await selectedFiles(root, ids, state);
+    const selected = await selectedFiles(root, ids, state, recordedReplay);
     const archivedCount = state
       ? (await walkFiles(archiveFolder(root), { skipSymlinks: true })).filter((file) =>
           file.toLowerCase().endsWith(".dlr"),
@@ -337,11 +376,11 @@ function createReplayStagingStore(userDataFolder) {
     return { moved, newReplayCount, recoveredCount };
   }
 
-  async function stage(gameFolder, ids) {
+  async function stage(gameFolder, ids, recordedReplay) {
     const root = await fs.promises.realpath(gameFolder);
     const state = readState();
-    await preview(root, ids);
-    const selected = await selectedFiles(root, ids, state);
+    await preview(root, ids, recordedReplay);
+    const selected = await selectedFiles(root, ids, state, recordedReplay);
     const liveFolder = path.join(root, "replays");
     const archive = archiveFolder(root);
     let current = state;

@@ -226,7 +226,9 @@ describe("local portrait library", () => {
     const hints = portraitPlayerNameHints(recordings);
     const matchup = portraitMatchup(recordings[0], {}, hints);
     expect(matchup.players[0].playerName).toBe("AangPlayer");
+    expect(matchup.players[0].steamId).toBe("111");
     expect(matchup.players[1].playerName).toBe("Player 2");
+    expect(matchup.players[1].steamId).toBe("222");
     expect(hints.get("111")).toBe("AangPlayer");
   });
 });

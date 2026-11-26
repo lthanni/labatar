@@ -8,12 +8,16 @@ function comboInputWorkerPath(moduleDirectory = __dirname) {
 
 async function startComboInputClient({
   onState,
+  onError,
+  signal,
   powershell = "powershell.exe",
   readyTimeoutMs = 10000,
   spawnProcess = spawn,
   platform = process.platform,
 } = {}) {
   if (platform !== "win32") throw new Error("Controller combo capture requires Windows.");
+  if (signal?.aborted)
+    throw Object.assign(new Error("Controller input cancelled."), { name: "AbortError" });
   const child = spawnProcess(
     powershell,
     [
@@ -39,9 +43,23 @@ async function startComboInputClient({
     readyResolve = resolve;
     readyReject = reject;
   });
+  const recordFailure = (error) => {
+    if (failure) return;
+    failure = error;
+    onError?.(error);
+  };
+  const abort = () => {
+    stopRequested = true;
+    const error = Object.assign(new Error("Controller input cancelled."), { name: "AbortError" });
+    failure = error;
+    readyReject(error);
+    child.kill();
+  };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
   const timer = setTimeout(() => {
     const error = new Error("Controller capture did not initialize in time.");
-    failure = error;
+    recordFailure(error);
     readyReject(error);
     child.kill();
   }, readyTimeoutMs);
@@ -68,7 +86,7 @@ async function startComboInputClient({
       } else if (event.type === "state") {
         onState?.(event);
       } else if (event.type === "error") {
-        failure = new Error(event.message || "Controller capture failed.");
+        recordFailure(new Error(event.message || "Controller capture failed."));
         clearTimeout(timer);
         readyReject(failure);
       }
@@ -78,7 +96,7 @@ async function startComboInputClient({
     stderr = (stderr + chunk).slice(-4096);
   });
   child.on("error", (error) => {
-    failure = error;
+    recordFailure(error);
     clearTimeout(timer);
     readyReject(error);
   });
@@ -86,13 +104,15 @@ async function startComboInputClient({
     closed = true;
     clearTimeout(timer);
     if (code !== 0 && !stopRequested && !failure)
-      failure = new Error(stderr || `Controller capture exited (${code}).`);
+      recordFailure(new Error(stderr || `Controller capture exited (${code}).`));
     if (deviceIndex === null)
       readyReject(failure ?? new Error("Controller capture stopped before it was ready."));
   });
   try {
     await ready;
   } catch (error) {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
     child.kill();
     throw error;
   }
@@ -102,6 +122,7 @@ async function startComboInputClient({
       return failure;
     },
     async stop() {
+      signal?.removeEventListener("abort", abort);
       if (!closed) {
         stopRequested = true;
         child.kill();

@@ -39,9 +39,15 @@ export type ObsVideoSettings = {
   outputHeight: number | null;
 };
 
-export type ObsSourceToggleKey = "pressureFramebar" | "gameAudio" | "desktopAudio" | "microphone";
+export type ObsSourceToggleKey =
+  | "monitorCapture"
+  | "pressureFramebar"
+  | "gameAudio"
+  | "desktopAudio"
+  | "microphone";
 
 export type ObsSourceToggles = Record<ObsSourceToggleKey, boolean> & {
+  gameOnly: boolean;
   pressureFramebarReady: boolean;
   gameAudioAvailable: boolean;
 };

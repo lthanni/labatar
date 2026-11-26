@@ -53,3 +53,8 @@ export function comboStarterFromRoute(route: string, isNonAttackStance = false):
   const starter = /^\s*([^\s>~,→]+)/.exec(route)?.[1] ?? "";
   return comboStarterLabel(starter, route, isNonAttackStance);
 }
+
+/** The override names the move that came out; the route keeps the recorded input. */
+export function comboStarter(route: string, override?: string, isNonAttackStance = false): string {
+  return override?.trim() || comboStarterFromRoute(route, isNonAttackStance);
+}

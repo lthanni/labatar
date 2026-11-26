@@ -1,6 +1,8 @@
-# Combos page implementation
+# Characters and combos implementation
 
-The existing desktop **Combos** tab is the first target. The page uses the published Worker catalog and its IndexedDB cache, while a separate browser-local workspace stores personal tracking and local combos. The design reference remains [COMBOS_PAGE_CONSUMPTION_DESIGN.md](COMBOS_PAGE_CONSUMPTION_DESIGN.md).
+The player-facing **Characters** tab contains **Combos**, **Pressure**, **Oki**, and **Guides**. Character and support portraits are selected above those sections. The Combos section keeps the starter-based gameplan, recording, candidate review, and publishing workflows. The former My gameplan and Raw view tabs are no longer shown. Pressure, Oki, and Guides save private entries in `labatar-character-tech-v1` on the current device. Each entry can apply to every support or just the selected support. Guides can link to pressure, oki, and combos; entries can link a recording from the local library. These entries are separate from the published combo catalog and are not uploaded to the Worker.
+
+The Combos section uses the published Worker catalog and its IndexedDB cache, while a separate browser-local workspace stores personal tracking and local combos. The design reference is [COMBOS_PAGE_CONSUMPTION_DESIGN.md](COMBOS_PAGE_CONSUMPTION_DESIGN.md); its two-view navigation and the historical Raw descriptions below predate the Characters layout.
 
 The local MP4 workflow and recording-library reuse are described in [COMBOS_PAGE_LOCAL_VIDEO_PLAN.md](COMBOS_PAGE_LOCAL_VIDEO_PLAN.md).
 

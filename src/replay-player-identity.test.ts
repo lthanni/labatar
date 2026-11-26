@@ -3,6 +3,8 @@ import type { ReplayRow } from "./AvatarGrid";
 import {
   displayGroupedPlayerName,
   groupReplayPlayersBySteamId,
+  inferReplayUser,
+  recordingPlayersWithUserFirst,
   resolveGroupedPlayerSelection,
 } from "./replay-player-identity";
 
@@ -72,5 +74,28 @@ describe("Steam player grouping", () => {
 
   it("preserves numeric text in names without Steam IDs", () => {
     expect(displayGroupedPlayerName("Alex (123) ")).toBe("Alex (123) ");
+  });
+
+  it("puts the inferred user first by Steam ID or a unique replay alias without changing slots", () => {
+    const games = [
+      game("old", "2026-01-01", "Old user name", "1", "Rival", "2"),
+      game("new", "2026-02-01", "Opponent", "3", "New user name", "1"),
+      game("other", "2026-03-01", "New user name", "1", "Opponent", "3"),
+    ];
+    const user = inferReplayUser(games, groupReplayPlayersBySteamId(games));
+    expect(user?.steamId).toBe("1");
+    const rival = { playerName: "Rival", steamId: "2", slot: 1 };
+    const self = { playerName: "Old user name", steamId: "1", slot: 2 };
+    expect(recordingPlayersWithUserFirst([rival, self], user)).toEqual([self, rival]);
+    const legacy = { playerName: "Old user name", slot: 2 };
+    expect(recordingPlayersWithUserFirst([rival, legacy], user)).toEqual([legacy, rival]);
+    const otherAccount = { ...self, steamId: "4" };
+    expect(recordingPlayersWithUserFirst([rival, otherAccount], user)).toEqual([
+      rival,
+      otherAccount,
+    ]);
+    expect(
+      inferReplayUser(games.slice(0, 1), groupReplayPlayersBySteamId(games.slice(0, 1))),
+    ).toBeNull();
   });
 });

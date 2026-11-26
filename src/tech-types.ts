@@ -124,3 +124,12 @@ export const techCatalogStorageKey = "labatar-tech-catalog";
 export const techCatalogUpdatedEvent = "labatar-tech-catalog-updated";
 export const techSelectRecordingEvent = "labatar-select-recording";
 export const techSelectedRecordingStorageKey = "labatar-selected-recording";
+
+export function openRecordingInLibrary(recordingId: string) {
+  try {
+    localStorage.setItem(techSelectedRecordingStorageKey, recordingId);
+  } catch {
+    // The event still opens the recording in the current session.
+  }
+  window.dispatchEvent(new CustomEvent(techSelectRecordingEvent, { detail: recordingId }));
+}

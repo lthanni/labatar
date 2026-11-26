@@ -542,7 +542,7 @@ void test("candidate client uploads every MP4 byte in ordered chunks before comp
         const body = JSON.parse(options.body);
         assert.equal(body.fileSize, bytes.length);
         assert.equal(body.fileName, "combo.mp4");
-        assert.deepEqual(body.combo, { id: "aang-5b" });
+        assert.deepEqual(body.combo, { id: "aang-5b", route: "5B > 236A" });
         assert.deepEqual(body.processedInput, processedInput);
         assert.equal(body.inputFacing, "right");
         assert.equal(body.originCandidateId, originCandidateId);
@@ -572,7 +572,7 @@ void test("candidate client uploads every MP4 byte in ordered chunks before comp
     };
     const result = await submitComboCandidate({
       recordingPath: filePath,
-      combo: { id: "aang-5b", route: "5B" },
+      combo: { id: "aang-5b", route: "5B > 236A" },
       processedInput,
       inputFacing: "right",
       originCandidateId,
@@ -592,6 +592,33 @@ void test("candidate client uploads every MP4 byte in ordered chunks before comp
     );
   } finally {
     global.fetch = previousFetch;
+    await fs.promises.rm(folder, { recursive: true, force: true });
+  }
+});
+
+void test("candidate client rejects oversized processed inputs instead of omitting them", async () => {
+  const folder = await fs.promises.mkdtemp(path.join(os.tmpdir(), "labatar-candidate-size-"));
+  const filePath = path.join(folder, "combo.mp4");
+  await fs.promises.writeFile(filePath, Buffer.from("mp4"));
+  let uploadRequests = 0;
+  try {
+    await assert.rejects(
+      submitComboCandidate({
+        recordingPath: filePath,
+        combo: { id: "aang-5b", route: "5B" },
+        processedInput: { large: "x".repeat(512 * 1024) },
+        inputFacing: "right",
+        ses: {
+          async fetch(_url, options) {
+            if ((options.method ?? "GET") === "POST") uploadRequests += 1;
+            return Response.json({ allowed: true });
+          },
+        },
+      }),
+      /processed inputs are too large/,
+    );
+    assert.equal(uploadRequests, 0);
+  } finally {
     await fs.promises.rm(folder, { recursive: true, force: true });
   }
 });

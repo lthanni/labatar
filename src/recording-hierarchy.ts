@@ -5,6 +5,60 @@ export type RecordingDisplayRow = {
   depth: number;
 };
 
+export function recordingMatchesSearch(
+  recording: RecordedVideo,
+  query: string,
+  includePlayerNames: boolean,
+  byId: ReadonlyMap<string, RecordedVideo>,
+): boolean {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return true;
+  const matches = (value: string | null | undefined) =>
+    Boolean(value?.toLocaleLowerCase().includes(needle));
+  if (matches(recording.name)) return true;
+  if (!includePlayerNames) return false;
+  const seen = new Set<string>();
+  let current: RecordedVideo | undefined = recording;
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    if (current.portraitMatchup?.players.some((player) => matches(player.playerName))) return true;
+    if (
+      matches(current.metadata?.player1) ||
+      matches(current.metadata?.player2) ||
+      matches(current.metadata?.player) ||
+      matches(current.metadata?.opponent)
+    ) {
+      return true;
+    }
+    if (
+      current.games.some(
+        (game) =>
+          matches(game.replay?.player1) ||
+          matches(game.replay?.player2) ||
+          matches(game.metadata?.player1) ||
+          matches(game.metadata?.player2) ||
+          matches(game.metadata?.player) ||
+          matches(game.metadata?.opponent),
+      )
+    ) {
+      return true;
+    }
+    if (
+      current.replays.some(({ replay }) => {
+        if (!replay || typeof replay !== "object") return false;
+        const players = replay as { player1?: unknown; player2?: unknown };
+        return [players.player1, players.player2].some(
+          (player) => typeof player === "string" && matches(player),
+        );
+      })
+    ) {
+      return true;
+    }
+    current = current.clip ? byId.get(current.clip.sourceRecordingId) : undefined;
+  }
+  return false;
+}
+
 export function recordingInheritedTags(
   recording: RecordedVideo,
   byId: ReadonlyMap<string, RecordedVideo>,
@@ -25,6 +79,18 @@ export function recordingInheritedTags(
     current = current.clip ? byId.get(current.clip.sourceRecordingId) : undefined;
   }
   return tags;
+}
+
+export function isInRecordingsLibrary(recording: RecordedVideo): boolean {
+  return !recording.moveTake && !recording.id.startsWith("moves/");
+}
+
+export function isF10Clip(recording: RecordedVideo): boolean {
+  return recording.f10Clip === true || Number.isFinite(recording.clip?.manualChapterStartMs);
+}
+
+export function isPendingF10Clip(recording: RecordedVideo): boolean {
+  return isF10Clip(recording) && recording.f10ClipTrimmedAndRenamed !== true;
 }
 
 export function recordingLibraryTab(

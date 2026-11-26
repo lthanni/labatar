@@ -33,6 +33,8 @@ function buildClipExportFfmpegArgs({ sourcePath, startTime, duration, outputPath
     "+faststart",
     "-avoid_negative_ts",
     "make_zero",
+    "-f",
+    "mp4",
     outputPath,
   ];
 }

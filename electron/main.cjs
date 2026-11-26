@@ -16,7 +16,7 @@ const fs = require("node:fs");
 const readline = require("node:readline");
 const { createHash, randomUUID } = require("node:crypto");
 const { execFile, spawn } = require("node:child_process");
-const { promisify } = require("node:util");
+const { isDeepStrictEqual, promisify } = require("node:util");
 const { performance } = require("node:perf_hooks");
 const { deflateSync } = require("node:zlib");
 const { autoUpdater } = require("electron-updater");
@@ -28,8 +28,15 @@ const {
   addGameChaptersToMp4,
   buildChapterMetadata,
   probeChapters,
+  probeMedia,
 } = require("./game-chapters.cjs");
 const { buildClipExportFfmpegArgs } = require("./clip-export.cjs");
+const {
+  applyClipParentReplacement,
+  replacementFolderPrefix,
+  validateClipParentSelections,
+} = require("./clip-parent-replacement.cjs");
+const { buildRecordingCaption, exportGuideVideo } = require("./guide-video-export.cjs");
 const {
   buildComboInputOverlayAss,
   buildComboInputVideoFilter,
@@ -43,13 +50,27 @@ const {
   planRecordingTrim,
   replaceTrimmedFiles,
 } = require("./clip-trim.cjs");
-const { createMissingManualChapterClips } = require("./manual-chapter-clips.cjs");
+const {
+  createMissingManualChapterClips,
+  isManualChapterClip,
+  manualChapterClipState,
+} = require("./manual-chapter-clips.cjs");
 const { noGameStartedRecordingBaseName } = require("./automatic-recording-outcome.cjs");
 const { normalizeYouTubeVideoUrl, readYouTubeVideoUrl } = require("./recording-youtube.cjs");
 const { replaceLocalRecordingWithYouTube } = require("./youtube-recording-replacement.cjs");
 const { createYouTubeUploadService } = require("./youtube-upload.cjs");
+const { createGuideVideoLibrary } = require("./guide-video-library.cjs");
+const { stageGuideVideo, editorRequest: guideEditorRequest } = require("./guide-publications.cjs");
+const { inspectRecordingDirectory, copyRecordingDirectory } = require("./recording-directory.cjs");
+const {
+  combineSetRecordings,
+  splitSetRecording,
+  sourceIdsHiddenByCombinations,
+} = require("./set-combinations.cjs");
 const { requireYouTubeUploadAccess } = require("./youtube-access.cjs");
 const { publishCombo, unpublishCombo, isCatalogOwner } = require("./catalog-publisher.cjs");
+const { publishCatalogTech, unpublishCatalogPlayer } = require("./catalog-tech-publisher.cjs");
+const { getCatalogBackend, setCatalogBackend } = require("./catalog-backend.cjs");
 const {
   candidateServiceStatus,
   requestComboUploadAccess,
@@ -64,6 +85,7 @@ const {
   previewComboCandidate,
 } = require("./combo-candidates.cjs");
 const {
+  pendingReplayTimeoutMs,
   takePendingReplayMatch,
   replayMatchesGame,
   replayRoundScore,
@@ -74,7 +96,7 @@ const {
 } = require("./lobbyless-recording.cjs");
 const { normalizeRendererSnapshot, summarizeProcessMetric } = require("./renderer-profile.cjs");
 const { createRecordingResponse, getMediaStreamMetrics } = require("./recording-media.cjs");
-const { importComboMp4 } = require("./recording-import.cjs");
+const { importComboMp4, importMp4 } = require("./recording-import.cjs");
 const { importReplays } = require("./replay-import.cjs");
 const { importDiscordReplayUrl } = require("./discord-replay-import.cjs");
 const supportMap = require("./support-map.json");
@@ -84,12 +106,14 @@ const { createMoveCatalogStore } = require("./move-catalog.cjs");
 const { validateCapturedMoveTake } = require("./move-take-validation.cjs");
 const { createAutomaticMoveRunner } = require("./automatic-move-runner.cjs");
 const { createTrainingInputClient } = require("./training-input-client.cjs");
+const { createLabbingSession } = require("./labbing.cjs");
 const { startComboInputClient } = require("./combo-input-client.cjs");
+const { detectComboInputButton } = require("./combo-input-button-detection.cjs");
 const {
-  createComboInputCapture,
-  playerOnePadBindings,
-  trimComboInputCapture,
-} = require("./combo-input-timeline.cjs");
+  DEFAULT_COMBO_INPUT_BINDINGS,
+  validateComboInputBindings,
+} = require("./combo-input-bindings.cjs");
+const { createComboInputCapture, trimComboInputCapture } = require("./combo-input-timeline.cjs");
 const {
   comboInputEditsPath,
   ensureOriginalComboInput,
@@ -159,6 +183,7 @@ const processingConfigurationStore = () =>
 const moveCatalogStore = () => createMoveCatalogStore(app.getPath("userData"));
 const replayStagingStore = () => createReplayStagingStore(app.getPath("userData"));
 const youtubeUploader = createYouTubeUploadService({ app, safeStorage, shell });
+const guideVideoLibrary = createGuideVideoLibrary(app.getPath("userData"));
 const execFileAsync = promisify(execFile);
 
 function startupDiagnosticLogFile() {
@@ -306,6 +331,7 @@ const {
   legacySceneToggles,
   sceneTogglesFromItems,
   updateSceneToggles,
+  setCaptureVideo,
   disableAutomaticPressureFramebar,
 } = require("./obs-scene-toggles.cjs");
 const {
@@ -323,6 +349,30 @@ const productionObsRecordDirectory = () =>
   path.join(app.getPath("videos"), "Labatar", "recordings");
 const defaultObsRecordDirectory = () =>
   isDev ? path.resolve(__dirname, "..", ".dev", "recordings") : productionObsRecordDirectory();
+const sharedRecordDirectoryFile = () =>
+  path.join(app.getPath("appData"), "Labatar", "recording-location.json");
+
+function readSharedRecordDirectory() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(sharedRecordDirectoryFile(), "utf8"));
+    return typeof saved.recordDirectory === "string" && path.isAbsolute(saved.recordDirectory)
+      ? saved.recordDirectory
+      : null;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    if (error instanceof SyntaxError) {
+      console.warn("Ignoring invalid shared recording location:", error.message);
+      return null;
+    }
+    throw error;
+  }
+}
+
+function saveSharedRecordDirectory(recordDirectory) {
+  const filePath = sharedRecordDirectoryFile();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify({ recordDirectory }, null, 2), "utf8");
+}
 
 function isDevelopmentObsRecordDirectory(directory) {
   const segments = path.resolve(directory).split(path.sep).filter(Boolean);
@@ -362,7 +412,6 @@ function setRecordingWork(id, patch) {
 function clearRecordingWork(id) {
   if (recordingWork.delete(id)) sendRecordingWork();
 }
-const pendingReplayTimeoutMs = 120_000;
 let recordingDiagnosticQueue = Promise.resolve();
 let obsState = {
   status: "disconnected",
@@ -418,7 +467,8 @@ function getObsSettings() {
     typeof saved.recordDirectory === "string" && saved.recordDirectory.trim()
       ? saved.recordDirectory.trim()
       : null;
-  const recordDirectory =
+  const sharedRecordDirectory = readSharedRecordDirectory();
+  const localRecordDirectory =
     isDev &&
     (!savedRecordDirectory ||
       path.resolve(savedRecordDirectory) === path.resolve(productionObsRecordDirectory()))
@@ -426,11 +476,19 @@ function getObsSettings() {
       : !isDev && savedRecordDirectory && isDevelopmentObsRecordDirectory(savedRecordDirectory)
         ? productionObsRecordDirectory()
         : (savedRecordDirectory ?? defaultObsRecordDirectory());
+  const recordDirectory =
+    sharedRecordDirectory && saved.sharedRecordDirectoryApplied === sharedRecordDirectory
+      ? sharedRecordDirectory
+      : localRecordDirectory;
   return {
     host: typeof saved.host === "string" && saved.host.trim() ? saved.host.trim() : "127.0.0.1",
     port: Number.isInteger(Number(saved.port)) ? Number(saved.port) : 4455,
     profileName: isLabatarOwnedName(savedProfileName) ? savedProfileName : defaultObsProfileName,
     recordDirectory,
+    sharedRecordDirectoryApplied:
+      typeof saved.sharedRecordDirectoryApplied === "string"
+        ? saved.sharedRecordDirectoryApplied
+        : null,
   };
 }
 
@@ -482,6 +540,10 @@ function canSendToRenderer() {
     !mainWindow.webContents.isCrashed(),
   );
 }
+
+const labbing = createLabbingSession((state) => {
+  if (canSendToRenderer()) mainWindow.webContents.send("labbing:state", state);
+});
 
 function sendObsState() {
   if (!canSendToRenderer()) return;
@@ -536,9 +598,7 @@ function getObsProfileTarget(request = {}) {
   }
   return {
     profileName,
-    recordDirectory:
-      String(request.recordDirectory ?? settings.recordDirectory).trim() ||
-      settings.recordDirectory,
+    recordDirectory: settings.recordDirectory,
   };
 }
 
@@ -614,6 +674,7 @@ async function refreshObsState(client = getObsClient()) {
       client,
       sceneCollections?.currentSceneCollectionName,
     );
+    if (obsClient !== client) throw new Error("OBS connection superseded.");
     setObsState({
       status: "connected",
       error: null,
@@ -802,7 +863,7 @@ function armMoveCapture(request = {}) {
     throw new Error("The selected Tech move has an invalid id.");
   }
   if (
-    !/^(?:j\.)?(?:214|236|22|[1-9])?(?:\[(?:EX|SUP|A|B|C|F|X)\]|EX|SUP|TH|AA|A|B|C|F|X)$/i.test(
+    !/^(?:j\.)?(?:214(?:78?)?|236(?:98?)?|22|[1-9])?(?:\[(?:EX|SUP|A|B|C|F|X)\]|EX|SUP|TH|AA|A|B|C|F|X)$/i.test(
       moveInput,
     )
   ) {
@@ -1130,6 +1191,8 @@ function launchAutomaticMoveRun(resume = false) {
 }
 
 async function startAutomaticMoveRun(request = {}) {
+  if (labbing.getState().status !== "off")
+    throw new Error("Turn off P2 Recovery Mode before starting automatic move capture.");
   await requireDevBlackoutCapture(request.variantId);
   const existing = loadAutomaticMoveRun();
   if (existing && ["running", "countdown", "paused"].includes(existing.status)) {
@@ -1171,6 +1234,8 @@ async function startAutomaticMoveRun(request = {}) {
   if (obsState.videoSettings?.fpsNumerator !== 60 || obsState.videoSettings?.fpsDenominator !== 1) {
     throw new Error("The managed OBS profile must report 60 fps before move capture.");
   }
+  if (labbing.getState().status !== "off")
+    throw new Error("Turn off P2 Recovery Mode before starting automatic move capture.");
   automaticMoveRunner = null;
   automaticMoveRun = {
     runId: randomUUID(),
@@ -1860,7 +1925,19 @@ function recordAutomaticMatchEnd(match, reason) {
   game.endReason = reason;
 }
 
-async function startObsRecording(metadata, setup = {}, options = {}) {
+// Source changes and recording starts must not overlap while OBS applies scene items.
+let obsSceneOperation = Promise.resolve();
+function runObsSceneOperation(operation) {
+  const result = obsSceneOperation.then(operation);
+  obsSceneOperation = result.catch(() => undefined);
+  return result;
+}
+
+function startObsRecording(metadata, setup = {}, options = {}) {
+  return runObsSceneOperation(() => startObsRecordingInScene(metadata, setup, options));
+}
+
+async function startObsRecordingInScene(metadata, setup, options) {
   const client = getObsClient();
   const reusePreparedProfile = options.reusePreparedProfile === true;
   const source = options.manual ? "manual" : "automatic";
@@ -1993,11 +2070,7 @@ async function startComboObsRecording(setup = {}) {
     throw new Error("Disarm the move take before recording a combo lab session.");
   if (obsState.recording.active || activeObsRecording)
     throw new Error("Stop the current OBS recording first.");
-  const gameRoot = getReplayFolder();
-  const configPath = gameRoot ? path.join(gameRoot, "data", "button_config.ini") : null;
-  const bindings = configPath
-    ? playerOnePadBindings(await fs.promises.readFile(configPath, "utf8").catch(() => ""))
-    : {};
+  const bindings = getComboInputBindings();
   const rawStates = [];
   const client = await startComboInputClient({ onState: (state) => rawStates.push(state) });
   const comboInput = {
@@ -2427,7 +2500,8 @@ async function setAutomaticRecordingEnabled(enabled) {
   return publicObsState();
 }
 
-async function connectToObs(request = {}) {
+async function connectToObs(request = {}, { startup = false } = {}) {
+  if (obsState.status === "connecting") throw new Error("OBS is already connecting.");
   const settings = getObsSettings();
   const host = String(request.host ?? settings.host).trim() || settings.host;
   const port = Number(request.port ?? settings.port);
@@ -2525,18 +2599,34 @@ async function connectToObs(request = {}) {
     setObsState({ error: error?.message ?? "OBS connection error." });
   });
 
-  try {
+  const connectAndRefresh = async () => {
     await client.connect(`ws://${host}:${port}`, password);
     if (obsClient !== client || token !== obsConnectionToken)
       throw new Error("OBS connection superseded.");
-    const currentSettings = readSettings();
-    writeSettings({
-      ...currentSettings,
-      obs: { ...getObsSettings(), host, port },
-    });
-    if (rememberPassword && providedPassword) saveObsPassword(providedPassword);
-    if (!rememberPassword) clearStoredObsPassword();
+    if (!startup) {
+      const currentSettings = readSettings();
+      writeSettings({
+        ...currentSettings,
+        obs: { ...getObsSettings(), host, port },
+      });
+      if (rememberPassword && providedPassword) saveObsPassword(providedPassword);
+      if (!rememberPassword) clearStoredObsPassword();
+    }
     await refreshObsState(client);
+  };
+
+  let timer;
+  try {
+    if (startup) {
+      await Promise.race([
+        connectAndRefresh(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("OBS connection timed out.")), 5_000);
+        }),
+      ]);
+    } else {
+      await connectAndRefresh();
+    }
     if (obsState.automation.enabled && matchLogWatcher?.lobbyId) {
       void handleAutomaticLobbyStarted({ lobbyId: matchLogWatcher.lobbyId, recovered: true });
     } else if (obsState.automation.enabled && matchLogWatcher?.currentMatch) {
@@ -2544,18 +2634,33 @@ async function connectToObs(request = {}) {
     }
     return publicObsState();
   } catch (error) {
-    invalidatePreparedObsProfile();
-    if (obsClient === client) obsClient = null;
-    setObsState({ status: "error", error: obsErrorMessage(error) });
+    if (token === obsConnectionToken) {
+      invalidatePreparedObsProfile();
+      obsClient = null;
+      setObsState({ status: startup ? "disconnected" : "error", error: obsErrorMessage(error) });
+    }
     await client.disconnect().catch(() => undefined);
     throw error;
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+async function isObsAppRunning() {
+  if (process.platform !== "win32") return false;
+  const { stdout } = await execFileAsync(
+    "tasklist",
+    ["/FI", "IMAGENAME eq obs64.exe", "/FO", "CSV", "/NH"],
+    { windowsHide: true },
+  );
+  return /^"obs64\.exe",/im.test(stdout);
 }
 
 async function openObsApp() {
   if (process.platform !== "win32") {
     throw new Error("Opening OBS from Labatar is currently supported on Windows only.");
   }
+  if (await isObsAppRunning()) return true;
 
   const installRoots = [
     process.env.ProgramW6432,
@@ -2705,6 +2810,22 @@ async function ensureLabatarVideoSettings(client, version, dimensions = null) {
   return updated;
 }
 
+async function setObsRecordDirectory(client, version, recordDirectory) {
+  if (!version.availableRequests?.includes("SetRecordDirectory")) {
+    throw new Error("This OBS WebSocket version cannot change the recording folder.");
+  }
+  await client.call("SetRecordDirectory", { recordDirectory });
+  if (version.availableRequests.includes("GetRecordDirectory")) {
+    const actual = (await client.call("GetRecordDirectory")).recordDirectory;
+    if (
+      typeof actual !== "string" ||
+      path.resolve(actual).toLowerCase() !== path.resolve(recordDirectory).toLowerCase()
+    ) {
+      throw new Error(`OBS did not accept the recording folder: ${recordDirectory}`);
+    }
+  }
+}
+
 async function prepareObsProfile(request = {}) {
   const client = getObsClient();
   invalidatePreparedObsProfile();
@@ -2723,9 +2844,7 @@ async function prepareObsProfile(request = {}) {
   }
   await fs.promises.mkdir(recordDirectory, { recursive: true });
   const version = current.version;
-  if (version.availableRequests?.includes("SetRecordDirectory")) {
-    await client.call("SetRecordDirectory", { recordDirectory });
-  }
+  await setObsRecordDirectory(client, version, recordDirectory);
   await ensureLabatarVideoSettings(client, version);
   const currentSettings = readSettings();
   writeSettings({
@@ -2769,9 +2888,7 @@ async function setupLabatarObsScenes(request = {}) {
 
   await fs.promises.mkdir(recordDirectory, { recursive: true });
   const version = current.version;
-  if (version.availableRequests?.includes("SetRecordDirectory")) {
-    await client.call("SetRecordDirectory", { recordDirectory });
-  }
+  await setObsRecordDirectory(client, version, recordDirectory);
 
   const inputKinds = await client.call("GetInputKindList");
   const availableInputKinds = new Set(inputKinds.inputKinds ?? []);
@@ -2829,12 +2946,18 @@ async function setupLabatarObsScenes(request = {}) {
         sceneName: selectedSceneName,
       });
       if ((selectedItems.sceneItems ?? []).length) {
-        desiredToggles = sceneTogglesFromItems(selectedItems.sceneItems);
+        // Custom display sources in legacy scenes stay in their original scene.
+        desiredToggles = {
+          ...sceneTogglesFromItems(selectedItems.sceneItems),
+          monitorCapture: false,
+        };
       }
     }
     await client.call("CreateScene", { sceneName: gameScene });
   }
-  if (obsState.automation.enabled) desiredToggles.pressureFramebar = false;
+  if (obsState.automation.enabled || desiredToggles.monitorCapture) {
+    desiredToggles.pressureFramebar = false;
+  }
   await client.call("SetCurrentProgramScene", { sceneName: gameScene });
 
   async function ensureInput(sceneName, inputName, inputKind, inputSettings) {
@@ -2898,7 +3021,9 @@ async function setupLabatarObsScenes(request = {}) {
 
   await ensureInput(gameScene, gameInputName, "game_capture", gameCaptureSettings);
   await ensureLabatarVideoSettings(client, version);
-  const outputResolution = await resizeOutputToSourceSize(gameScene, gameInputName);
+  const outputResolution = desiredToggles.monitorCapture
+    ? null
+    : await resizeOutputToSourceSize(gameScene, gameInputName);
   if (separateGameAudio) {
     await ensureInput(
       gameScene,
@@ -3002,7 +3127,7 @@ async function setupLabatarObsScenes(request = {}) {
     });
     const enabled =
       item === baseItem
-        ? true
+        ? !desiredToggles.monitorCapture
         : item === overlayItem
           ? Boolean(overlayTransform) && desiredToggles.pressureFramebar
           : item.sourceName === gameAudioInputName
@@ -3019,17 +3144,25 @@ async function setupLabatarObsScenes(request = {}) {
   await client.call("SetCurrentProgramScene", { sceneName: gameScene });
 
   const currentSettings = readSettings();
+  const previousRecordDirectory = getObsSettings().recordDirectory;
   writeSettings({
     ...currentSettings,
     obs: { ...getObsSettings(), profileName, recordDirectory },
   });
   const refreshed = await refreshObsState(client);
   rememberPreparedObsProfile({ profileName, recordDirectory }, refreshed);
+  if (
+    path.resolve(previousRecordDirectory) !== path.resolve(recordDirectory) &&
+    canSendToRenderer()
+  ) {
+    mainWindow.webContents.send("recordings:changed");
+  }
   return {
     profileName,
     recordDirectory,
     sceneCollectionName: labatarSceneCollectionName,
     scenes: [gameScene],
+    monitorCapture: desiredToggles.monitorCapture,
     gameAudioMode: separateGameAudio ? "separate" : "window-capture",
     outputResolution,
     pressureFramebarReady: Boolean(overlayTransform),
@@ -3044,6 +3177,9 @@ function watchElectronFiles() {
   const watchedFiles = [
     __filename,
     path.join(__dirname, "preload.cjs"),
+    path.join(__dirname, "guide-video-export.cjs"),
+    path.join(__dirname, "clip-parent-replacement.cjs"),
+    path.join(__dirname, "game-chapters.cjs"),
     path.join(__dirname, "match-watcher.cjs"),
     path.join(__dirname, "artwork-extractor.ts"),
     path.join(__dirname, "support-map.json"),
@@ -3071,6 +3207,17 @@ function readSettings() {
 function writeSettings(settings) {
   fs.mkdirSync(app.getPath("userData"), { recursive: true });
   fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
+}
+
+function getComboInputBindings() {
+  try {
+    const saved = readSettings().comboInputBindings;
+    return saved === undefined
+      ? { ...DEFAULT_COMBO_INPUT_BINDINGS }
+      : validateComboInputBindings(saved);
+  } catch {
+    return { ...DEFAULT_COMBO_INPUT_BINDINGS };
+  }
 }
 
 function getCaptureSettings() {
@@ -3840,8 +3987,29 @@ function cleanReplayName(value) {
 
 ipcMain.handle("app:get-version", () => app.getVersion());
 ipcMain.handle("app:open-discord", () => openDiscordServer());
+ipcMain.handle("app:open-player-link", (event, value) => {
+  if (event.sender !== mainWindow?.webContents) throw new Error("Invalid player link request.");
+  if (typeof value !== "string" || value.length > 2048 || !URL.canParse(value))
+    throw new Error("Invalid player link.");
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.username || url.password)
+    throw new Error("Player links must use HTTPS without embedded credentials.");
+  return shell.openExternal(url.href);
+});
 
 ipcMain.handle("capture:get-state", () => publicCaptureState());
+ipcMain.handle("labbing:get-state", () => labbing.getState());
+ipcMain.handle("labbing:set-recovery", (event, request) => {
+  if (event.sender !== mainWindow?.webContents) throw new Error("Invalid Labbing request.");
+  if (request?.enabled === false) return labbing.stop();
+  if (request?.enabled !== true) throw new Error("Choose whether to enable P2 Recovery Mode.");
+  if (automaticMoveRunIsOpen()) throw new Error("Finish or cancel automatic move capture first.");
+  const gameRoot = getReplayFolder();
+  if (!gameRoot || !fs.existsSync(path.join(gameRoot, "data", "button_config.ini"))) {
+    throw new Error("Select the game installation folder with Player 2 controls in Settings.");
+  }
+  return labbing.startRecovery(request.settings, gameRoot);
+});
 ipcMain.handle("capture:set-settings", (_, request) => {
   const current = getCaptureSettings();
   const hotkey = String(request?.hotkey ?? current.hotkey).trim();
@@ -3896,7 +4064,9 @@ ipcMain.handle("capture:set-auto-clip-manual-chapters", (_, request) => {
 });
 
 ipcMain.handle("obs:get-state", () => publicObsState());
-ipcMain.handle("obs:get-settings", () => {
+ipcMain.handle("obs:get-app-state", () => isObsAppRunning());
+ipcMain.handle("obs:get-settings", async () => {
+  await adoptSharedRecordingDirectory();
   const settings = getObsSettings();
   return {
     host: settings.host,
@@ -3905,6 +4075,136 @@ ipcMain.handle("obs:get-settings", () => {
     recordDirectory: settings.recordDirectory,
     passwordSaved: hasStoredObsPassword(),
   };
+});
+async function ensureRecordingDirectoryChangeIdle() {
+  if (
+    obsState.recording.active ||
+    obsState.automation.enabled ||
+    activeObsRecording ||
+    pendingAutoRecordings.length > 0 ||
+    replayAttachmentsInProgress.size > 0 ||
+    recordingWork.size > 0 ||
+    clipTrimJobs.size > 0 ||
+    gameChapterJobs.size > 0 ||
+    manualChapterClipJobs.size > 0
+  ) {
+    throw new Error(
+      "Wait for recording and recording processing to finish before changing folders.",
+    );
+  }
+  if (obsClient && (await obsClient.call("GetRecordStatus")).outputActive) {
+    throw new Error("Stop the active OBS recording before changing folders.");
+  }
+}
+
+async function copyRecordingDirectoryIfChosen(source, destination) {
+  const inventory = await inspectRecordingDirectory(source, destination);
+  if (!inventory.files.length && !inventory.directories.length) return true;
+  const size = new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    style: "unit",
+    unit: "byte",
+    unitDisplay: "narrow",
+  }).format(inventory.bytes);
+  const choice = await dialog.showMessageBox(mainWindow, {
+    type: "question",
+    title: "Change recording folder",
+    message: "Copy existing recordings to the new folder?",
+    detail: `${inventory.files.length} files (${size}) are in the current folder. Copying includes videos, clips, sidecars, and nested folders. The originals stay in place. Existing destination files are never overwritten.`,
+    buttons: ["Copy files and switch", "Switch without copying", "Cancel"],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  });
+  if (choice.response === 2) return false;
+  if (choice.response === 0) await copyRecordingDirectory(source, destination, inventory);
+  return true;
+}
+
+let deferredSharedRecordDirectory = null;
+let sharedRecordDirectoryAdoption = null;
+function adoptSharedRecordingDirectory() {
+  if (sharedRecordDirectoryAdoption) return sharedRecordDirectoryAdoption;
+  sharedRecordDirectoryAdoption = (async () => {
+    const shared = readSharedRecordDirectory();
+    if (!shared || shared === deferredSharedRecordDirectory) return;
+    const current = getObsSettings().recordDirectory;
+    if (current === shared) return;
+    try {
+      await ensureRecordingDirectoryChangeIdle();
+      if (!(await copyRecordingDirectoryIfChosen(current, shared))) {
+        deferredSharedRecordDirectory = shared;
+        return;
+      }
+      await ensureRecordingDirectoryChangeIdle();
+      if (readSharedRecordDirectory() !== shared) return;
+      const saved = readSettings();
+      writeSettings({
+        ...saved,
+        obs: {
+          ...getObsSettings(),
+          recordDirectory: shared,
+          sharedRecordDirectoryApplied: shared,
+        },
+      });
+      if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+    } catch (error) {
+      console.warn("Could not adopt shared recording folder:", obsErrorMessage(error));
+      setObsState({ error: `Could not change recording folder: ${obsErrorMessage(error)}` });
+    }
+  })().finally(() => {
+    sharedRecordDirectoryAdoption = null;
+  });
+  return sharedRecordDirectoryAdoption;
+}
+
+ipcMain.handle("obs:select-record-directory", async () => {
+  await ensureRecordingDirectoryChangeIdle();
+  const configuredDirectory = getObsSettings().recordDirectory;
+  const sharedDirectory = readSharedRecordDirectory();
+  const defaultPath =
+    sharedDirectory && fs.existsSync(sharedDirectory)
+      ? sharedDirectory
+      : fs.existsSync(configuredDirectory)
+        ? configuredDirectory
+        : app.getPath("videos");
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Choose recording folder",
+    properties: ["openDirectory", "createDirectory"],
+    defaultPath,
+  });
+  const selectedDirectory = result.canceled ? null : (result.filePaths[0] ?? null);
+  if (!selectedDirectory) return null;
+  if (
+    path.resolve(selectedDirectory).toLowerCase() ===
+    path.resolve(configuredDirectory).toLowerCase()
+  ) {
+    saveSharedRecordDirectory(configuredDirectory);
+    const saved = readSettings();
+    writeSettings({
+      ...saved,
+      obs: { ...getObsSettings(), sharedRecordDirectoryApplied: configuredDirectory },
+    });
+    return configuredDirectory;
+  }
+  if (!(await copyRecordingDirectoryIfChosen(configuredDirectory, selectedDirectory))) return null;
+  await ensureRecordingDirectoryChangeIdle();
+  if (getObsSettings().recordDirectory !== configuredDirectory) {
+    throw new Error("The recording folder changed while copying. Choose the folder again.");
+  }
+  saveSharedRecordDirectory(selectedDirectory);
+  deferredSharedRecordDirectory = null;
+  const currentSettings = readSettings();
+  writeSettings({
+    ...currentSettings,
+    obs: {
+      ...getObsSettings(),
+      recordDirectory: selectedDirectory,
+      sharedRecordDirectoryApplied: selectedDirectory,
+    },
+  });
+  if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+  return selectedDirectory;
 });
 ipcMain.handle("obs:connect", async (_, request) => connectToObs(request));
 ipcMain.handle("obs:open-app", () => openObsApp());
@@ -3939,7 +4239,9 @@ ipcMain.handle("obs:prepare-profile", async (_, request) => {
     created: result.created,
   };
 });
-ipcMain.handle("obs:setup-scenes", async (_, request) => setupLabatarObsScenes(request));
+ipcMain.handle("obs:setup-scenes", (_, request) =>
+  runObsSceneOperation(() => setupLabatarObsScenes(request)),
+);
 ipcMain.handle("obs:set-scene", async (_, sceneName) => {
   const requestedSceneName = String(sceneName ?? "");
   if (requestedSceneName !== labatarGameSceneName) {
@@ -3950,7 +4252,7 @@ ipcMain.handle("obs:set-scene", async (_, sceneName) => {
   await refreshObsState(client);
   return publicObsState();
 });
-ipcMain.handle("obs:set-source-toggle", async (_, request) => {
+async function setObsSourceToggle(request) {
   const { key, enabled } = request ?? {};
   if (!labatarToggleKeys.includes(key) || typeof enabled !== "boolean") {
     throw new Error("Invalid OBS source toggle.");
@@ -3960,7 +4262,7 @@ ipcMain.handle("obs:set-source-toggle", async (_, request) => {
   }
   const client = getObsClient();
   const current = await refreshObsState(client);
-  if (current.recordStatus.outputActive) {
+  if (current.recordStatus.outputActive || obsState.recording.active || activeObsRecording) {
     throw new Error("Stop the active OBS recording before changing capture sources.");
   }
   if (current.sceneCollections?.currentSceneCollectionName !== labatarSceneCollectionName) {
@@ -3969,6 +4271,22 @@ ipcMain.handle("obs:set-source-toggle", async (_, request) => {
   const { sceneItems = [] } = await client.call("GetSceneItemList", {
     sceneName: labatarGameSceneName,
   });
+  if (key === "monitorCapture") {
+    if (
+      (current.currentScene?.sceneName ?? current.currentScene?.currentProgramSceneName) !==
+      labatarGameSceneName
+    ) {
+      throw new Error("Select the Labatar - Game scene before changing the video source.");
+    }
+    try {
+      await setCaptureVideo(client, sceneItems, enabled, current.videoSettings);
+    } catch (error) {
+      await refreshObsState(client).catch(() => undefined);
+      throw error;
+    }
+    await refreshObsState(client);
+    return publicObsState();
+  }
   const gameItems = pressureGameItems(sceneItems, labatarInputNames.game);
   const overlayItem = gameItems[1];
   const itemByKey = {
@@ -3980,7 +4298,9 @@ ipcMain.handle("obs:set-source-toggle", async (_, request) => {
   if (!itemByKey[key]) {
     throw new Error(`The ${key} source is unavailable. Apply Labatar OBS setup again.`);
   }
+  const previous = sceneTogglesFromItems(sceneItems);
   if (key === "pressureFramebar" && enabled) {
+    if (previous.monitorCapture) throw new Error("Select Game only to use the P2 framebar.");
     const transform = await client.call("GetSceneItemTransform", {
       sceneName: labatarGameSceneName,
       sceneItemId: overlayItem.sceneItemId,
@@ -3992,7 +4312,6 @@ ipcMain.handle("obs:set-source-toggle", async (_, request) => {
       throw new Error("Open the game and apply Labatar OBS setup to place the P2 crop.");
     }
   }
-  const previous = sceneTogglesFromItems(sceneItems);
   const next = updateSceneToggles(previous, key, enabled, {
     gameAudioAvailable: Boolean(itemByKey.gameAudio),
   });
@@ -4009,7 +4328,10 @@ ipcMain.handle("obs:set-source-toggle", async (_, request) => {
   }
   await refreshObsState(client);
   return publicObsState();
-});
+}
+ipcMain.handle("obs:set-source-toggle", (_, request) =>
+  runObsSceneOperation(() => setObsSourceToggle(request)),
+);
 ipcMain.handle("obs:start-recording", async (_, request) => {
   if (automaticMoveRunIsOpen()) {
     throw new Error("Finish or cancel the automatic move capture pass first.");
@@ -4021,6 +4343,94 @@ ipcMain.handle("obs:start-manual-recording", async (_, request) => {
 });
 ipcMain.handle("obs:start-combo-recording", async (_, request) => {
   return startComboObsRecording(request?.setup ?? {});
+});
+ipcMain.handle("obs:get-combo-input-bindings", () => getComboInputBindings());
+let activeComboBindingDetection = null;
+ipcMain.handle("obs:detect-controller-button", async (event) => {
+  if (activeComboBindingDetection)
+    throw new Error("Controller button detection is already active.");
+  const controller = new AbortController();
+  const detection = { controller, sender: event.sender };
+  activeComboBindingDetection = detection;
+  const abort = () => controller.abort();
+  event.sender.once("destroyed", abort);
+  try {
+    return await detectComboInputButton({ signal: controller.signal });
+  } finally {
+    event.sender.off("destroyed", abort);
+    if (activeComboBindingDetection === detection) activeComboBindingDetection = null;
+  }
+});
+ipcMain.handle("obs:cancel-controller-button-detection", (event) => {
+  if (activeComboBindingDetection?.sender === event.sender) {
+    activeComboBindingDetection.controller.abort();
+  }
+});
+// Exact HUD entries in the user's data_packages/hudatla.pak installation.
+const controllerBindingArtworkEntries = Object.fromEntries([
+  ...["a", "b", "c", "d"].map((letter) => [
+    `game-${letter === "d" ? "f" : letter}`,
+    `sprites~hudatla~lib~glyphs~frames~game~btn${letter}`,
+  ]),
+  ...["a", "b", "x", "y", "rb", "rt", "lb", "lt", "start", "back"].map((button, index) => [
+    `pad-${button}`,
+    `sprites~hudatla~lib~glyphs~frames~xbox~pad_btn_${index}`,
+  ]),
+  ["row", "sprites~hudatla~lib~menu_item~frames~button_config~background"],
+  ["row-focused", "sprites~hudatla~lib~menu_item~frames~button_config~backgroundp1"],
+]);
+
+async function readControllerArtworkBytes(handle, length, position) {
+  const bytes = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const result = await handle.read(bytes, offset, length - offset, position + offset);
+    if (!result.bytesRead) throw new Error("The game artwork PAK ended unexpectedly.");
+    offset += result.bytesRead;
+  }
+  return bytes;
+}
+
+// Decode only while the dialog is open; game-owned images stay outside the repository.
+ipcMain.handle("obs:get-controller-binding-artwork", async () => {
+  const gameFolder = getReplayFolder();
+  if (!gameFolder) return {};
+  const gameRoot =
+    path.basename(path.resolve(gameFolder)).toLowerCase() === "replays"
+      ? path.dirname(gameFolder)
+      : gameFolder;
+  const pakPath = path.join(gameRoot, "data_packages", "hudatla.pak");
+  let handle;
+  try {
+    handle = await fs.promises.open(pakPath, "r");
+    const stat = await handle.stat();
+    const header = await readControllerArtworkBytes(handle, 12, 0);
+    const { directoryOffset, directoryBytes } = parsePakHeader(header, stat.size);
+    const directory = await readControllerArtworkBytes(handle, directoryBytes, directoryOffset);
+    const entries = new Map(
+      parsePakDirectory(directory, stat.size).map((entry) => [entry.name, entry]),
+    );
+    const artwork = {};
+    for (const [key, stem] of Object.entries(controllerBindingArtworkEntries)) {
+      const entry = entries.get(`srcdata/munged/frames/${stem}.munged`);
+      if (!entry || entry.size > 16 * 1024 * 1024) continue;
+      const raw = await readControllerArtworkBytes(handle, entry.size, entry.offset);
+      const image = decodeMungedImage(raw);
+      const png = encodePngRgba(image.width, image.height, image.pixels, deflateSync);
+      artwork[key] = `data:image/png;base64,${Buffer.from(png).toString("base64")}`;
+    }
+    return artwork;
+  } catch (error) {
+    console.warn("Could not load controller binding artwork from the game:", error);
+    return {};
+  } finally {
+    await handle?.close();
+  }
+});
+ipcMain.handle("obs:set-combo-input-bindings", (_, request) => {
+  const bindings = validateComboInputBindings(request?.bindings);
+  writeSettings({ ...readSettings(), comboInputBindings: bindings });
+  return bindings;
 });
 ipcMain.handle("obs:stop-recording", async () => {
   if (automaticMoveRunIsOpen()) {
@@ -4412,7 +4822,7 @@ async function findRecordingFiles(folder) {
     for (const entry of entries) {
       const entryPath = path.join(currentDirectory, entry.name);
       if (entry.isDirectory()) {
-        directories.push(entryPath);
+        if (!entry.name.startsWith(replacementFolderPrefix)) directories.push(entryPath);
       } else if (
         entry.isFile() &&
         recordingExtensions.has(path.extname(entry.name).toLowerCase())
@@ -4901,6 +5311,14 @@ async function exportRecordingClip(request = {}, options = {}) {
   if (lockedPaths.some((filePath) => clipTrimJobs.has(filePath))) {
     throw new Error("Wait for recording or input editing to finish before exporting.");
   }
+  if (
+    options.caption &&
+    (gameChapterJobs.has(sourcePath) ||
+      (obsState.recording.active &&
+        [obsState.recording.outputPath, activeObsRecording?.outputPath].includes(sourcePath)))
+  ) {
+    throw new Error("Wait for the source recording to finish before adding a caption.");
+  }
   for (const filePath of lockedPaths) {
     clipExportSourceCounts.set(filePath, (clipExportSourceCounts.get(filePath) ?? 0) + 1);
   }
@@ -4946,13 +5364,19 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
     throw new Error("Unknown export mode.");
   }
 
-  const startTime = Number(request.startTime);
-  const endTime = Number(request.endTime);
+  const captionMedia = options.caption ? await probeMedia(resolveFfmpegPath(), sourcePath) : null;
+  if (captionMedia && (!captionMedia.durationMs || !captionMedia.displayAspectRatio)) {
+    throw new Error("The recording has no playable video to caption.");
+  }
+  const captionEntireVideo = options.caption && request.endTime === undefined;
+  const startTime = captionEntireVideo ? 0 : Number(request.startTime);
+  const endTime = captionEntireVideo ? captionMedia.durationMs / 1000 : Number(request.endTime);
   if (
     !Number.isFinite(startTime) ||
     !Number.isFinite(endTime) ||
     startTime < 0 ||
-    endTime <= startTime
+    endTime <= startTime ||
+    (captionMedia && endTime * 1000 > captionMedia.durationMs + 150)
   ) {
     throw new Error("The clip range is invalid.");
   }
@@ -4981,17 +5405,24 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
     "recording",
   );
   const rangeLabel = `${clipTimeForFilename(actualStart)} to ${clipTimeForFilename(endTime)}`;
-  const baseName = `${sourceStem} - ${options.inputOverlay ? "inputs" : Number.isFinite(options.manualChapterStartMs) ? "F10 clip" : "clip"} ${rangeLabel}`;
-  const outputPath = await availableRecordingPath(folder, baseName);
+  const baseName = options.caption
+    ? `${sourceStem} - captioned${captionEntireVideo ? "" : ` ${rangeLabel}`}`
+    : `${sourceStem} - ${options.inputOverlay ? "inputs" : Number.isFinite(options.manualChapterStartMs) ? "F10 clip" : "clip"} ${rangeLabel}`;
+  let outputPath = options.caption ? null : await availableRecordingPath(folder, baseName);
   const duration = endTime - startTime;
-  const subtitlePath = options.inputOverlay
-    ? path.join(folder, `.labatar-input-overlay-${randomUUID()}.ass`)
+  const subtitlePath =
+    options.inputOverlay || options.caption
+      ? path.join(folder, `.labatar-subtitles-${randomUUID()}.ass`)
+      : null;
+  const captionTempPath = options.caption
+    ? path.join(folder, `.labatar-caption-${randomUUID()}.tmp`)
     : null;
   const inputEditSourcePath = options.inputEditSourcePath ?? sourcePath;
   let overlayProcessed = null;
 
   try {
-    if (subtitlePath) {
+    let videoFilter = null;
+    if (options.inputOverlay) {
       if (!sourceManifest?.comboInputCapture) {
         throw new Error("This recording has no captured combo inputs to render.");
       }
@@ -5013,12 +5444,21 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
         duration * 1000,
       );
       await fs.promises.writeFile(subtitlePath, subtitle, { encoding: "utf8", flag: "wx" });
-    }
-    let videoFilter = null;
-    if (subtitlePath) {
       // Probe the source file rather than trusting sidecar dimensions after earlier trims.
       const { width, height } = await probeVideoDimensions(resolveFfmpegPath(), sourcePath);
       videoFilter = buildComboInputVideoFilter(width, height, path.basename(subtitlePath));
+    } else if (options.caption) {
+      const rendered = buildRecordingCaption(
+        options.caption,
+        duration * 1000,
+        captionMedia.displayAspectRatio,
+        path.basename(subtitlePath),
+      );
+      await fs.promises.writeFile(subtitlePath, rendered.subtitle, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      videoFilter = rendered.videoFilter;
     }
     await runFfmpeg(
       fast
@@ -5033,7 +5473,7 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
             sourcePath,
             startTime,
             duration,
-            outputPath,
+            outputPath: captionTempPath ?? outputPath,
             ...(videoFilter ? { videoFilter } : {}),
           }),
       subtitlePath ? { cwd: folder } : {},
@@ -5044,11 +5484,32 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
         throw new Error("The fast export did not match the selected range. Try Precise export.");
       }
     }
+    if (captionTempPath) {
+      const renderedMedia = await probeMedia(resolveFfmpegPath(), captionTempPath);
+      if (!renderedMedia.durationMs || !renderedMedia.displayAspectRatio) {
+        throw new Error("The selected range did not produce a playable captioned video.");
+      }
+      const latestSourceStat = await fs.promises.stat(sourcePath).catch(() => null);
+      if (
+        !latestSourceStat ||
+        latestSourceStat.size !== sourceStat.size ||
+        latestSourceStat.mtimeMs !== sourceStat.mtimeMs
+      ) {
+        throw new Error(
+          "The source recording changed during export. Try adding the caption again.",
+        );
+      }
+      const candidate = await availableRecordingPath(folder, baseName);
+      await fs.promises.copyFile(captionTempPath, candidate, fs.constants.COPYFILE_EXCL);
+      outputPath = candidate;
+    }
   } catch (error) {
-    await fs.promises.rm(outputPath, { force: true }).catch(() => undefined);
+    if (outputPath) await fs.promises.rm(outputPath, { force: true }).catch(() => undefined);
     throw error;
   } finally {
     if (subtitlePath) await fs.promises.rm(subtitlePath, { force: true }).catch(() => undefined);
+    if (captionTempPath)
+      await fs.promises.rm(captionTempPath, { force: true }).catch(() => undefined);
   }
 
   const outputId = path.relative(folder, outputPath).split(path.sep).join("/");
@@ -5082,6 +5543,9 @@ async function exportRecordingClipFromSource(request, options, sourcePath) {
             pressure: false,
           },
           clip,
+          ...(Number.isFinite(clip.manualChapterStartMs)
+            ? { f10Clip: true, f10ClipTrimmed: false }
+            : {}),
           inputOverlayRendered: options.inputOverlay === true,
           ...(overlayProcessed
             ? { inputOverlayEditsSha256: overlayProcessed.source.editsSha256 }
@@ -5307,6 +5771,10 @@ async function trimRecordingClip(request = {}) {
       );
     }
     const nextManifest = validateRange(actualStart);
+    if (isManualChapterClip(manifest, videoPath)) {
+      nextManifest.f10Clip = true;
+      nextManifest.f10ClipTrimmed = true;
+    }
     if (manifest.comboInputCapture) {
       if (!manifest.clip && !manifest.comboInputTrimmed) {
         await ensureOriginalComboInput(videoPath, manifest.comboInputCapture);
@@ -5482,6 +5950,11 @@ async function trimRecordingClip(request = {}) {
         lockedClipPaths.push(child.videoPath);
         const mapping = planChildClipMapping(child.manifest.clip, actualStart, endTime);
         const nextChildManifest = { ...child.manifest };
+        const f10Clip = manualChapterClipState(child.manifest, child.videoPath);
+        if (f10Clip) {
+          nextChildManifest.f10Clip = true;
+          nextChildManifest.f10ClipTrimmed = f10Clip.trimmed;
+        }
         if (mapping.detached) {
           nextChildManifest.clip = null;
         } else {
@@ -5619,12 +6092,15 @@ async function renameRecording(request = {}, updateManifest = null) {
     .then(() => true)
     .catch(() => false);
   let manifest = null;
+  let originalManifestContent = null;
   if (hasManifest) {
     try {
-      manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+      originalManifestContent = await fs.promises.readFile(manifestPath, "utf8");
+      manifest = JSON.parse(originalManifestContent);
     } catch {
       throw new Error("The recording metadata could not be read.");
     }
+    if (isManualChapterClip(manifest, currentPath)) manifest.f10Clip = true;
     updateManifest?.(manifest);
   }
   const youtubeOnly =
@@ -5663,11 +6139,13 @@ async function renameRecording(request = {}, updateManifest = null) {
   if (clipTrimJobs.has(currentPath)) throw new Error("Wait for the clip trim to finish.");
   if (!youtubeOnly) await fs.promises.rename(currentPath, availableTargetPath);
   let updatedLinkedManifests = [];
+  let renamedManifest = false;
   let renamedOriginalComboInput = false;
   let renamedComboInputEdits = false;
   try {
     if (hasManifest) {
       await fs.promises.rename(manifestPath, targetManifestPath);
+      renamedManifest = true;
       manifest.outputPath = availableTargetPath;
       manifest.outputFileName = path.basename(availableTargetPath);
       await fs.promises.writeFile(targetManifestPath, JSON.stringify(manifest, null, 2), "utf8");
@@ -5710,8 +6188,11 @@ async function renameRecording(request = {}, updateManifest = null) {
     if (!youtubeOnly) {
       await fs.promises.rename(availableTargetPath, currentPath).catch(() => undefined);
     }
-    if (hasManifest) {
-      await fs.promises.rename(targetManifestPath, manifestPath).catch(() => undefined);
+    if (renamedManifest) {
+      await fs.promises
+        .rename(targetManifestPath, manifestPath)
+        .then(() => fs.promises.writeFile(manifestPath, originalManifestContent, "utf8"))
+        .catch(() => undefined);
     }
     throw new Error(`The recording was not fully renamed: ${obsErrorMessage(error)}`);
   }
@@ -5827,6 +6308,7 @@ async function reprocessAutomaticRecordingName(request = {}) {
 async function deleteRecording(request = {}) {
   const recordingId = String(request.recordingId ?? "");
   const currentPath = resolveRecordingPath(recordingId);
+  if (clipTrimJobs.has(currentPath)) throw new Error("Wait for recording editing to finish.");
   const currentStat = await fs.promises.stat(currentPath).catch(() => null);
   if (!currentStat?.isFile()) {
     const manifest = JSON.parse(
@@ -5837,12 +6319,166 @@ async function deleteRecording(request = {}) {
     }
   }
 
+  if (clipTrimJobs.has(currentPath)) throw new Error("Wait for recording editing to finish.");
   if (currentStat?.isFile()) await fs.promises.rm(currentPath, { force: true });
   await fs.promises.rm(recordingManifestPathForVideo(currentPath), { force: true });
   await fs.promises.rm(originalComboInputPath(currentPath), { force: true });
   await fs.promises.rm(processedComboInputPath(currentPath), { force: true });
   await fs.promises.rm(comboInputEditsPath(currentPath), { force: true });
   return { id: recordingId };
+}
+
+async function replaceClipParents(pairs) {
+  if (
+    !Array.isArray(pairs) ||
+    pairs.some((pair) => typeof pair?.clipId !== "string" || typeof pair?.parentId !== "string")
+  ) {
+    throw new Error("Invalid parent replacement request.");
+  }
+  const parentIds = validateClipParentSelections(pairs);
+  const folder = path.resolve(getObsSettings().recordDirectory);
+  const paths = new Map();
+  for (const id of [...parentIds, ...pairs.map(({ clipId }) => clipId)]) {
+    paths.set(id, resolveRecordingPath(id));
+  }
+  const lockedPaths = [];
+  const lock = (filePath) => {
+    if (
+      clipTrimJobs.has(filePath) ||
+      clipExportSourceCounts.has(filePath) ||
+      gameChapterJobs.has(filePath) ||
+      manualChapterClipJobs.has(filePath) ||
+      activeObsRecording?.outputPath === filePath ||
+      (obsState.recording.active && obsState.recording.outputPath === filePath) ||
+      pendingAutoRecordings.some(({ recording }) => recording.outputPath === filePath) ||
+      [...replayAttachmentsInProgress.keys()].some((recording) => recording.outputPath === filePath)
+    ) {
+      throw new Error(`Wait for ${path.basename(filePath)} to finish recording or processing.`);
+    }
+    clipTrimJobs.add(filePath);
+    lockedPaths.push(filePath);
+  };
+  const snapshot = async (filePath) => {
+    const stat = await fs.promises.lstat(filePath).catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    if (stat && !stat.isFile())
+      throw new Error(`${path.basename(filePath)} must be a regular file.`);
+    return stat ? { filePath, stat } : null;
+  };
+  const readManifest = async (filePath) => {
+    const manifestPath = recordingManifestPathForVideo(filePath);
+    const originalContent = await fs.promises.readFile(manifestPath, "utf8").catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    try {
+      return { manifestPath, originalContent, manifest: JSON.parse(originalContent) };
+    } catch {
+      return { manifestPath, originalContent, manifest: null };
+    }
+  };
+
+  try {
+    for (const filePath of paths.values()) lock(filePath);
+    const removals = [];
+    const changes = new Map();
+    const parentTags = new Map();
+    const replacements = [];
+    const addChange = (filePath, entry) => {
+      const { manifest } = entry;
+      const inherited = parentTags.get(manifest.clip.sourceRecordingId);
+      const tags = normalizeRecordingTags(manifest.tags, manifest.metadata);
+      const f10Clip = manualChapterClipState(manifest, filePath);
+      changes.set(filePath, {
+        ...entry,
+        manifest: {
+          ...manifest,
+          clip: null,
+          ...(f10Clip ? { f10Clip: true, f10ClipTrimmed: f10Clip.trimmed } : {}),
+          ...(manifest.comboInputCapture ? { comboInputTrimmed: true } : {}),
+          tags: {
+            match: tags.match.length ? tags.match : inherited.match,
+            lab: [...new Set([...tags.lab, ...inherited.lab])],
+            combo: tags.combo || inherited.combo,
+            pressure: tags.pressure || inherited.pressure,
+          },
+        },
+      });
+    };
+    for (const { clipId, parentId, clipModifiedAt, parentModifiedAt } of pairs) {
+      const clipPath = paths.get(clipId);
+      const parentPath = paths.get(parentId);
+      const [clipFile, parentFile, clipEntry, parentEntry] = await Promise.all([
+        snapshot(clipPath),
+        snapshot(parentPath),
+        readManifest(clipPath),
+        readManifest(parentPath),
+      ]);
+      const clip = clipEntry.manifest?.clip;
+      if (!clipFile || !parentFile || clip?.sourceRecordingId !== parentId) {
+        throw new Error("Both the clip and its current parent must be available as local files.");
+      }
+      if (
+        clipFile.stat.mtimeMs !== clipModifiedAt ||
+        parentFile.stat.mtimeMs !== parentModifiedAt
+      ) {
+        throw new Error("A recording changed since confirmation. Refresh the list and try again.");
+      }
+      const parent = parentEntry.manifest;
+      if (parentEntry.originalContent !== null && !parent) {
+        throw new Error(`The metadata for ${path.basename(parentPath)} could not be read.`);
+      }
+      if (
+        parent?.moveTake ||
+        parent?.analysis ||
+        parent?.analysisHistory?.length ||
+        parent?.framebarSequence ||
+        parent?.framebarSequenceHistory?.length
+      ) {
+        throw new Error(`${path.basename(parentPath)} has linked move or analysis data.`);
+      }
+      const media = await probeMedia(resolveFfmpegPath(), clipPath);
+      if (!media.durationMs || !media.displayAspectRatio) {
+        throw new Error(`${path.basename(clipPath)} has no playable video.`);
+      }
+      parentTags.set(parentId, normalizeRecordingTags(parent?.tags, parent?.metadata));
+      addChange(clipPath, { ...clipEntry, video: clipFile });
+      removals.push(parentFile);
+      for (const filePath of [
+        parentEntry.manifestPath,
+        originalComboInputPath(parentPath),
+        processedComboInputPath(parentPath),
+        comboInputEditsPath(parentPath),
+      ]) {
+        const entry = await snapshot(filePath);
+        if (entry) removals.push(entry);
+      }
+      replacements.push({ parentId, clipId, clipName: path.basename(clipPath) });
+    }
+
+    const libraryPaths = [
+      ...(await findRecordingFiles(folder)),
+      ...(await findYouTubeRecordingPaths(folder)),
+    ];
+    for (const filePath of libraryPaths) {
+      if (changes.has(filePath) || parentIds.has(recordingIdForPath(filePath, folder))) continue;
+      const entry = await readManifest(filePath);
+      if (!parentIds.has(entry.manifest?.clip?.sourceRecordingId)) continue;
+      lock(filePath);
+      addChange(filePath, entry);
+    }
+    const backupPath = await applyClipParentReplacement({
+      folder,
+      removals,
+      changes: [...changes.values()],
+      trashItem: (backup) => shell.trashItem(backup),
+    });
+    return { replacements, backupPath };
+  } finally {
+    for (const filePath of lockedPaths) clipTrimJobs.delete(filePath);
+  }
 }
 
 async function deletePendingMoveRecording(request = {}) {
@@ -6419,6 +7055,7 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
     const startTime = Number(clip?.startTime);
     const endTime = Number(clip?.endTime);
     const moveTake = readMoveTake(manifest?.moveTake);
+    const f10Clip = manualChapterClipState(manifest, videoPath);
     return {
       sessionId: typeof manifest?.sessionId === "string" ? manifest.sessionId : null,
       source:
@@ -6430,6 +7067,7 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
       metadata: manifest?.metadata ?? null,
       games: Array.isArray(manifest?.games) ? manifest.games : [],
       replays: Array.isArray(manifest?.replays) ? manifest.replays : [],
+      combinedSets: manifest?.combinedSets?.schemaVersion === 1 ? manifest.combinedSets : null,
       analysis:
         (analysisScope === "all" || (analysisScope === "move-takes" && moveTake)) &&
         manifest?.analysis?.schemaVersion === 1
@@ -6493,6 +7131,8 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
           ? manifest.inputOverlayEditsSha256
           : null,
       originalComboInputAvailable,
+      f10Clip: f10Clip !== null,
+      f10ClipTrimmedAndRenamed: f10Clip?.trimmed === true && f10Clip.renamed,
       clip:
         typeof clip?.sourceRecordingId === "string" &&
         clip.sourceRecordingId.trim() &&
@@ -6520,6 +7160,7 @@ async function readRecordingManifest(videoPath, analysisScope = "all") {
       metadata: null,
       games: [],
       replays: [],
+      combinedSets: null,
       analysis: null,
       analysisHistory: [],
       tags: { match: [], lab: [], combo: false, pressure: false },
@@ -6574,6 +7215,7 @@ let replayScanCache = {
   replayFiles: new Map(),
   ratingLogs: new Map(),
   snapshot: null,
+  revision: null,
   loaded: false,
   loadPromise: null,
   dirty: false,
@@ -6588,6 +7230,7 @@ function replayScanCacheFor(folder) {
       replayFiles: new Map(),
       ratingLogs: new Map(),
       snapshot: null,
+      revision: null,
       loaded: false,
       loadPromise: null,
       dirty: false,
@@ -6632,6 +7275,7 @@ async function loadReplayScanCache(folder) {
           ]),
         );
         cache.snapshot = stored.snapshot;
+        cache.revision = randomUUID();
       } catch {
         // A missing or unreadable cache falls back to a regular first scan.
       } finally {
@@ -6682,6 +7326,7 @@ function replayFileFingerprint(stat) {
 }
 
 let replayScanCount = 0;
+let replayScanQueue = Promise.resolve();
 let replayStagingBusy = false;
 let replayImportBusy = false;
 ipcMain.handle("replays:get-cached-scan", async (_, folder) => {
@@ -6689,21 +7334,36 @@ ipcMain.handle("replays:get-cached-scan", async (_, folder) => {
   const resolvedFolder = path.resolve(folder);
   if (!fs.statSync(resolvedFolder).isDirectory()) return null;
   const cache = await loadReplayScanCache(resolvedFolder);
-  return cache.snapshot;
+  return cache.snapshot ? { ...cache.snapshot, revision: cache.revision } : null;
 });
 
-ipcMain.handle("replays:scan-folder", async (event, folder) => {
+ipcMain.handle("replays:scan-folder", async (event, folder, { knownRevision, requestId } = {}) => {
   if (replayStagingBusy)
     throw new Error("Replay staging is in progress. Try scanning again shortly.");
   if (replayImportBusy)
     throw new Error("Replay import is in progress. Try scanning again shortly.");
-  if (!folder || !fs.existsSync(folder)) return { games: [], playerCounts: {}, duplicateCount: 0 };
+  const emptyResult = { games: [], playerCounts: {}, duplicateCount: 0, revision: null };
+  if (!folder || !fs.existsSync(folder)) return emptyResult;
   const resolvedFolder = path.resolve(folder);
-  if (!fs.statSync(resolvedFolder).isDirectory()) {
-    return { games: [], playerCounts: {}, duplicateCount: 0 };
-  }
+  if (!fs.statSync(resolvedFolder).isDirectory()) return emptyResult;
+
+  // Keep scans from updating and saving the same cache concurrently.
+  const previousScan = replayScanQueue;
+  let finishScan;
+  replayScanQueue = new Promise((resolve) => {
+    finishScan = resolve;
+  });
   replayScanCount += 1;
   try {
+    await previousScan;
+    let lastProgressAt = 0;
+    const reportProgress = (phase, completed, total) => {
+      const now = performance.now();
+      if (completed > 0 && completed < total && now - lastProgressAt < 100) return;
+      if (event.sender.isDestroyed()) return;
+      lastProgressAt = now;
+      event.sender.send("replays:scan-progress", { requestId, phase, completed, total });
+    };
     writeSettings({ ...readSettings(), replaysFolder: resolvedFolder });
     const scanCache = await loadReplayScanCache(resolvedFolder);
     const replayFiles = await findReplayFiles(resolvedFolder);
@@ -6719,19 +7379,13 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
     const seenReplayHashes = new Set();
     const seenReplayIds = new Set();
     let duplicateCount = 0;
-    event.sender.send("replays:scan-progress", { completed: 0, total: 0, phase: "logs" });
+    reportProgress("logs", 0, 0);
     const ratingsByReplayName = await readReplayRatings(
       resolvedFolder,
-      (completed, logTotal) => {
-        event.sender.send("replays:scan-progress", {
-          completed,
-          total: logTotal,
-          phase: "logs",
-        });
-      },
+      (completed, logTotal) => reportProgress("logs", completed, logTotal),
       scanCache,
     );
-    event.sender.send("replays:scan-progress", { completed: 0, total, phase: "scanning" });
+    reportProgress("scanning", 0, total);
     const currentReplayCacheKeys = new Set();
     for (const [index, filePath] of replayFiles.entries()) {
       const stat = await fs.promises.stat(filePath);
@@ -6766,11 +7420,7 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
         seenReplayIds.add(game.id);
         games.push(game);
       }
-      event.sender.send("replays:scan-progress", {
-        completed: index + 1,
-        total,
-        phase: "scanning",
-      });
+      reportProgress("scanning", index + 1, total);
       // Give Electron a turn between batches so the window and progress events
       // remain responsive during large replay-folder scans.
       if ((index + 1) % 10 === 0) {
@@ -6789,52 +7439,108 @@ ipcMain.handle("replays:scan-folder", async (event, folder) => {
       playerCounts[game.player2] = (playerCounts[game.player2] ?? 0) + 1;
     }
     const result = { games, playerCounts, duplicateCount };
-    if (JSON.stringify(scanCache.snapshot) !== JSON.stringify(result)) scanCache.dirty = true;
-    scanCache.snapshot = result;
+    if (!isDeepStrictEqual(scanCache.snapshot, result)) {
+      scanCache.snapshot = result;
+      scanCache.revision = randomUUID();
+      scanCache.dirty = true;
+    }
     await saveReplayScanCache(scanCache).catch((error) => {
       startupDiagnostic("replay-scan-cache-write-failed", {
         folder: resolvedFolder,
         error: error instanceof Error ? error.message : String(error),
       });
     });
-    return result;
+    return scanCache.revision === knownRevision
+      ? null
+      : { ...scanCache.snapshot, revision: scanCache.revision };
   } finally {
     replayScanCount -= 1;
+    finishScan();
   }
 });
 
 async function isGameRunning() {
   if (process.platform !== "win32") return false;
-  try {
-    const { stdout } = await execFileAsync(
-      "tasklist",
-      ["/FI", "IMAGENAME eq Atla.exe", "/FO", "CSV", "/NH"],
-      { windowsHide: true },
+  const { stdout } = await execFileAsync(
+    "tasklist",
+    ["/FI", "IMAGENAME eq Atla.exe", "/FO", "CSV", "/NH"],
+    { windowsHide: true, timeout: 5_000 },
+  );
+  return /^"Atla\.exe",/im.test(stdout);
+}
+
+async function waitForReplayGameState(running) {
+  const deadline = Date.now() + 10_000;
+  while ((await isGameRunning()) !== running) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return true;
+}
+
+async function closeGameForReplayStaging() {
+  const closeCommand = [
+    "$sessionId = (Get-Process -Id $PID).SessionId",
+    "Get-Process -Name Atla -ErrorAction SilentlyContinue | Where-Object SessionId -eq $sessionId | ForEach-Object { [void]$_.CloseMainWindow() }",
+  ].join("; ");
+  await execFileAsync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", closeCommand],
+    { windowsHide: true, timeout: 5_000 },
+  );
+  if (!(await waitForReplayGameState(false))) {
+    throw new Error(
+      "Avatar Legends is still running. Close it in the game window, then try again.",
     );
-    return /^"Atla\.exe",/im.test(stdout);
-  } catch {
-    return false;
   }
 }
 
-async function runReplayStagingMutation(operation) {
-  if (replayStagingBusy) throw new Error("A replay staging operation is already in progress.");
+async function openGameAfterReplayStaging(gameFolder) {
+  if (process.platform !== "win32") {
+    throw new Error("Opening Avatar Legends from Labatar requires Windows.");
+  }
+  if (await isGameRunning()) return;
+  await new Promise((resolve, reject) => {
+    const child = spawn(path.join(gameFolder, "Atla.exe"), [], {
+      cwd: gameFolder,
+      detached: true,
+      stdio: "ignore",
+    });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+  if (!(await waitForReplayGameState(true))) {
+    throw new Error("Avatar Legends did not open. You can start it from your game launcher.");
+  }
+}
+
+function checkReplayStagingIdle() {
   if (replayScanCount > 0)
     throw new Error("Wait for the replay scan to finish before changing in-game replays.");
+  if (
+    obsState.recording.active ||
+    pendingAutoRecordings.length ||
+    replayAttachmentsInProgress.size
+  ) {
+    throw new Error(
+      "Wait for recording and replay linking to finish before changing in-game replays.",
+    );
+  }
+}
+
+async function runReplayStagingMutation(operation, closeGame = false) {
+  if (replayStagingBusy) throw new Error("A replay staging operation is already in progress.");
+  checkReplayStagingIdle();
   replayStagingBusy = true;
   try {
-    if (
-      obsState.recording.active ||
-      pendingAutoRecordings.length ||
-      replayAttachmentsInProgress.size
-    ) {
-      throw new Error(
-        "Wait for recording and replay linking to finish before changing in-game replays.",
-      );
-    }
     if (await isGameRunning()) {
-      throw new Error("Close Avatar Legends before changing in-game replays.");
+      if (!closeGame) throw new Error("Close Avatar Legends before changing in-game replays.");
+      await closeGameForReplayStaging();
     }
+    checkReplayStagingIdle();
     return await operation();
   } finally {
     replayStagingBusy = false;
@@ -6848,16 +7554,30 @@ ipcMain.handle("replays:staging-status", async () =>
 ipcMain.handle("replays:staging-preview", async (_, request) => {
   const folder = getReplayFolder();
   if (!folder) throw new Error("Choose the game folder before staging replays.");
-  return replayStagingStore().preview(folder, request?.ids);
+  const [preview, gameRunning] = await Promise.all([
+    replayStagingStore().preview(folder, request?.ids, request?.recordedReplay),
+    isGameRunning(),
+  ]);
+  return { ...preview, gameRunning };
 });
 
-ipcMain.handle("replays:stage", async (_, request) =>
-  runReplayStagingMutation(async () => {
-    const folder = getReplayFolder();
-    if (!folder) throw new Error("Choose the game folder before staging replays.");
-    return replayStagingStore().stage(folder, request?.ids);
-  }),
-);
+ipcMain.handle("replays:stage", async (_, request) => {
+  const folder = getReplayFolder();
+  if (!folder) throw new Error("Choose the game folder before staging replays.");
+  return runReplayStagingMutation(async () => {
+    const status = await replayStagingStore().stage(folder, request?.ids, request?.recordedReplay);
+    if (request?.openGame !== true || !status.active || status.issue) return status;
+    try {
+      await openGameAfterReplayStaging(folder);
+      return { ...status, gameOpened: true };
+    } catch (error) {
+      return {
+        ...status,
+        gameOpenError: `Could not open Avatar Legends. ${obsErrorMessage(error)}`,
+      };
+    }
+  }, request?.closeGame === true);
+});
 
 ipcMain.handle("replays:restore-staged", async () =>
   runReplayStagingMutation(() => replayStagingStore().restore()),
@@ -6933,7 +7653,74 @@ ipcMain.handle("recordings:list", async (_, request) => {
     }
   }
   recordings.sort((left, right) => right.modifiedAt - left.modifiedAt);
-  return { folder, recordings };
+  const hiddenSourceIds = sourceIdsHiddenByCombinations(recordings);
+  const visibleRecordings = recordings.filter((recording) => !hiddenSourceIds.has(recording.id));
+  const guideVideoRecordingIds = Array.isArray(request?.guideVideoIds)
+    ? await guideVideoLibrary.recordingLinks(
+        request.guideVideoIds.slice(0, 12),
+        folder,
+        new Set(
+          visibleRecordings
+            .filter((recording) => recording.mediaKind === "local")
+            .map(({ id }) => id),
+        ),
+      )
+    : undefined;
+  return {
+    folder,
+    recordings: visibleRecordings,
+    ...(guideVideoRecordingIds ? { guideVideoRecordingIds } : {}),
+  };
+});
+
+let setCombinationBusy = false;
+ipcMain.handle("recordings:combine-sets", async (_, request) => {
+  if (setCombinationBusy) throw new Error("Another set combination is already in progress.");
+  if (
+    obsState.recording.active ||
+    pendingAutoRecordings.length ||
+    replayAttachmentsInProgress.size
+  ) {
+    throw new Error("Wait for recording and replay linking to finish before combining sets.");
+  }
+  setCombinationBusy = true;
+  const workId = `combine-sets:${randomUUID()}`;
+  setRecordingWork(workId, {
+    title: "Combining set recordings",
+    fileName: `${request?.sets?.length ?? 0} sets`,
+    detail: "Joining video and verifying playback",
+  });
+  try {
+    const result = await combineSetRecordings({
+      sets: request?.sets,
+      folder: path.resolve(getObsSettings().recordDirectory),
+      executable: resolveFfmpegPath(),
+      runFfmpeg,
+      probeChapters,
+      probeVideoDimensions,
+      findRecordingFiles,
+    });
+    if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+    return result;
+  } finally {
+    setCombinationBusy = false;
+    clearRecordingWork(workId);
+  }
+});
+ipcMain.handle("recordings:split-sets", async (_, request) => {
+  if (setCombinationBusy) throw new Error("Wait for the current set combination to finish.");
+  setCombinationBusy = true;
+  try {
+    const result = await splitSetRecording({
+      recordingId: String(request?.recordingId ?? ""),
+      folder: path.resolve(getObsSettings().recordDirectory),
+      findRecordingFiles,
+    });
+    if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+    return result;
+  } finally {
+    setCombinationBusy = false;
+  }
 });
 
 ipcMain.handle("recordings:get-original-combo-inputs", async (_, request) => {
@@ -6990,6 +7777,59 @@ ipcMain.handle("recordings:reprocess-combo-inputs", async (_, request) => {
   }
 });
 
+ipcMain.handle("recordings:set-combo-input-bindings", async (_, request) => {
+  const videoPath = resolveRecordingPath(String(request?.recordingId ?? ""));
+  if (path.extname(videoPath).toLowerCase() !== ".mp4") {
+    throw new Error("Only local MP4 recordings have combo inputs.");
+  }
+  if (
+    clipTrimJobs.has(videoPath) ||
+    clipExportSourceCounts.has(videoPath) ||
+    gameChapterJobs.has(videoPath) ||
+    manualChapterClipJobs.has(videoPath)
+  ) {
+    throw new Error("Wait for recording or chapter processing to finish.");
+  }
+  const bindings = validateComboInputBindings(request?.bindings, { allowLegacy: true });
+  clipTrimJobs.add(videoPath);
+  try {
+    const manifestPath = recordingManifestPathForVideo(videoPath);
+    const [videoStat, manifestStat] = await Promise.all([
+      fs.promises.lstat(videoPath),
+      fs.promises.lstat(manifestPath),
+    ]);
+    if (!videoStat.isFile() || !manifestStat.isFile()) {
+      throw new Error("The recording and its metadata must be regular files.");
+    }
+    const manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+    const capture = manifest?.comboInputCapture;
+    if (capture?.schemaVersion !== 1 || !Array.isArray(capture.states)) {
+      throw new Error("This recording has no raw combo input timeline to process.");
+    }
+    const edits = await readComboInputEdits(videoPath);
+    await writeComboInputEdits(videoPath, { ...edits, bindings });
+    const processed = await processComboInputs(videoPath, capture, comboInputRawOffset(manifest), {
+      force: true,
+    });
+    if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+    return processed;
+  } finally {
+    clipTrimJobs.delete(videoPath);
+  }
+});
+
+ipcMain.handle("recordings:get-combo-input-bindings", async (_, request) => {
+  const videoPath = resolveRecordingPath(String(request?.recordingId ?? ""));
+  const manifestPath = recordingManifestPathForVideo(videoPath);
+  const manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+  const capture = manifest?.comboInputCapture;
+  if (capture?.schemaVersion !== 1 || !Array.isArray(capture.states)) {
+    throw new Error("This recording has no raw combo input timeline.");
+  }
+  const edits = await readComboInputEdits(videoPath);
+  return edits.bindings ?? capture.bindings ?? {};
+});
+
 ipcMain.handle("recordings:set-combo-input-edit", async (_, request) => {
   const videoPath = resolveRecordingPath(String(request?.recordingId ?? ""));
   if (path.extname(videoPath).toLowerCase() !== ".mp4") {
@@ -7042,7 +7882,7 @@ ipcMain.handle("recordings:set-combo-input-edit", async (_, request) => {
     }
     const edits = await readComboInputEdits(videoPath);
     const key = pressEditKey(rawStartMs + timeMs, physicalButton);
-    const nextEdits = { schemaVersion: 1, presses: { ...edits.presses } };
+    const nextEdits = { ...edits, schemaVersion: 1, presses: { ...edits.presses } };
     if (edit === null || !Object.keys(edit).length) delete nextEdits.presses[key];
     else nextEdits.presses[key] = edit;
     await writeComboInputEdits(videoPath, nextEdits);
@@ -7057,19 +7897,21 @@ ipcMain.handle("recordings:set-combo-input-edit", async (_, request) => {
   }
 });
 
-ipcMain.handle("recordings:import-combo-mp4", async () => {
+async function chooseRecordingMp4(combo = false) {
   const selection = await dialog.showOpenDialog(mainWindow, {
-    title: "Import combo MP4",
+    title: "Add local MP4",
     properties: ["openFile"],
     filters: [{ name: "MP4 video", extensions: ["mp4"] }],
   });
   if (selection.canceled || !selection.filePaths[0]) return null;
   const folder = path.resolve(getObsSettings().recordDirectory);
   await fs.promises.mkdir(folder, { recursive: true });
-  const result = await importComboMp4(selection.filePaths[0], folder);
+  const result = await (combo ? importComboMp4 : importMp4)(selection.filePaths[0], folder);
   if (result.imported && canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
   return result.recordingId;
-});
+}
+ipcMain.handle("recordings:import-combo-mp4", () => chooseRecordingMp4(true));
+ipcMain.handle("recordings:import-mp4", () => chooseRecordingMp4());
 
 ipcMain.handle("replays:resolve-portraits", async (_, request) => {
   const pairs = request?.pairs;
@@ -7612,6 +8454,32 @@ async function handleClipExport(request, mode) {
 }
 ipcMain.handle("recordings:export-clip", (_, request) => handleClipExport(request, "precise"));
 ipcMain.handle("recordings:export-clip-fast", (_, request) => handleClipExport(request, "fast"));
+ipcMain.handle("recordings:export-caption", async (_, request) => {
+  const caption = typeof request?.caption === "string" ? request.caption.trim() : "";
+  if (!caption || caption.length > 240 || caption.split("\n").length > 4) {
+    throw new Error("Enter a caption of up to 240 characters and four lines.");
+  }
+  const recordingId = String(request?.recordingId ?? "");
+  const videoPath = resolveRecordingPath(recordingId);
+  const { startTime, endTime } = request;
+  if (
+    (startTime !== undefined || endTime !== undefined) &&
+    (!Number.isFinite(startTime) || !Number.isFinite(endTime))
+  ) {
+    throw new Error("The clip range is invalid.");
+  }
+  const workId = `caption-export:${randomUUID()}`;
+  setRecordingWork(workId, {
+    title: "Adding caption",
+    fileName: path.basename(videoPath),
+    detail: "Encoding a captioned MP4",
+  });
+  try {
+    return await exportRecordingClip({ recordingId, startTime, endTime }, { caption });
+  } finally {
+    clearRecordingWork(workId);
+  }
+});
 ipcMain.handle("recordings:render-combo-inputs", async (_, request) => {
   const recordingId = String(request?.recordingId ?? "");
   const selectedPath = resolveRecordingPath(recordingId);
@@ -8056,6 +8924,21 @@ ipcMain.handle("processing-config:import", async (_, request) => {
   return processingConfigurationStore().restore(configuration, request.expectedRevision);
 });
 ipcMain.handle("recordings:delete", async (_, request) => deleteRecording(request));
+ipcMain.handle("recordings:replace-clip-parents", async (_, pairs) => {
+  const workId = `replace-clip-parents:${randomUUID()}`;
+  setRecordingWork(workId, {
+    title: "Replacing parent recordings",
+    fileName: "Recordings",
+    detail: "Keeping clips and moving their parent files to the Recycle Bin",
+  });
+  try {
+    const result = await replaceClipParents(pairs);
+    if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+    return result;
+  } finally {
+    clearRecordingWork(workId);
+  }
+});
 ipcMain.handle("recordings:delete-pending-move", async (_, request) =>
   deletePendingMoveRecording(request),
 );
@@ -8064,12 +8947,17 @@ ipcMain.handle("recordings:delete-move-take", async (_, request) =>
 );
 ipcMain.on("recordings:start-drag", async (event, request) => {
   try {
-    const filePath = resolveRecordingPath(String(request?.recordingId ?? ""));
-    if (!fs.existsSync(filePath)) return;
-    const fileIcon = await app.getFileIcon(filePath, { size: "small" });
+    const recordingIds = new Set([request?.recordingId, ...(request?.recordingIds ?? [])]);
+    const paths = [...recordingIds].map((id) => resolveRecordingPath(id));
+    const files = [...new Set(paths)].filter((filePath) =>
+      fs.statSync(filePath, { throwIfNoEntry: false })?.isFile(),
+    );
+    if (!files.length) return;
+    const fileIcon = await app.getFileIcon(files[0], { size: "small" });
     if (event.sender.isDestroyed()) return;
     event.sender.startDrag({
-      file: filePath,
+      file: files[0],
+      files,
       icon: fileIcon.isEmpty() ? app.getPath("exe") : fileIcon,
     });
   } catch (error) {
@@ -8077,6 +8965,21 @@ ipcMain.on("recordings:start-drag", async (event, request) => {
   } finally {
     if (!event.sender.isDestroyed()) event.sender.send("recordings:drag-finished");
   }
+});
+let candidateUploadActive = false;
+ipcMain.handle("catalog-backend:get", () => getCatalogBackend());
+ipcMain.handle("catalog-backend:set", (_, mode) => {
+  if (!isDev) throw new Error("Catalog backend switching is available only in development.");
+  if (candidateUploadActive) throw new Error("Wait for the candidate upload to finish.");
+  const previous = getCatalogBackend();
+  const next = setCatalogBackend(mode);
+  try {
+    writeSettings({ ...readSettings(), catalogBackend: next.mode });
+  } catch (error) {
+    setCatalogBackend(previous.mode);
+    throw error;
+  }
+  return next;
 });
 ipcMain.handle("catalog:publish-combo", async (event, request) => {
   const startedAt = Date.now();
@@ -8111,29 +9014,193 @@ ipcMain.handle("catalog:unpublish-combo", async (event, request) => {
   }
 });
 ipcMain.handle("catalog:is-owner", () => isCatalogOwner());
-ipcMain.handle("combo-candidates:status", () => candidateServiceStatus());
-ipcMain.handle("combo-candidates:request-upload-access", () => requestComboUploadAccess());
-ipcMain.handle("combo-candidates:submit", async (event, request) => {
-  const recordingPath = resolveRecordingPath(String(request?.recordingId ?? ""));
-  const { processedComboInput } = await readRecordingManifest(recordingPath, "none");
-  const inputFacing = request?.inputFacing === "left" ? "left" : "right";
-  const processedInput =
-    processedComboInput?.routes?.[inputFacing] === String(request?.combo?.route ?? "").trim() &&
-    Buffer.byteLength(JSON.stringify(processedComboInput), "utf8") <= 480 * 1024
-      ? processedComboInput
-      : null;
-  return submitComboCandidate({
-    recordingPath,
-    parent: BrowserWindow.fromWebContents(event.sender),
-    combo: request?.combo,
-    originCandidateId: request?.originCandidateId,
-    processedInput,
-    inputFacing,
-    onProgress: (progress) => {
-      if (!event.sender.isDestroyed())
-        event.sender.send("combo-candidates:upload-progress", progress);
-    },
+async function chooseLocalVideo(event) {
+  const parent = BrowserWindow.fromWebContents(event.sender);
+  const selection = await dialog.showOpenDialog(parent, {
+    properties: ["openFile"],
+    filters: [{ name: "MP4 videos", extensions: ["mp4"] }],
   });
+  if (selection.canceled || !selection.filePaths[0]) return null;
+  return guideVideoLibrary.add(selection.filePaths[0]);
+}
+ipcMain.handle("catalog:select-guide-video", chooseLocalVideo);
+ipcMain.handle("video-library:choose-mp4", chooseLocalVideo);
+ipcMain.handle("video-library:list", () => guideVideoLibrary.list());
+ipcMain.handle("video-library:from-recording", (_event, id) =>
+  guideVideoLibrary.add(resolveRecordingPath(String(id ?? ""))),
+);
+ipcMain.handle("guide-video:start-recording", async (_event, title = "") => {
+  if (typeof title !== "string" || title.length > 80)
+    throw new Error("Use a clip title of up to 80 characters.");
+  if (publicArmedMoveCapture())
+    throw new Error("Disarm the move take before recording a guide clip.");
+  if (obsState.automation.enabled)
+    throw new Error("Turn off automatic match recording before recording a guide clip.");
+  return startManualObsRecording(
+    {},
+    title.trim()
+      ? `Guide clip - ${title.trim()}`
+      : `Guide clip ${new Date().toISOString().replace(/[:.]/g, "-")}`,
+  );
+});
+ipcMain.handle("guide-video:stop-recording", (_event, sessionId) => {
+  if (typeof sessionId !== "string" || activeObsRecording?.sessionId !== sessionId)
+    throw new Error("This guide clip is no longer recording.");
+  return stopObsRecording("labatar");
+});
+let guideVideoExportActive = false;
+ipcMain.handle("guide-video:export", async (_event, request) => {
+  if (guideVideoExportActive) throw new Error("Wait for the current guide video export to finish.");
+  if (
+    typeof request?.title !== "string" ||
+    request.title.length > 160 ||
+    !Array.isArray(request.clips) ||
+    !request.clips.length ||
+    request.clips.length > 20 ||
+    request.clips.some(
+      (clip) =>
+        typeof clip?.id !== "string" ||
+        (clip.title !== undefined && (typeof clip.title !== "string" || clip.title.length > 80)) ||
+        typeof clip.caption !== "string" ||
+        clip.caption.length > 240 ||
+        clip.caption.trim().split("\n").length > 4,
+    )
+  )
+    throw new Error(
+      "Add 1 to 20 MP4 clips. Use up to 160 characters for the video heading, 80 for a clip title, and 240 characters and four lines for a caption.",
+    );
+  guideVideoExportActive = true;
+  const workId = `guide-video-export:${randomUUID()}`;
+  const lockedPaths = [];
+  try {
+    const clips = await Promise.all(
+      request.clips.map(async (clip) => ({
+        ...(await guideVideoLibrary.file(clip.id)),
+        title: clip.title?.trim(),
+        caption: clip.caption.trim(),
+      })),
+    );
+    const paths = [...new Set(clips.map((clip) => clip.filePath))];
+    if (
+      paths.some(
+        (filePath) =>
+          clipTrimJobs.has(filePath) ||
+          gameChapterJobs.has(filePath) ||
+          manualChapterClipJobs.has(filePath) ||
+          (obsState.recording.active &&
+            [obsState.recording.outputPath, activeObsRecording?.outputPath].includes(filePath)),
+      )
+    )
+      throw new Error("Wait for the source clips to finish recording or processing.");
+    for (const filePath of paths) {
+      clipExportSourceCounts.set(filePath, (clipExportSourceCounts.get(filePath) ?? 0) + 1);
+      lockedPaths.push(filePath);
+    }
+    const folder = path.resolve(getObsSettings().recordDirectory);
+    await fs.promises.mkdir(folder, { recursive: true });
+    const directory = path.join(await fs.promises.realpath(folder), "Guide Videos");
+    await fs.promises.mkdir(directory, { recursive: true });
+    if ((await fs.promises.realpath(directory)) !== directory)
+      throw new Error("The Guide Videos folder has moved.");
+    const outputPath = await availableRecordingPath(
+      directory,
+      `Guide - ${safeRecordingNamePart(request.title, "Video")}`,
+    );
+    await exportGuideVideo({
+      executable: resolveFfmpegPath(),
+      runFfmpeg,
+      clips,
+      outputPath,
+      onProgress: (detail) =>
+        setRecordingWork(workId, {
+          title: "Exporting guide video",
+          fileName: path.basename(outputPath),
+          detail,
+        }),
+    });
+    const video = await guideVideoLibrary.add(outputPath);
+    if (canSendToRenderer()) mainWindow.webContents.send("recordings:changed");
+    return video;
+  } finally {
+    for (const filePath of lockedPaths) {
+      const remaining = (clipExportSourceCounts.get(filePath) ?? 1) - 1;
+      if (remaining) clipExportSourceCounts.set(filePath, remaining);
+      else clipExportSourceCounts.delete(filePath);
+    }
+    guideVideoExportActive = false;
+    clearRecordingWork(workId);
+  }
+});
+ipcMain.handle("catalog:publish-tech", async (event, request) => {
+  const parent = BrowserWindow.fromWebContents(event.sender);
+  const workId = `guide-publication:${randomUUID()}`;
+  const localVideoCount = Array.isArray(request?.item?.videos)
+    ? request.item.videos.filter((video) => video?.localVideoId && !video.url).length
+    : 0;
+  let videoNumber = 0;
+  try {
+    return await publishCatalogTech(request, parent, {
+      stageGuideVideo: (ses, video) => {
+        videoNumber++;
+        setRecordingWork(workId, {
+          title: "Uploading guide",
+          fileName: String(request.item.title ?? "").slice(0, 160),
+          detail: `Sending MP4 ${videoNumber} of ${localVideoCount} to the catalog`,
+          completed: 0,
+          total: 0,
+        });
+        return stageGuideVideo(ses, guideVideoLibrary, video, (completed, total) =>
+          setRecordingWork(workId, { completed, total }),
+        );
+      },
+    });
+  } finally {
+    clearRecordingWork(workId);
+  }
+});
+ipcMain.handle("catalog:guide-publication", async (event, id, interactive = false) => {
+  if (typeof id !== "string" || !/^[0-9a-f-]{36}$/.test(id))
+    throw new Error("Invalid publication ID.");
+  const { publisherSession, authenticatedPublisherSession } = require("./catalog-publisher.cjs");
+  const ses =
+    interactive === true
+      ? await authenticatedPublisherSession(BrowserWindow.fromWebContents(event.sender))
+      : publisherSession();
+  return guideEditorRequest(ses, `/v1/editor/guide-publications/${id}`);
+});
+ipcMain.handle("catalog:unpublish-player", (event, request) =>
+  unpublishCatalogPlayer(request, BrowserWindow.fromWebContents(event.sender)),
+);
+ipcMain.handle("combo-candidates:submit", async (event, request) => {
+  if (candidateUploadActive) throw new Error("A candidate upload is already in progress.");
+  candidateUploadActive = true;
+  try {
+    const recordingPath = resolveRecordingPath(String(request?.recordingId ?? ""));
+    const { comboInputCapture, processedComboInput } = await readRecordingManifest(
+      recordingPath,
+      "none",
+    );
+    if (comboInputCapture && !processedComboInput) {
+      throw new Error(
+        "This recording has controller inputs, but they could not be processed. Reprocess clip inputs before submitting the candidate.",
+      );
+    }
+    const inputFacing = request?.inputFacing === "left" ? "left" : "right";
+    return await submitComboCandidate({
+      recordingPath,
+      parent: BrowserWindow.fromWebContents(event.sender),
+      combo: request?.combo,
+      originCandidateId: request?.originCandidateId,
+      processedInput: processedComboInput,
+      inputFacing,
+      onProgress: (progress) => {
+        if (!event.sender.isDestroyed())
+          event.sender.send("combo-candidates:upload-progress", progress);
+      },
+    });
+  } finally {
+    candidateUploadActive = false;
+  }
 });
 ipcMain.handle("combo-candidates:list", async (event, request) => {
   const startedAt = Date.now();
@@ -8556,6 +9623,10 @@ function buildApplicationMenu() {
 
 void app.whenReady().then(() => {
   startupDiagnostic("app-ready");
+  const savedCatalogBackend = readSettings().catalogBackend;
+  if (isDev && ["local", "hosted"].includes(savedCatalogBackend)) {
+    setCatalogBackend(savedCatalogBackend);
+  }
   protocol.handle("labatar-media", async (request) => {
     try {
       const url = new URL(request.url);
@@ -8594,6 +9665,11 @@ void app.whenReady().then(() => {
       if (url.hostname === "candidate") {
         return previewComboCandidate(url.pathname.replace(/^\/+/, ""), request);
       }
+      if (url.hostname === "guide") {
+        const id = url.pathname.replace(/^\/+/, "");
+        const { filePath, stat } = await guideVideoLibrary.file(id);
+        return createRecordingResponse(filePath, stat, request);
+      }
       if (url.hostname !== "recording") return new Response("Not found", { status: 404 });
       const filePath = resolveRecordingPath(url.pathname.replace(/^\/+/, ""));
       const stat = await fs.promises.stat(filePath);
@@ -8630,6 +9706,12 @@ void app.whenReady().then(() => {
     console.warn(`Global chapter shortcut unavailable: ${obsErrorMessage(error)}`);
   }
   createWindow();
+  void adoptSharedRecordingDirectory()
+    .then(() => {
+      if (obsConnectionToken !== 0 || !canSendToRenderer()) return;
+      return connectToObs({}, { startup: true });
+    })
+    .catch((error) => startupDiagnostic("obs-auto-connect-failed", startupErrorDetails(error)));
   if (isDev) {
     try {
       const existingBlackout = readBlackoutSession(blackoutBackupRoot());
@@ -8664,6 +9746,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   startupDiagnostic("before-quit");
+  labbing.stop();
   if (automaticMoveCountdown) clearTimeout(automaticMoveCountdown);
   if (["running", "countdown"].includes(automaticMoveRun?.status)) {
     publishAutomaticMoveRun({

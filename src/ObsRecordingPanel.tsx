@@ -4,10 +4,14 @@ import {
   Button,
   Checkbox,
   FormControlLabel,
+  IconButton,
   Stack,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from "@mui/material";
+import FolderOpenOutlinedIcon from "@mui/icons-material/FolderOpenOutlined";
 import { useEffect, useState } from "react";
 import { useObsRecording } from "./ObsRecordingContext";
 
@@ -27,6 +31,9 @@ type CaptureState = {
 export function ObsRecordingPanel() {
   const {
     state,
+    obsAppRunning,
+    obsLaunchBusy,
+    openObsApp,
     settings,
     password,
     passwordFocused,
@@ -81,16 +88,25 @@ export function ObsRecordingPanel() {
   const [gameChapterError, setGameChapterError] = useState<string | null>(null);
   const [autoClipBusy, setAutoClipBusy] = useState(false);
   const [autoClipError, setAutoClipError] = useState<string | null>(null);
-  const [obsLaunchBusy, setObsLaunchBusy] = useState(false);
-  const [obsLaunchNotice, setObsLaunchNotice] = useState<string | null>(null);
-  const [obsLaunchError, setObsLaunchError] = useState<string | null>(null);
+  const [folderPickerBusy, setFolderPickerBusy] = useState(false);
+  const [folderPickerError, setFolderPickerError] = useState<string | null>(null);
+  const recordingDirectoryPending = connected && settings.recordDirectory !== state.recordDirectory;
 
-  useEffect(() => {
-    if (connected) {
-      setObsLaunchNotice(null);
-      setObsLaunchError(null);
+  const chooseRecordingDirectory = async () => {
+    if (!window.electronAPI?.obs) return;
+    setFolderPickerBusy(true);
+    setFolderPickerError(null);
+    try {
+      const folder = await window.electronAPI.obs.selectRecordDirectory();
+      if (folder) updateSetting("recordDirectory", folder);
+    } catch (selectionError) {
+      setFolderPickerError(
+        selectionError instanceof Error ? selectionError.message : String(selectionError),
+      );
+    } finally {
+      setFolderPickerBusy(false);
     }
-  }, [connected]);
+  };
 
   useEffect(() => {
     if (!window.electronAPI?.capture) return;
@@ -194,24 +210,6 @@ export function ObsRecordingPanel() {
     }
   };
 
-  const openObsApp = async () => {
-    if (!window.electronAPI?.obs) return;
-    setObsLaunchBusy(true);
-    setObsLaunchNotice(null);
-    setObsLaunchError(null);
-    try {
-      if (await window.electronAPI.obs.openApp()) {
-        setObsLaunchNotice(
-          "OBS launch requested. Once OBS is running and its WebSocket server is ready, retry the connection.",
-        );
-      }
-    } catch (launchError) {
-      setObsLaunchError(launchError instanceof Error ? launchError.message : String(launchError));
-    } finally {
-      setObsLaunchBusy(false);
-    }
-  };
-
   return (
     <Box
       sx={{
@@ -243,20 +241,24 @@ export function ObsRecordingPanel() {
             severity="error"
             sx={{ mb: 2 }}
             action={
-              <Button
-                color="secondary"
-                variant="outlined"
-                size="small"
-                sx={{ textTransform: "none" }}
-                onClick={() => void openObsApp()}
-                disabled={obsLaunchBusy || busy}
-              >
-                attempt to open OBS
-              </Button>
+              obsAppRunning === false ? (
+                <Button
+                  color="secondary"
+                  variant="outlined"
+                  size="small"
+                  sx={{ textTransform: "none" }}
+                  onClick={() => void openObsApp()}
+                  disabled={obsLaunchBusy || busy}
+                >
+                  Open OBS
+                </Button>
+              ) : undefined
             }
           >
-            Could not connect to OBS. Is OBS running? If it is, check its WebSocket server, port,
-            and password, then retry the connection.
+            Could not connect to OBS.{" "}
+            {obsAppRunning === false
+              ? "Open OBS, then retry the connection."
+              : "Check its WebSocket server, port, and password, then retry the connection."}
             {displayedError && (
               <Typography variant="body2" sx={{ mt: 1 }}>
                 {displayedError}
@@ -333,7 +335,7 @@ export function ObsRecordingPanel() {
                   ? "Disconnect"
                   : "Connect"}
             </Button>
-            {!connected && !connectFailed && (
+            {!connected && !connectFailed && obsAppRunning === false && (
               <Button
                 variant="outlined"
                 color="secondary"
@@ -341,16 +343,14 @@ export function ObsRecordingPanel() {
                 onClick={() => void openObsApp()}
                 disabled={obsLaunchBusy || busy}
               >
-                attempt to open OBS
+                Open OBS
               </Button>
             )}
           </Stack>
 
-          {obsLaunchNotice && <Alert severity="success">{obsLaunchNotice}</Alert>}
-          {obsLaunchError && <Alert severity="error">{obsLaunchError}</Alert>}
-
           <Typography variant="body2" color={connected ? "success.main" : "text.secondary"}>
             Status: {state.status}
+            {` | OBS app: ${obsAppRunning === null ? "unknown" : obsAppRunning ? "open" : "closed"}`}
             {state.obsVersion ? ` | OBS ${state.obsVersion}` : ""}
             {state.obsWebSocketVersion ? ` | WebSocket ${state.obsWebSocketVersion}` : ""}
           </Typography>
@@ -516,6 +516,39 @@ export function ObsRecordingPanel() {
             )}
           </Box>
 
+          <Box sx={{ borderTop: 1, borderColor: "divider", pt: 2 }}>
+            <Typography variant="subtitle2">Recording folder</Typography>
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+              <TextField
+                label="Recording directory"
+                size="small"
+                value={settings.recordDirectory}
+                slotProps={{ input: { readOnly: true } }}
+                fullWidth
+              />
+              <IconButton
+                aria-label="Choose recording folder"
+                title="Choose recording folder"
+                onClick={() => void chooseRecordingDirectory()}
+                disabled={busy || recording || state.automation.enabled || folderPickerBusy}
+              >
+                <FolderOpenOutlinedIcon />
+              </IconButton>
+            </Stack>
+            <Typography variant="caption" color="text.secondary" component="div">
+              {folderPickerBusy
+                ? "Choosing or copying recordings. This may take a while for large files."
+                : state.automation.enabled
+                  ? "Stop automatic recording before changing folders."
+                  : recordingDirectoryPending
+                    ? "Folder saved. Apply Labatar OBS setup to update OBS."
+                    : connected
+                      ? "Choose a folder for future recordings. You can copy existing files when prompted."
+                      : "Choose a folder now, then connect OBS to apply it."}
+            </Typography>
+            {folderPickerError && <Alert severity="error">{folderPickerError}</Alert>}
+          </Box>
+
           {connected && (
             <>
               <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
@@ -526,18 +559,16 @@ export function ObsRecordingPanel() {
                   disabled
                   sx={{ minWidth: 220 }}
                 />
-                <TextField
-                  label="Recording directory"
-                  size="small"
-                  value={settings.recordDirectory}
-                  disabled
-                  fullWidth
-                />
                 <Button
                   variant="contained"
                   data-guide-anchor="obs-apply-setup"
                   onClick={() => void setupScenes()}
-                  disabled={busy || recording}
+                  disabled={
+                    busy ||
+                    recording ||
+                    folderPickerBusy ||
+                    (recordingDirectoryPending && state.automation.enabled)
+                  }
                 >
                   Apply Labatar OBS setup
                 </Button>
@@ -599,6 +630,35 @@ export function ObsRecordingPanel() {
               )}
               {state.currentSceneName === "Labatar - Game" && state.sourceToggles && (
                 <Box>
+                  <Stack spacing={0.5} sx={{ alignItems: "flex-start", mb: 1 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      Video source
+                    </Typography>
+                    <ToggleButtonGroup
+                      aria-label="Video source"
+                      size="small"
+                      color="primary"
+                      exclusive
+                      value={
+                        state.sourceToggles.monitorCapture
+                          ? "monitor"
+                          : state.sourceToggles.gameOnly
+                            ? "game"
+                            : null
+                      }
+                      disabled={busy || recording}
+                      onChange={(_, mode: "game" | "monitor" | null) => {
+                        if (mode) void setSourceToggle("monitorCapture", mode === "monitor");
+                      }}
+                    >
+                      <ToggleButton value="game">Game only</ToggleButton>
+                      <ToggleButton value="monitor">Monitor capture</ToggleButton>
+                    </ToggleButtonGroup>
+                    <Typography variant="caption" color="text.secondary">
+                      Monitor capture records everything visible on the selected display. Choose the
+                      display in the OBS source properties.
+                    </Typography>
+                  </Stack>
                   <Typography variant="caption" color="text.secondary">
                     Scene sources
                   </Typography>
@@ -620,6 +680,7 @@ export function ObsRecordingPanel() {
                               busy ||
                               recording ||
                               (key === "pressureFramebar" && state.automation.enabled) ||
+                              (key === "pressureFramebar" && state.sourceToggles?.monitorCapture) ||
                               (key === "pressureFramebar" &&
                                 !state.sourceToggles?.pressureFramebarReady) ||
                               (key === "gameAudio" && !state.sourceToggles?.gameAudioAvailable)
@@ -636,10 +697,14 @@ export function ObsRecordingPanel() {
                     restores game audio when a separate game-audio source is available. Switches
                     affect manual and automatic recordings and can be changed before recording.
                     Automatic recording turns off the P2 bar and keeps its switch off while enabled.
-                    {!state.sourceToggles.pressureFramebarReady &&
-                      " Open the game and apply setup again to place the P2 crop."}
+                    {state.sourceToggles.monitorCapture
+                      ? " The P2 bar is available in Game only."
+                      : !state.sourceToggles.pressureFramebarReady &&
+                        " Open the game and apply setup again to place the P2 crop."}
                     {!state.sourceToggles.gameAudioAvailable &&
-                      " This OBS version includes game audio in the capture source."}
+                      (state.sourceToggles.monitorCapture
+                        ? " Turn on desktop audio to include game sound with monitor capture."
+                        : " This OBS version includes game audio in the capture source.")}
                   </Typography>
                 </Box>
               )}

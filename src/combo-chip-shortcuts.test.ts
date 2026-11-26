@@ -10,6 +10,7 @@ describe("combo chip shortcuts", () => {
     expect(defaultChipShortcutBindings).toEqual({
       followup: "`",
       togglePosition: "j",
+      toggleFacing: "l",
       removeDirection: "r",
       anyAttack: "x",
       delay: "d",
@@ -23,6 +24,7 @@ describe("combo chip shortcuts", () => {
       parseChipShortcutBindings({
         followup: "v",
         togglePosition: "A",
+        toggleFacing: "U",
         removeDirection: "d",
         anyAttack: "c",
         delay: "e",
@@ -32,6 +34,7 @@ describe("combo chip shortcuts", () => {
     ).toEqual({
       followup: "v",
       togglePosition: "a",
+      toggleFacing: "u",
       removeDirection: "d",
       anyAttack: "c",
       delay: "e",
@@ -51,6 +54,7 @@ describe("combo chip shortcuts", () => {
     ).toEqual({
       followup: "`",
       togglePosition: "a",
+      toggleFacing: "l",
       removeDirection: "d",
       anyAttack: "x",
       delay: "e",
@@ -82,6 +86,15 @@ describe("combo chip shortcuts", () => {
         crit: "2",
       }).delay,
     ).toBe("d");
+  });
+
+  it("keeps an existing custom L binding when adding the left-right shortcut", () => {
+    const { toggleFacing: _newShortcut, ...existing } = defaultChipShortcutBindings;
+    expect(parseChipShortcutBindings({ ...existing, delay: "l" })).toEqual({
+      ...existing,
+      delay: "l",
+      toggleFacing: "h",
+    });
   });
 
   it("falls back to defaults for duplicate or incomplete saved bindings", () => {

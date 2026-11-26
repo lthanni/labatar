@@ -9,14 +9,14 @@ const {
   publisherReadWithRecovery,
   fetchEditorResponse,
   isCancelledEditorRedirect,
-  catalogOrigin,
+  getCatalogOrigin,
   signInToCatalog,
 } = require("./catalog-publisher.cjs");
 
-const api = `${catalogOrigin}/v1/candidates`;
-const editorApi = `${catalogOrigin}/v1/editor/candidates`;
-const uploadApi = `${editorApi}/upload`;
-const accessRequestApi = `${catalogOrigin}/v1/editor/upload-access-request`;
+const api = () => `${getCatalogOrigin()}/v1/candidates`;
+const editorApi = () => `${getCatalogOrigin()}/v1/editor/candidates`;
+const uploadApi = () => `${editorApi()}/upload`;
+const accessRequestApi = () => `${getCatalogOrigin()}/v1/editor/upload-access-request`;
 const candidateIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const maxFileSize = 2 * 1024 * 1024 * 1024;
 const candidateDownloadInFlight = new Map();
@@ -26,7 +26,7 @@ async function checkCandidateAccess(ses, timeoutMs = 15000) {
     ses,
     "Candidate sign-in check",
     async (signal) => {
-      const result = await fetchEditorResponse(ses, editorApi, {
+      const result = await fetchEditorResponse(ses, editorApi(), {
         credentials: "include",
         redirect: "manual",
         cache: "no-store",
@@ -44,7 +44,7 @@ async function checkCandidateUploadAccess(ses, timeoutMs = 15000) {
     ses,
     "Combo upload sign-in check",
     async (signal) => {
-      const result = await fetchEditorResponse(ses, uploadApi, {
+      const result = await fetchEditorResponse(ses, uploadApi(), {
         credentials: "include",
         redirect: "manual",
         cache: "no-store",
@@ -60,7 +60,7 @@ async function checkCandidateUploadAccess(ses, timeoutMs = 15000) {
 }
 
 async function candidateServiceStatus() {
-  const response = await fetch(`${catalogOrigin}/health`, { cache: "no-store" });
+  const response = await fetch(`${getCatalogOrigin()}/health`, { cache: "no-store" });
   if (!response.ok) return { available: false };
   const health = await response.json();
   return { available: health?.features?.comboCandidates === true };
@@ -68,7 +68,7 @@ async function candidateServiceStatus() {
 
 async function requestComboUploadAccess(ses = publisherSession()) {
   const result = await publisherRequestWithTimeout("Combo upload access request", (signal) =>
-    fetchEditorResponse(ses, accessRequestApi, {
+    fetchEditorResponse(ses, accessRequestApi(), {
       method: "POST",
       credentials: "include",
       redirect: "manual",
@@ -107,6 +107,8 @@ async function submitComboCandidate({
   ses = publisherSession(),
   signIn = signInToCatalog,
 }) {
+  const candidateApi = api();
+  const candidateUploadApi = uploadApi();
   if (path.extname(recordingPath).toLowerCase() !== ".mp4") {
     throw new Error("Link a local MP4 before submitting this combo.");
   }
@@ -118,30 +120,31 @@ async function submitComboCandidate({
       throw new Error("The linked MP4 must be between 1 byte and 2 GiB.");
     }
     if (!(await checkCandidateUploadAccess(ses))) {
-      await signIn(ses, parent, checkCandidateUploadAccess, uploadApi);
+      await signIn(ses, parent, checkCandidateUploadAccess, candidateUploadApi);
     }
     const details = {
-      combo: processedInput ? { ...combo, route: undefined } : combo,
+      combo,
       ...(originCandidateId ? { originCandidateId: candidateId(originCandidateId) } : {}),
       ...(processedInput ? { processedInput, inputFacing } : {}),
       fileName: path.basename(recordingPath),
       fileSize: stat.size,
     };
-    const includeProcessedInput =
-      Boolean(processedInput) && Buffer.byteLength(JSON.stringify(details), "utf8") <= 512 * 1024;
-    if (!includeProcessedInput && processedInput) {
-      details.combo = combo;
-      delete details.processedInput;
-      delete details.inputFacing;
+    const detailsJson = JSON.stringify(details);
+    if (Buffer.byteLength(detailsJson, "utf8") > 512 * 1024) {
+      throw new Error(
+        processedInput
+          ? "The processed inputs are too large for a candidate submission. Trim the recording to a shorter range and try again."
+          : "The candidate details are too large to submit.",
+      );
     }
     const result = await publisherRequestWithTimeout("Combo upload creation", (signal) =>
-      fetchEditorResponse(ses, uploadApi, {
+      fetchEditorResponse(ses, candidateUploadApi, {
         method: "POST",
         credentials: "include",
         redirect: "manual",
         cache: "no-store",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify(details),
+        body: detailsJson,
         signal,
       }),
     );
@@ -168,7 +171,7 @@ async function submitComboCandidate({
         filled += bytesRead;
       }
       const part = await responseJson(
-        await fetch(`${api}/${created.id}/parts/${number}`, {
+        await fetch(`${candidateApi}/${created.id}/parts/${number}`, {
           method: "PUT",
           headers: { "X-Candidate-Token": created.token, "Content-Type": "video/mp4" },
           body: buffer,
@@ -185,7 +188,7 @@ async function submitComboCandidate({
       throw new Error("The MP4 changed during upload. Submit it again.");
     }
     const finished = await responseJson(
-      await fetch(`${api}/${created.id}/complete`, {
+      await fetch(`${candidateApi}/${created.id}/complete`, {
         method: "POST",
         headers: {
           "X-Candidate-Token": created.token,
@@ -197,10 +200,10 @@ async function submitComboCandidate({
     );
     if (finished.status !== "pending")
       throw new Error("The candidate did not reach the review queue.");
-    return { id: created.id, processedInputIncluded: includeProcessedInput };
+    return { id: created.id, processedInputIncluded: Boolean(processedInput) };
   } catch (error) {
     if (created?.id && created?.token) {
-      await fetch(`${api}/${created.id}/abort`, {
+      await fetch(`${candidateApi}/${created.id}/abort`, {
         method: "POST",
         headers: { "X-Candidate-Token": created.token },
       }).catch(() => undefined);
@@ -223,7 +226,7 @@ async function requestCandidateEditor(
 ) {
   const request = (suffix, requestOptions) => {
     const action = async (signal) => {
-      return fetchEditorResponse(ses, `${editorApi}${suffix}`, {
+      return fetchEditorResponse(ses, `${editorApi()}${suffix}`, {
         credentials: "include",
         redirect: "manual",
         cache: "no-store",
@@ -359,7 +362,7 @@ async function downloadComboCandidate(
           ses,
           "Candidate MP4 request",
           (signal) =>
-            ses.fetch(`${editorApi}/${id}/video`, {
+            ses.fetch(`${editorApi()}/${id}/video`, {
               credentials: "include",
               redirect: "manual",
               cache: "no-store",
@@ -422,7 +425,7 @@ async function previewComboCandidate(id, request, ses = publisherSession(), time
       ses,
       "Candidate MP4 preview",
       (signal) =>
-        ses.fetch(`${editorApi}/${id}/video`, {
+        ses.fetch(`${editorApi()}/${id}/video`, {
           credentials: "include",
           redirect: "manual",
           cache: "no-store",

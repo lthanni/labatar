@@ -52,6 +52,13 @@ export function isLocalMp4(recording: RecordedVideo): boolean {
   return recording.mediaKind === "local" && /\.mp4$/i.test(recording.name);
 }
 
+export function comboHasNoInputRecording(
+  link: ComboRecordingLink | undefined,
+  recording: RecordedVideo | null,
+): boolean {
+  return Boolean(link && recording && isLocalMp4(recording) && !recording.comboInputCapture);
+}
+
 export function mediaGap(hasLocalMp4: boolean, hasYouTubeVideo: boolean): ComboMediaGap {
   if (!hasLocalMp4 && !hasYouTubeVideo) return "No video";
   if (!hasYouTubeVideo) return "No YouTube video";

@@ -1,16 +1,16 @@
 const {
-  catalogOrigin,
+  getCatalogOrigin,
   publisherSession,
   publisherReadWithRecovery,
   fetchEditorResponse,
   signInToCatalog,
 } = require("./catalog-publisher.cjs");
 
-const accessUrl = `${catalogOrigin}/v1/editor/youtube-upload-access`;
+const accessUrl = () => `${getCatalogOrigin()}/v1/editor/youtube-upload-access`;
 
 async function checkYouTubeUploadAccess(ses = publisherSession()) {
   return publisherReadWithRecovery(ses, "YouTube upload access check", async (signal) => {
-    const result = await fetchEditorResponse(ses, accessUrl, {
+    const result = await fetchEditorResponse(ses, accessUrl(), {
       credentials: "include",
       redirect: "manual",
       cache: "no-store",
@@ -26,7 +26,7 @@ async function checkYouTubeUploadAccess(ses = publisherSession()) {
 async function requireYouTubeUploadAccess(parent) {
   const ses = publisherSession();
   if (!(await checkYouTubeUploadAccess(ses))) {
-    await signInToCatalog(ses, parent, checkYouTubeUploadAccess, accessUrl);
+    await signInToCatalog(ses, parent, checkYouTubeUploadAccess, accessUrl());
   }
   if (!(await checkYouTubeUploadAccess(ses))) {
     throw new Error("Sign in to use YouTube uploads.");

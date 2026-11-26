@@ -43,6 +43,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
   app: {
     getVersion: () => ipcRenderer.invoke("app:get-version"),
     openDiscord: () => ipcRenderer.invoke("app:open-discord"),
+    openPlayerLink: (url) => ipcRenderer.invoke("app:open-player-link", url),
+  },
+  labbing: {
+    getState: () => ipcRenderer.invoke("labbing:get-state"),
+    setRecovery: (request) => ipcRenderer.invoke("labbing:set-recovery", request),
+    onState: (listener) => {
+      const handler = (_, state) => listener(state);
+      ipcRenderer.on("labbing:state", handler);
+      return () => ipcRenderer.removeListener("labbing:state", handler);
+    },
   },
   capture: {
     getState: () => ipcRenderer.invoke("capture:get-state"),
@@ -62,7 +72,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   obs: {
     getState: () => ipcRenderer.invoke("obs:get-state"),
+    getAppState: () => ipcRenderer.invoke("obs:get-app-state"),
     getSettings: () => ipcRenderer.invoke("obs:get-settings"),
+    selectRecordDirectory: () => ipcRenderer.invoke("obs:select-record-directory"),
     connect: (request) => ipcRenderer.invoke("obs:connect", request),
     openApp: () => ipcRenderer.invoke("obs:open-app"),
     clearPassword: () => ipcRenderer.invoke("obs:clear-password"),
@@ -75,6 +87,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     startRecording: (request) => ipcRenderer.invoke("obs:start-recording", request),
     startManualRecording: (request) => ipcRenderer.invoke("obs:start-manual-recording", request),
     startComboRecording: (request) => ipcRenderer.invoke("obs:start-combo-recording", request),
+    getComboInputBindings: () => ipcRenderer.invoke("obs:get-combo-input-bindings"),
+    detectControllerButton: () => ipcRenderer.invoke("obs:detect-controller-button"),
+    cancelControllerButtonDetection: () =>
+      ipcRenderer.invoke("obs:cancel-controller-button-detection"),
+    getControllerBindingArtwork: () => ipcRenderer.invoke("obs:get-controller-binding-artwork"),
+    setComboInputBindings: (bindings) =>
+      ipcRenderer.invoke("obs:set-combo-input-bindings", { bindings }),
     stopRecording: () => ipcRenderer.invoke("obs:stop-recording"),
     setAutomaticRecording: (enabled) => ipcRenderer.invoke("obs:set-automatic-recording", enabled),
     onState: (listener) => {
@@ -97,7 +116,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getGameFolderStatus: () => ipcRenderer.invoke("replays:get-game-folder-status"),
     selectFolder: () => ipcRenderer.invoke("replays:select-folder"),
     getCachedScan: (folder) => ipcRenderer.invoke("replays:get-cached-scan", folder),
-    scanFolder: (folder) => ipcRenderer.invoke("replays:scan-folder", folder),
+    scanFolder: (folder, request) => ipcRenderer.invoke("replays:scan-folder", folder, request),
     resolvePortraits: (request) => ipcRenderer.invoke("replays:resolve-portraits", request),
     showInFolder: (request) => ipcRenderer.invoke("replays:show-in-folder", request),
     zip: (request) => ipcRenderer.invoke("replays:zip", request),
@@ -129,18 +148,26 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return () => ipcRenderer.removeListener("recordings:finalized", handler);
     },
     list: (request) => ipcRenderer.invoke("recordings:list", request),
+    combineSets: (request) => ipcRenderer.invoke("recordings:combine-sets", request),
+    splitSets: (request) => ipcRenderer.invoke("recordings:split-sets", request),
     getOriginalComboInputs: (request) =>
       ipcRenderer.invoke("recordings:get-original-combo-inputs", request),
     reprocessComboInputs: (request) =>
       ipcRenderer.invoke("recordings:reprocess-combo-inputs", request),
+    setComboInputBindings: (request) =>
+      ipcRenderer.invoke("recordings:set-combo-input-bindings", request),
+    getComboInputBindings: (request) =>
+      ipcRenderer.invoke("recordings:get-combo-input-bindings", request),
     setComboInputEdit: (request) => ipcRenderer.invoke("recordings:set-combo-input-edit", request),
     importComboMp4: () => ipcRenderer.invoke("recordings:import-combo-mp4"),
+    importMp4: () => ipcRenderer.invoke("recordings:import-mp4"),
     getChapters: (request) => ipcRenderer.invoke("recordings:get-chapters", request),
     openFrameReader: (request) => ipcRenderer.invoke("recordings:frame-reader-open", request),
     readFrame: (request) => ipcRenderer.invoke("recordings:frame-reader-read", request),
     closeFrameReader: (request) => ipcRenderer.invoke("recordings:frame-reader-close", request),
     exportClip: (request) => ipcRenderer.invoke("recordings:export-clip", request),
     exportClipFast: (request) => ipcRenderer.invoke("recordings:export-clip-fast", request),
+    exportCaption: (request) => ipcRenderer.invoke("recordings:export-caption", request),
     renderComboInputs: (request) => ipcRenderer.invoke("recordings:render-combo-inputs", request),
     trimClip: (request) => ipcRenderer.invoke("recordings:trim-clip", request),
     createF10Clips: (request) => ipcRenderer.invoke("recordings:create-f10-clips", request),
@@ -174,6 +201,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     setMoveEvidence: (request) => ipcRenderer.invoke("recordings:set-move-evidence", request),
     reviewCapture: (request) => ipcRenderer.invoke("recordings:review-capture", request),
     deleteRecording: (request) => ipcRenderer.invoke("recordings:delete", request),
+    replaceClipParents: (pairs) => ipcRenderer.invoke("recordings:replace-clip-parents", pairs),
     deletePendingMove: (request) => ipcRenderer.invoke("recordings:delete-pending-move", request),
     deleteMoveTake: (request) => ipcRenderer.invoke("recordings:delete-move-take", request),
     startDrag: (request) => ipcRenderer.send("recordings:start-drag", request),
@@ -184,9 +212,28 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
   },
   catalogPublisher: {
+    selectGuideVideo: () => ipcRenderer.invoke("catalog:select-guide-video"),
+    getGuidePublication: (id, interactive = false) =>
+      ipcRenderer.invoke("catalog:guide-publication", id, interactive),
     publishCombo: (request) => ipcRenderer.invoke("catalog:publish-combo", request),
+    publishTech: (request) => ipcRenderer.invoke("catalog:publish-tech", request),
+    unpublishPlayer: (request) => ipcRenderer.invoke("catalog:unpublish-player", request),
     unpublishCombo: (request) => ipcRenderer.invoke("catalog:unpublish-combo", request),
     isOwner: () => ipcRenderer.invoke("catalog:is-owner"),
+  },
+  videoLibrary: {
+    list: () => ipcRenderer.invoke("video-library:list"),
+    chooseMp4: () => ipcRenderer.invoke("video-library:choose-mp4"),
+    fromRecording: (id) => ipcRenderer.invoke("video-library:from-recording", id),
+  },
+  guideVideo: {
+    startRecording: (title) => ipcRenderer.invoke("guide-video:start-recording", title),
+    stopRecording: (sessionId) => ipcRenderer.invoke("guide-video:stop-recording", sessionId),
+    export: (request) => ipcRenderer.invoke("guide-video:export", request),
+  },
+  catalogBackend: {
+    get: () => ipcRenderer.invoke("catalog-backend:get"),
+    set: (mode) => ipcRenderer.invoke("catalog-backend:set", mode),
   },
   comboCandidates: {
     status: () => ipcRenderer.invoke("combo-candidates:status"),

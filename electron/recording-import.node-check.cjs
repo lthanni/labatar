@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { importComboMp4 } = require("./recording-import.cjs");
+const { importComboMp4, importMp4 } = require("./recording-import.cjs");
 
 void test("imports an MP4 into the recording library and reuses files already there", async () => {
   const sandbox = await fs.promises.mkdtemp(path.join(os.tmpdir(), "labatar-combo-import-"));
@@ -13,6 +13,17 @@ void test("imports an MP4 into the recording library and reuses files already th
     await fs.promises.mkdir(library);
     const source = path.join(root, "route.mp4");
     await fs.promises.writeFile(source, "sample video data");
+
+    const generic = await importMp4(source, library);
+    assert.match(generic.recordingId, /^Imported Videos\/route-.*\.mp4$/);
+    assert.equal(
+      await fs.promises.readFile(path.join(library, generic.recordingId), "utf8"),
+      "sample video data",
+    );
+    assert.deepEqual(await importMp4(path.join(library, generic.recordingId), library), {
+      recordingId: generic.recordingId,
+      imported: false,
+    });
 
     const first = await importComboMp4(source, library);
     assert.equal(first.imported, true);

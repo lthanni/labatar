@@ -69,6 +69,17 @@ function combo(id = "aang-basic") {
   };
 }
 
+void test("starter override preserves a distinct input route", () => {
+  const record = validateRecord("combo", { ...combo(), starterOverride: " 5B " }, "aang-basic");
+  assert.equal(record.route, "2A > 5B > 236A");
+  assert.equal(record.starterOverride, "5B");
+  assert.equal(validateRecord("combo", combo(), "aang-basic").starterOverride, undefined);
+  assert.throws(
+    () => validateRecord("combo", { ...combo(), starterOverride: "x".repeat(101) }, "aang-basic"),
+    /starterOverride/,
+  );
+});
+
 function request(path, method = "GET", body, headers = {}) {
   return new Request(`https://api.example.com${path}`, {
     method,
@@ -681,7 +692,7 @@ test("public reads, editor writes, revision conflicts and unpublishing", async (
       request(
         "/v1/editor/combos/aang-basic",
         "PUT",
-        { ...combo(), sourceCandidateId },
+        { ...combo(), sourceCandidateId, starterOverride: "5B" },
         { "If-None-Match": "*" },
       ),
       env,
@@ -692,6 +703,10 @@ test("public reads, editor writes, revision conflicts and unpublishing", async (
     assert.equal((await created.json()).revision, 1);
     const publicList = await handleRequest(request("/v1/combos?character=aang"), env);
     assert.equal((await publicList.json()).items[0].youtubeVideoId, videoId);
+    assert.equal(
+      (await (await handleRequest(request("/v1/combos"), env)).json()).items[0].starterOverride,
+      "5B",
+    );
     const sourced = await handleRequest(request("/v1/combos?character=aang"), env);
     assert.equal((await sourced.json()).items[0].sourceCandidateId, sourceCandidateId);
     const duplicate = await handleRequest(
@@ -740,6 +755,49 @@ test("public reads, editor writes, revision conflicts and unpublishing", async (
     assert.deepEqual((await after.json()).items, []);
     const editorList = await handleRequest(request("/v1/editor/combos"), env, {}, editor);
     assert.equal((await editorList.json()).items[0].published, false);
+  } finally {
+    db.close();
+  }
+});
+
+void test("combo matchup lists survive legacy edits and can be explicitly cleared", async () => {
+  const db = database();
+  const env = { DB: db };
+  const editor = async () => "editor@example.com";
+  const path = "/v1/editor/combos/aang-basic";
+  const readMatchups = async () =>
+    (await (await handleRequest(request("/v1/combos"), env)).json()).items[0]
+      .characterCompatibility;
+  const put = (body, headers) =>
+    handleRequest(request(path, "PUT", body, headers), env, {}, editor);
+  try {
+    const characterCompatibility = { whitelist: ["korra"], blacklist: ["toph"] };
+    assert.equal(
+      (await put({ ...combo(), characterCompatibility }, { "If-None-Match": "*" })).status,
+      201,
+    );
+    assert.deepEqual(await readMatchups(), characterCompatibility);
+
+    for (const invalid of [
+      { whitelist: ["toph"], blacklist: ["toph"] },
+      { whitelist: ["toph", "toph"], blacklist: [] },
+      { whitelist: ["Avatar Aang"], blacklist: [] },
+      { whitelist: "korra", blacklist: [] },
+    ]) {
+      assert.equal(
+        (await put({ ...combo(), characterCompatibility: invalid }, { "If-Match": '"1"' })).status,
+        400,
+      );
+    }
+    assert.equal((await put(combo(), { "If-Match": '"1"' })).status, 200);
+    assert.deepEqual(await readMatchups(), characterCompatibility);
+
+    const cleared = { whitelist: [], blacklist: [] };
+    assert.equal(
+      (await put({ ...combo(), characterCompatibility: cleared }, { "If-Match": '"2"' })).status,
+      200,
+    );
+    assert.deepEqual(await readMatchups(), cleared);
   } finally {
     db.close();
   }

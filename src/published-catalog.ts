@@ -1,5 +1,9 @@
 import type { ComboNote } from "./tech-types";
 import type { ProcessedComboInput } from "./recording-types";
+import {
+  isComboCharacterCompatibility,
+  type ComboCharacterCompatibility,
+} from "./combo-character-compatibility";
 
 const databaseName = "labatar-published-catalog-v1";
 const storeName = "snapshots";
@@ -11,6 +15,18 @@ const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const catalogApiUrl =
   import.meta.env.VITE_CATALOG_API_URL?.replace(/\/$/, "") ??
   "https://labatar-catalog.landenhanni.workers.dev";
+
+export async function currentCatalogApiUrl(): Promise<string> {
+  const backend = typeof window === "undefined" ? undefined : window.electronAPI?.catalogBackend;
+  return backend ? (await backend.get()).origin : catalogApiUrl;
+}
+
+async function currentSnapshotKey(): Promise<string> {
+  const origin = await currentCatalogApiUrl();
+  return origin === "https://labatar-catalog.landenhanni.workers.dev"
+    ? snapshotKey
+    : `${snapshotKey}:${origin}`;
+}
 
 export type PublishedMove = {
   id: string;
@@ -39,10 +55,12 @@ export type PublishedCombo = {
   name?: string;
   difficulty?: number | null;
   route: string;
+  starterOverride?: string;
   processedInput?: ProcessedComboInput;
   inputFacing?: "right" | "left";
   starterIsNonAttackStance?: boolean;
   routingMode?: "autopilot" | "unique";
+  characterCompatibility?: ComboCharacterCompatibility;
   moveIds: string[];
   screenPosition: string | null;
   damage: string;
@@ -116,6 +134,8 @@ export function isPublishedCombo(value: unknown): value is PublishedCombo {
         Number(value.difficulty) >= 1 &&
         Number(value.difficulty) <= 5)) &&
     typeof value.route === "string" &&
+    (value.starterOverride === undefined ||
+      (typeof value.starterOverride === "string" && value.starterOverride.length <= 100)) &&
     (value.processedInput === undefined ||
       (isRecord(value.processedInput) &&
         value.processedInput.schemaVersion === 1 &&
@@ -131,6 +151,8 @@ export function isPublishedCombo(value: unknown): value is PublishedCombo {
     (value.routingMode === undefined ||
       value.routingMode === "autopilot" ||
       value.routingMode === "unique") &&
+    (value.characterCompatibility === undefined ||
+      isComboCharacterCompatibility(value.characterCompatibility)) &&
     Array.isArray(value.moveIds) &&
     value.moveIds.every(isSlug) &&
     isOptionalText(value.screenPosition) &&
@@ -190,9 +212,10 @@ export function parsePublishedCatalog(value: unknown): PublishedCatalog {
 
 export async function fetchPublishedCatalog(
   fetcher: typeof fetch = fetch,
-  apiUrl = catalogApiUrl,
+  apiUrl?: string,
   signal?: AbortSignal,
 ): Promise<PublishedCatalog> {
+  apiUrl ??= await currentCatalogApiUrl();
   const [movesResponse, combosResponse] = await Promise.all([
     fetcher(`${apiUrl}/v1/moves`, { signal, cache: "no-store" }),
     fetcher(`${apiUrl}/v1/combos`, { signal, cache: "no-store" }),
@@ -210,9 +233,10 @@ export async function fetchPublishedCatalog(
 
 export async function fetchPublishedCombos(
   fetcher: typeof fetch = fetch,
-  apiUrl = catalogApiUrl,
+  apiUrl?: string,
   signal?: AbortSignal,
 ): Promise<PublishedCombo[]> {
+  apiUrl ??= await currentCatalogApiUrl();
   const response = await fetcher(`${apiUrl}/v1/combos`, { signal, cache: "no-store" });
   if (!response.ok) throw new Error("The published combos could not be loaded.");
   return parseItems(await response.json(), isPublishedCombo).map(cleanPublishedCombo);
@@ -228,13 +252,11 @@ function openDatabase(): Promise<IDBDatabase> {
 }
 
 export async function readPublishedCatalogCache(): Promise<PublishedCatalog | null> {
+  const key = await currentSnapshotKey();
   const database = await openDatabase();
   try {
     const cached = await new Promise<unknown>((resolve, reject) => {
-      const request = database
-        .transaction(storeName, "readonly")
-        .objectStore(storeName)
-        .get(snapshotKey);
+      const request = database.transaction(storeName, "readonly").objectStore(storeName).get(key);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -245,11 +267,12 @@ export async function readPublishedCatalogCache(): Promise<PublishedCatalog | nu
 }
 
 export async function writePublishedCatalogCache(catalog: PublishedCatalog): Promise<void> {
+  const key = await currentSnapshotKey();
   const database = await openDatabase();
   try {
     await new Promise<void>((resolve, reject) => {
       const transaction = database.transaction(storeName, "readwrite");
-      transaction.objectStore(storeName).put(catalog, snapshotKey);
+      transaction.objectStore(storeName).put(catalog, key);
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
       transaction.onabort = () => reject(transaction.error);

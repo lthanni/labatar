@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { ComboCharacterCompatibilityFields } from "./ComboCharacterCompatibility";
 import {
   Alert,
   Box,
@@ -30,11 +31,13 @@ export function ComboCandidateReview({
   onChanged,
   savedRecording,
   onRecordingSaved,
+  media,
 }: {
   candidate: ComboCandidate;
   onChanged: (candidate: ComboCandidate, recording?: RecordedVideo) => Promise<void>;
   savedRecording: RecordedVideo | null;
   onRecordingSaved: (recording: RecordedVideo) => void;
+  media?: ReactNode;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -221,6 +224,37 @@ export function ComboCandidateReview({
         </Typography>
         {error && <Alert severity="error">{error}</Alert>}
         {message && <Alert severity="success">{message}</Alert>}
+        {(candidate.status === "pending" || candidate.status === "approved") && (
+          <Stack
+            direction={{ xs: "column", sm: "row" }}
+            spacing={1}
+            sx={{ alignItems: { sm: "center" } }}
+          >
+            <Button
+              size="small"
+              variant="outlined"
+              color="secondary"
+              onClick={() => {
+                setDraft({ ...candidate.combo, notes: [...candidate.combo.notes] });
+                setMoveIdsText(candidate.combo.moveIds.join("\n"));
+                setMechanicsText(candidate.combo.mechanics.join("\n"));
+              }}
+              disabled={busy}
+            >
+              Edit candidate details
+            </Button>
+            <TextField
+              size="small"
+              label="Rejection reason (optional)"
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              sx={{ flex: 1, minWidth: 220 }}
+            />
+            <Button size="small" variant="outlined" color="error" onClick={reject} disabled={busy}>
+              Reject candidate
+            </Button>
+          </Stack>
+        )}
         <Typography variant="body2" color="text.secondary">
           Queued MP4: {candidate.fileName} ({Math.round(candidate.fileSize / 1024 / 1024)} MB)
         </Typography>
@@ -233,20 +267,6 @@ export function ComboCandidateReview({
         )}
         {(candidate.status === "pending" || candidate.status === "approved") && (
           <>
-            <Button
-              size="small"
-              variant="outlined"
-              color="secondary"
-              onClick={() => {
-                setDraft({ ...candidate.combo, notes: [...candidate.combo.notes] });
-                setMoveIdsText(candidate.combo.moveIds.join("\n"));
-                setMechanicsText(candidate.combo.mechanics.join("\n"));
-              }}
-              disabled={busy}
-              sx={{ alignSelf: "flex-start" }}
-            >
-              Edit candidate details
-            </Button>
             {recording ? (
               <Alert severity="success">
                 MP4 saved in the recording library. Play it above or open it there to trim it. The
@@ -260,6 +280,7 @@ export function ComboCandidateReview({
             )}
           </>
         )}
+        {media}
         {(candidate.status === "pending" || candidate.status === "approved") && (
           <>
             <Divider />
@@ -330,6 +351,7 @@ export function ComboCandidateReview({
                 fullWidth
               />
               <Button
+                variant="contained"
                 color="secondary"
                 disabled={busy || !youtubeUrl.trim()}
                 onClick={() =>
@@ -342,27 +364,6 @@ export function ComboCandidateReview({
                 Save link
               </Button>
             </Stack>
-          </>
-        )}
-        {(candidate.status === "pending" || candidate.status === "approved") && (
-          <>
-            <Divider />
-            <TextField
-              size="small"
-              label="Rejection reason (optional)"
-              value={reason}
-              onChange={(event) => setReason(event.target.value)}
-            />
-            <Button
-              size="small"
-              variant="outlined"
-              color="error"
-              onClick={reject}
-              disabled={busy}
-              sx={{ alignSelf: "flex-start" }}
-            >
-              Reject candidate
-            </Button>
           </>
         )}
         {candidate.status === "rejected" && candidate.rejectionReason && (
@@ -415,6 +416,14 @@ export function ComboCandidateReview({
                         : current,
                     );
                   }}
+                  sx={{ gridColumn: "1 / -1" }}
+                />
+                <TextField
+                  label="Starter move override"
+                  value={draft.starterOverride ?? ""}
+                  onChange={(event) => updateDraft("starterOverride", event.target.value)}
+                  helperText="Optional. Name the move that came out when the first route input produced a different move."
+                  slotProps={{ htmlInput: { maxLength: 100 } }}
                   sx={{ gridColumn: "1 / -1" }}
                 />
                 {draft.route && draft.route !== formatComboRoute(draft.route) && (
@@ -520,6 +529,10 @@ export function ComboCandidateReview({
                   <option value="autopilot">Autopilot</option>
                   <option value="unique">Unique routing</option>
                 </TextField>
+                <ComboCharacterCompatibilityFields
+                  value={draft.characterCompatibility}
+                  onChange={(value) => updateDraft("characterCompatibility", value)}
+                />
                 <TextField
                   label="Move IDs, one per line"
                   multiline
@@ -606,6 +619,7 @@ export function ComboCandidateReview({
                     </Stack>
                   ))}
                   <Button
+                    variant="contained"
                     color="secondary"
                     onClick={() =>
                       setDraft((current) =>

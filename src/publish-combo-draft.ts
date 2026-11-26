@@ -1,6 +1,7 @@
 import type { PublishedCombo } from "./published-catalog";
 import type { ComboNote } from "./tech-types";
 import { youtubeVideoId } from "./YouTubeRecordingPlayer";
+import type { ComboCharacterCompatibility } from "./combo-character-compatibility";
 
 export type PublishComboDraft = {
   schemaVersion: 1;
@@ -15,8 +16,10 @@ export type PublishComboDraft = {
     name?: string;
     difficulty?: number;
     route: string;
+    starterOverride?: string;
     starterIsNonAttackStance?: boolean;
     routingMode?: "autopilot" | "unique";
+    characterCompatibility?: ComboCharacterCompatibility;
     moveIds: string[];
     screenPosition: string;
     damage: string;
@@ -39,8 +42,12 @@ export function publishedComboFromDraft(draft: PublishComboDraft): PublishedComb
     name: draft.combo.name ?? "",
     difficulty: draft.combo.difficulty ?? null,
     route: draft.combo.route.trim(),
+    ...(draft.combo.starterOverride?.trim()
+      ? { starterOverride: draft.combo.starterOverride.trim() }
+      : {}),
     ...(draft.combo.starterIsNonAttackStance ? { starterIsNonAttackStance: true } : {}),
     routingMode: draft.combo.routingMode ?? "autopilot",
+    characterCompatibility: draft.combo.characterCompatibility,
     moveIds: draft.combo.moveIds,
     screenPosition: draft.combo.screenPosition.trim(),
     damage: draft.combo.damage.trim(),

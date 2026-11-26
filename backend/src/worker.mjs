@@ -5,6 +5,15 @@ import {
 } from "./candidates.mjs";
 import { validateProcessedComboInput } from "./processed-combo-input.mjs";
 import { sendDiscordAlert } from "./discord-alerts.mjs";
+import { handleTechRequest } from "./tech.mjs";
+import { handleCharacterNotesRequest } from "./character-notes.mjs";
+import {
+  handleGuidePublications,
+  processGuidePublications,
+  cleanGuideVideos,
+} from "./guide-publications.mjs";
+import { handleChannelsRequest } from "./channels.mjs";
+import { handlePlayersRequest } from "./players.mjs";
 
 const idPattern = /^[a-z0-9][a-z0-9-]{0,99}$/;
 const videoIdPattern = /^[A-Za-z0-9_-]{11}$/;
@@ -45,10 +54,12 @@ const allowedComboFields = new Set([
   "name",
   "difficulty",
   "route",
+  "starterOverride",
   "processedInput",
   "inputFacing",
   "starterIsNonAttackStance",
   "routingMode",
+  "characterCompatibility",
   "moveIds",
   "screenPosition",
   "damage",
@@ -109,6 +120,32 @@ function comboDifficulty(value) {
     throw new Error("difficulty must be a whole number from 1 to 5.");
   }
   return value;
+}
+
+function characterCompatibility(value) {
+  if (!isObject(value)) throw new Error("Character compatibility must be an object.");
+  exactFields(value, new Set(["whitelist", "blacklist"]));
+  const lists = {};
+  for (const field of ["whitelist", "blacklist"]) {
+    const entries = value[field];
+    if (!Array.isArray(entries) || entries.length > 100) {
+      throw new Error(`Character ${field} must be a list of at most 100 character IDs.`);
+    }
+    lists[field] = entries.map((entry) => {
+      const characterId = id(entry, `Character ${field} entry`);
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(characterId)) {
+        throw new Error(`Invalid character ID in ${field}: ${characterId}.`);
+      }
+      return characterId;
+    });
+    if (new Set(lists[field]).size !== lists[field].length) {
+      throw new Error(`Character ${field} contains duplicate IDs.`);
+    }
+  }
+  if (lists.whitelist.some((characterId) => lists.blacklist.includes(characterId))) {
+    throw new Error("A character cannot be both whitelisted and blacklisted.");
+  }
+  return lists;
 }
 
 function resourceCosts(value) {
@@ -355,6 +392,7 @@ export function validateRecord(kind, value, pathId) {
     throw new Error("startSeconds must be between 0 and 86400.");
   }
   const route = content(value.route, "route", 2000);
+  const starterOverride = optionalContent(value.starterOverride, "starterOverride", 100);
   if ((value.processedInput === undefined) !== (value.inputFacing === undefined)) {
     throw new Error("Processed inputs and inputFacing must be supplied together.");
   }
@@ -372,6 +410,7 @@ export function validateRecord(kind, value, pathId) {
     name: optionalContent(value.name, "name", 160),
     difficulty: comboDifficulty(value.difficulty),
     route,
+    ...(starterOverride ? { starterOverride } : {}),
     ...(value.processedInput
       ? { processedInput: value.processedInput, inputFacing: value.inputFacing }
       : {}),
@@ -380,6 +419,9 @@ export function validateRecord(kind, value, pathId) {
       "starterIsNonAttackStance",
     ),
     routingMode: routingMode(value.routingMode),
+    ...(value.characterCompatibility === undefined
+      ? {}
+      : { characterCompatibility: characterCompatibility(value.characterCompatibility) }),
     moveIds: value.moveIds.map((item) => id(item, "moveId")),
     screenPosition: comboScreenPosition(value.screenPosition),
     damage: content(value.damage, "damage", 100),
@@ -753,6 +795,9 @@ async function putRecord(request, env, kind, pathId, email) {
         .bind(kind, pathId, expected)
         .all();
       const previousCombo = JSON.parse(previous.results?.[0]?.payload ?? "{}");
+      if (body.characterCompatibility === undefined) {
+        body.characterCompatibility = previousCombo.characterCompatibility;
+      }
       const sourceCandidateId = previousCombo.sourceCandidateId;
       if (sourceCandidateId) {
         if (body.sourceCandidateId && body.sourceCandidateId !== sourceCandidateId) {
@@ -860,6 +905,22 @@ export async function handleRequest(
     });
   }
   if (!env.DB) return fail("Database binding is unavailable.", 503);
+  const guideResponse = await handleGuidePublications(request, env, getEditor);
+  if (guideResponse) return guideResponse;
+  const techResponse = await handleTechRequest(request, env.DB, url, (req) => getEditor(req, env));
+  if (techResponse) return techResponse;
+  const notesResponse = await handleCharacterNotesRequest(request, env.DB, url, (req) =>
+    getEditor(req, env),
+  );
+  if (notesResponse) return notesResponse;
+  const channelsResponse = await handleChannelsRequest(request, env.DB, url, (req) =>
+    getEditor(req, env),
+  );
+  if (channelsResponse) return channelsResponse;
+  const playersResponse = await handlePlayersRequest(request, env.DB, url, (req) =>
+    getEditor(req, env),
+  );
+  if (playersResponse) return playersResponse;
   const candidateResponse = await handleCandidateRequest(
     request,
     env,
@@ -1038,6 +1099,26 @@ export async function handleRequest(
     }
     return new Response(asset.body, { status: asset.status, headers });
   }
+  if (request.method === "GET" && /^\/v1\/editor\/tech(?:\.js)?$/.test(path)) {
+    try {
+      await getEditor(request, env);
+    } catch {
+      return fail("Editor authentication required.", 401, true);
+    }
+    if (!env.ASSETS) return fail("Editor assets are unavailable.", 503, true);
+    const asset = await env.ASSETS.fetch(request);
+    const headers = new Headers(asset.headers);
+    headers.set("Cache-Control", "private, no-store");
+    headers.set("X-Content-Type-Options", "nosniff");
+    headers.set("Referrer-Policy", "no-referrer");
+    if (path === "/v1/editor/tech") {
+      headers.set(
+        "Content-Security-Policy",
+        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      );
+    }
+    return new Response(asset.body, { status: asset.status, headers });
+  }
   const editorRoute = /^\/v1\/editor\/(moves|combos)(?:\/([a-z0-9][a-z0-9-]{0,99}))?$/.exec(path);
   const publicRoute = /^\/v1\/(moves|combos)$/.exec(path);
   if (!editorRoute && !publicRoute) return fail("Not found.", 404);
@@ -1076,4 +1157,10 @@ export async function handleRequest(
   }
 }
 
-export default { fetch: handleRequest };
+export default {
+  fetch: handleRequest,
+  async scheduled(_event, env) {
+    await processGuidePublications(env);
+    await cleanGuideVideos(env);
+  },
+};

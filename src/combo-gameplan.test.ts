@@ -33,6 +33,23 @@ const published: PublishedCombo = {
 };
 
 describe("personal combo workspace", () => {
+  it("keeps the input route separate from a manually chosen starter", () => {
+    const catalog = { ...published, route: "2A > 5B", starterOverride: "5B" };
+    const publishedItem = comboItems([catalog], [], [])[0];
+    expect(publishedItem.route).toBe("2A > 5B");
+    expect(publishedItem.starter).toBe("5B");
+
+    const local = localRevisionDraft(
+      { ...publishedItem, published: { ...catalog, revision: 1 } },
+      "local-1",
+    )!;
+    expect(local.starterOverride).toBe("5B");
+    expect(comboItems([], [], [local])[0].starter).toBe("5B");
+    const restored = parseComboWorkspace({ version: 1, localCombos: [local] });
+    expect(restored.localCombos[0].starter).toBe("5B");
+    expect(comboItems([], [], [{ ...local, starterOverride: "" }])[0].starter).toBe("2A");
+  });
+
   it("omits starters held only by rejected, untracked candidates", () => {
     const base = comboItems([{ ...published, route: "2B 5C" }], [], [])[0];
     const rejected = {

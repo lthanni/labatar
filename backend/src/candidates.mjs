@@ -134,15 +134,26 @@ function sameComboIdentity(candidateCombo, publishedCombo) {
     candidateCombo.damage !== publishedCombo.damage ||
     candidateCombo.screenPosition !== publishedCombo.screenPosition ||
     Boolean(candidateCombo.starterIsNonAttackStance) !==
-      Boolean(publishedCombo.starterIsNonAttackStance)
+      Boolean(publishedCombo.starterIsNonAttackStance) ||
+    (candidateCombo.starterOverride ?? "") !== (publishedCombo.starterOverride ?? "")
   )
     return false;
   const sortedEntries = (value) =>
     JSON.stringify(Object.entries(value ?? {}).sort(([a], [b]) => a.localeCompare(b)));
   const sortedMechanics = (value) => JSON.stringify([...(value ?? [])].sort());
+  const sameCharacterIds = (left = [], right = []) =>
+    left.length === right.length && left.every((id) => right.includes(id));
   return (
     sortedEntries(candidateCombo.resourceCosts) === sortedEntries(publishedCombo.resourceCosts) &&
-    sortedMechanics(candidateCombo.mechanics) === sortedMechanics(publishedCombo.mechanics)
+    sortedMechanics(candidateCombo.mechanics) === sortedMechanics(publishedCombo.mechanics) &&
+    sameCharacterIds(
+      candidateCombo.characterCompatibility?.whitelist,
+      publishedCombo.characterCompatibility?.whitelist,
+    ) &&
+    sameCharacterIds(
+      candidateCombo.characterCompatibility?.blacklist,
+      publishedCombo.characterCompatibility?.blacklist,
+    )
   );
 }
 
@@ -209,9 +220,10 @@ async function createCandidate(request, env, validateRecord, submitterEmail) {
       if (!["right", "left"].includes(input.inputFacing))
         throw new Error("Choose a facing for the processed combo inputs.");
       const route = input.processedInput.routes[input.inputFacing];
-      if (!route || (input.combo?.route !== undefined && input.combo.route !== route))
-        throw new Error("The processed input route must match the submitted combo route.");
-      input.combo = { ...input.combo, route };
+      if (input.combo?.route === undefined) {
+        if (!route) throw new Error("The processed inputs need a route or submitted combo route.");
+        input.combo = { ...input.combo, route };
+      }
     } else if (input.inputFacing !== undefined) {
       throw new Error("Input facing requires processed combo inputs.");
     }
@@ -258,6 +270,37 @@ async function createCandidate(request, env, validateRecord, submitterEmail) {
     upload = await env.CANDIDATE_VIDEOS.createMultipartUpload(objectKey, {
       httpMetadata: { contentType: "video/mp4" },
     });
+  } catch (error) {
+    console.error("Candidate R2 multipart creation failed", id, error);
+    return fail("Could not start candidate upload in video storage.", 503);
+  }
+  const payload = JSON.stringify({
+    ...input.combo,
+    originCandidateId: input.originCandidateId ?? id,
+    ...(input.processedInput
+      ? { processedInput: input.processedInput, inputFacing: input.inputFacing }
+      : {}),
+  });
+  const insertWithoutSubmitter = async () =>
+    env.DB.prepare(`
+      INSERT INTO combo_candidates
+        (id, combo_payload, file_name, file_size, object_key, upload_id,
+         upload_token_hash, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?)
+    `)
+      .bind(
+        id,
+        payload,
+        input.fileName,
+        input.fileSize,
+        objectKey,
+        upload.uploadId,
+        await tokenHash(token),
+        now,
+        now,
+      )
+      .run();
+  try {
     await env.DB.prepare(`
       INSERT INTO combo_candidates
         (id, combo_payload, submitter_email, file_name, file_size, object_key, upload_id,
@@ -266,13 +309,7 @@ async function createCandidate(request, env, validateRecord, submitterEmail) {
     `)
       .bind(
         id,
-        JSON.stringify({
-          ...input.combo,
-          originCandidateId: input.originCandidateId ?? id,
-          ...(input.processedInput
-            ? { processedInput: input.processedInput, inputFacing: input.inputFacing }
-            : {}),
-        }),
+        payload,
         submitterEmail,
         input.fileName,
         input.fileSize,
@@ -283,9 +320,28 @@ async function createCandidate(request, env, validateRecord, submitterEmail) {
         now,
       )
       .run();
-  } catch {
-    if (upload) await upload.abort().catch(() => undefined);
-    return fail("Could not start candidate upload.", 500);
+  } catch (error) {
+    if (/no column named submitter_email|no such column: submitter_email/i.test(String(error))) {
+      console.warn(
+        "Candidate D1 submitter_email migration is missing; accepting upload without submitter email",
+        id,
+      );
+      try {
+        await insertWithoutSubmitter();
+      } catch (fallbackError) {
+        console.error("Candidate D1 insert failed after legacy schema fallback", id, fallbackError);
+        await upload
+          .abort()
+          .catch((abortError) => console.error("Candidate R2 abort failed", id, abortError));
+        return fail("Could not save candidate upload in the database.", 500);
+      }
+    } else {
+      console.error("Candidate D1 insert failed", id, error);
+      await upload
+        .abort()
+        .catch((abortError) => console.error("Candidate R2 abort failed", id, abortError));
+      return fail("Could not save candidate upload in the database.", 500);
+    }
   }
   return json({ id, token, partSize, partCount: Math.ceil(input.fileSize / partSize) }, 201);
 }
@@ -322,7 +378,8 @@ async function completeCandidate(request, env, id, context, fetchDiscord) {
         (part, index) =>
           part?.partNumber !== index + 1 ||
           typeof part.etag !== "string" ||
-          !/^[a-f0-9]{32}$/i.test(part.etag),
+          part.etag.length < 1 ||
+          part.etag.length > 512,
       )
     )
       throw new Error("Upload parts are incomplete.");
@@ -425,9 +482,12 @@ async function editCandidate(request, env, id, validateRecord) {
     ) {
       throw new Error("Invalid candidate revision.");
     }
-    nextCombo = validateCandidateCombo(input.combo, validateRecord);
     const current = JSON.parse(row.combo_payload);
+    nextCombo = validateCandidateCombo(input.combo, validateRecord);
     if (nextCombo.id !== current.id) throw new Error("The catalog combo ID cannot change here.");
+    if (nextCombo.characterCompatibility === undefined && current.characterCompatibility) {
+      nextCombo.characterCompatibility = current.characterCompatibility;
+    }
   } catch (error) {
     return fail(error instanceof Error ? error.message : "Invalid candidate revision.");
   }

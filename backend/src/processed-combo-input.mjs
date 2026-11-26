@@ -17,7 +17,18 @@ function validEdit(edit) {
     if (key === "notation" && text(value, 40)) continue;
     if (key === "separator" && (value === " " || value === "~")) continue;
     if (key === "positionAfter" && position(value)) continue;
-    if (["togglePosition", "charged", "delay", "crit", "anyAttack"].includes(key) && value === true)
+    if (
+      [
+        "togglePosition",
+        "toggleFacing",
+        "hidden",
+        "charged",
+        "delay",
+        "crit",
+        "anyAttack",
+      ].includes(key) &&
+      value === true
+    )
       continue;
     if (key === "directionOverride" && typeof value === "string" && /^[1-9]{0,8}$/.test(value))
       continue;
@@ -61,7 +72,7 @@ function validPress(value, stateCount, durationMs) {
     nullableText(value.gameButton, 40) &&
     isObject(value.context) &&
     onlyKeys(value.context, ["facing", "position"]) &&
-    value.context.facing === "right" &&
+    (value.context.facing === "right" || value.context.facing === "left") &&
     position(value.context.position) &&
     (value.positionAfter === undefined ||
       value.positionAfter === null ||

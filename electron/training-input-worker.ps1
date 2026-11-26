@@ -1,3 +1,5 @@
+param([switch]$Recovery)
+
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -10,6 +12,7 @@ if (-not ('LabatarTrainingInputWorker' -as [type])) {
 using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 public static class LabatarTrainingInputWorker {
   [StructLayout(LayoutKind.Sequential)] private struct KeyInput { public ushort vk; public ushort scan; public uint flags; public uint time; public IntPtr extra; }
   [StructLayout(LayoutKind.Explicit, Size = 40)] private struct Input { [FieldOffset(0)] public uint type; [FieldOffset(8)] public KeyInput key; }
@@ -17,7 +20,7 @@ public static class LabatarTrainingInputWorker {
   [DllImport("user32.dll")] private static extern uint MapVirtualKey(uint code, uint mapType);
   [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
-  public static string ForegroundProcessName() { uint pid; GetWindowThreadProcessId(GetForegroundWindow(), out pid); if(pid==0)return "(none)"; try{return Process.GetProcessById((int)pid).ProcessName;}catch{return "(unavailable)";} }
+  public static string ForegroundProcessName() { uint pid; GetWindowThreadProcessId(GetForegroundWindow(), out pid); if(pid==0)return "(none)"; try{using(var process=Process.GetProcessById((int)pid))return process.ProcessName;}catch{return "(unavailable)";} }
   public static bool IsGameForeground() { return ForegroundProcessName().Equals("Atla", StringComparison.OrdinalIgnoreCase); }
   public static void SendKey(string name, bool down) {
     int vk; bool ext=false;
@@ -26,18 +29,47 @@ public static class LabatarTrainingInputWorker {
     if(SendInput(1,new[]{i},Marshal.SizeOf(typeof(Input)))!=1)throw new InvalidOperationException("SendInput failed (Win32 error "+Marshal.GetLastWin32Error()+").");
   }
 }
+
+public static class LabatarRecoveryInput {
+  // XINPUT_STATE has a four-byte packet number followed by XINPUT_GAMEPAD.
+  [StructLayout(LayoutKind.Explicit, Size = 16)]
+  private struct ControllerState {
+    [FieldOffset(4)] public ushort Buttons;
+  }
+
+  [DllImport("xinput1_4.dll", EntryPoint = "XInputGetState")]
+  private static extern uint GetState(uint index, out ControllerState state);
+
+  public static bool? ReadBack(int index) {
+    ControllerState state;
+    if (GetState((uint)index, out state) != 0) return null;
+    return (state.Buttons & 0x0020) != 0;
+  }
+
+  public static Task WaitForStop() {
+    // Closing the parent's stdin pipe stops polling even if Labatar exits unexpectedly.
+    return Task.Run(() => Console.In.ReadLine());
+  }
+}
 '@
+}
+
+function Read-PlayerKeyboardBindings([string]$root, [int]$player, [int]$device) {
+  $path = Join-Path $root 'data\button_config.ini'
+  $raw = Get-Content -LiteralPath $path -Raw
+  $section = [regex]::Match($raw, "(?ms)^[ \t]*Player $player\s*#-------(?<bindings>.*?)(?=^[ \t]*#-------|\z)")
+  if (-not $section.Success) { throw "Player $player bindings were not found in button_config.ini." }
+  $map = @{}
+  foreach ($binding in [regex]::Matches($section.Groups['bindings'].Value, "Device $device KEY_(?<key>[A-Z]+) -> (?<action>\w+)")) {
+    $map[$binding.Groups['action'].Value] = $binding.Groups['key'].Value
+  }
+  return $map
 }
 
 function Load-Bindings([string]$root) {
   if ($script:Bindings -and $root -eq $script:GameRoot) { return }
-  $path = Join-Path $root 'data\button_config.ini'
-  $raw = Get-Content -LiteralPath $path -Raw
-  $p1 = [regex]::Match($raw, '(?s)Player 1\s*#-------(?<bindings>.*?)#-------\s*Player 2')
-  if (-not $p1.Success) { throw 'Player 1 bindings were not found in button_config.ini.' }
-  $map = @{}
-  foreach ($m in [regex]::Matches($p1.Groups['bindings'].Value, 'Device 7 KEY_(?<key>[A-Z]+) -> (?<action>\w+)')) { $map[$m.Groups['action'].Value] = $m.Groups['key'].Value }
-  $script:Bindings = $map; $script:GameRoot = $root
+  $script:Bindings = Read-PlayerKeyboardBindings $root 1 7
+  $script:GameRoot = $root
 }
 
 function Check-Focus { if (-not [LabatarTrainingInputWorker]::IsGameForeground()) { throw "Atla.exe must remain foreground; found $([LabatarTrainingInputWorker]::ForegroundProcessName())." } }
@@ -124,6 +156,133 @@ function Invoke-Move($request, [bool]$dryRun = $false) {
       }
     }
   } finally { foreach($key in @($held)){[LabatarTrainingInputWorker]::SendKey($key,$false)} }
+}
+
+function Publish-Recovery([string]$status, [string]$direction, [string]$errorMessage, [switch]$FlowHeld) {
+  $event = @{ status = $status }
+  if ($direction) { $event.direction = $direction }
+  if ($errorMessage) { $event.error = $errorMessage }
+  if ($FlowHeld) { $event.flowHeld = $true }
+  [Console]::Out.WriteLine(($event | ConvertTo-Json -Compress))
+  [Console]::Out.Flush()
+}
+
+function Release-RecoveryKeys($held) {
+  $releaseError = $null
+  foreach ($key in $held.ToArray()) {
+    try {
+      [LabatarTrainingInputWorker]::SendKey($key, $false)
+      [void]$held.Remove($key)
+    } catch {
+      $releaseError = $_
+    }
+  }
+  if ($releaseError) { throw $releaseError }
+}
+
+function Invoke-Recovery($request, $stop) {
+  $bindings = Read-PlayerKeyboardBindings ([string]$request.gameRoot) 2 8
+  $directionKeys = @{}
+  foreach ($direction in $request.directions) {
+    $directionKeys[$direction] = @($direction.Split('-') | ForEach-Object {
+      if (-not $bindings.ContainsKey($_)) { throw "No Player 2 keyboard binding for $_." }
+      $bindings[$_]
+    } | Select-Object -Unique)
+  }
+  $flowKey = $null
+  if ($request.flowMode -in @('always', 'random')) {
+    $flowKey = $bindings['Atk4']
+    if (-not $flowKey) { throw 'No Player 2 keyboard binding for Flow.' }
+  }
+  $delayMs = [long]$request.delayMs
+  $holdMs = [long]$request.holdMs
+  $held = [System.Collections.Generic.List[string]]::new()
+  $clock = [System.Diagnostics.Stopwatch]::StartNew()
+  $device = -1
+  $previousBack = $null
+  $phase = 'waiting-for-controller'
+  $direction = $null
+  $deadline = 0
+  Publish-Recovery $phase
+
+  try {
+    while (-not $stop.IsCompleted) {
+      $back = $null
+      if ($device -ge 0) {
+        $back = [LabatarRecoveryInput]::ReadBack($device)
+      } else {
+        for ($i = 0; $i -lt 4; $i++) {
+          $back = [LabatarRecoveryInput]::ReadBack($i)
+          if ($null -ne $back) { $device = $i; break }
+        }
+      }
+      if ($null -eq $back) {
+        if ($phase -ne 'waiting-for-controller') {
+          Release-RecoveryKeys $held
+          $phase = 'waiting-for-controller'
+          Publish-Recovery $phase
+        }
+        $previousBack = $null
+        Start-Sleep -Milliseconds 100
+        continue
+      }
+      if ($phase -eq 'waiting-for-controller') {
+        $phase = 'ready'
+        Publish-Recovery $phase
+      }
+
+      $pressed = $back -and $previousBack -eq $false
+      $previousBack = $back
+      $now = $clock.ElapsedMilliseconds
+      $gameFocused = ($pressed -or $phase -ne 'ready') -and [LabatarTrainingInputWorker]::IsGameForeground()
+      if ($pressed -and $gameFocused) {
+        Release-RecoveryKeys $held
+        $deadline = $clock.ElapsedMilliseconds + $delayMs
+        $phase = 'delay'
+        Publish-Recovery $phase
+      } elseif ($phase -ne 'ready' -and (-not $gameFocused -or ($phase -eq 'holding' -and $now -ge $deadline))) {
+        Release-RecoveryKeys $held
+        $phase = 'ready'
+        Publish-Recovery $phase
+      }
+
+      if ($phase -eq 'delay' -and $clock.ElapsedMilliseconds -ge $deadline -and -not $stop.IsCompleted) {
+        if ([LabatarTrainingInputWorker]::IsGameForeground()) {
+          $direction = Get-Random -InputObject $request.directions
+          $flowHeld = $request.flowMode -eq 'always' -or ($request.flowMode -eq 'random' -and (Get-Random -Maximum 2) -eq 1)
+          $keys = $directionKeys[$direction]
+          if ($flowHeld -and $keys -notcontains $flowKey) { $keys = $keys + $flowKey }
+          foreach ($key in $keys) {
+            [LabatarTrainingInputWorker]::SendKey($key, $true)
+            $held.Add($key)
+          }
+          $deadline = $clock.ElapsedMilliseconds + $holdMs
+          $phase = 'holding'
+          Publish-Recovery $phase $direction -FlowHeld:$flowHeld
+        } else {
+          $phase = 'ready'
+          Publish-Recovery $phase
+        }
+      }
+      Start-Sleep -Milliseconds 8
+    }
+  } finally {
+    Release-RecoveryKeys $held
+  }
+}
+
+if ($Recovery) {
+  try {
+    $line = [Console]::In.ReadLine()
+    if ($null -ne $line) {
+      $request = $line | ConvertFrom-Json
+      Invoke-Recovery $request ([LabatarRecoveryInput]::WaitForStop())
+    }
+  } catch {
+    Publish-Recovery 'off' '' $_.Exception.Message
+    exit 1
+  }
+  return
 }
 
 while ($null -ne ($line = [Console]::In.ReadLine())) {

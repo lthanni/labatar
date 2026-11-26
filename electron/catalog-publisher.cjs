@@ -1,9 +1,9 @@
 const { BrowserWindow, dialog, session } = require("electron");
+const { getCatalogOrigin } = require("./catalog-backend.cjs");
 
-const catalogOrigin = "https://labatar-catalog.landenhanni.workers.dev";
-const editorListUrl = `${catalogOrigin}/v1/editor/combos`;
-const editorAppUrl = `${catalogOrigin}/v1/editor/app`;
-const ownerAccessUrl = `${catalogOrigin}/v1/editor/access-roles`;
+const editorListUrl = () => `${getCatalogOrigin()}/v1/editor/combos`;
+const editorAppUrl = () => `${getCatalogOrigin()}/v1/editor/app`;
+const ownerAccessUrl = () => `${getCatalogOrigin()}/v1/editor/access-roles`;
 const publisherPartition = "persist:labatar-catalog-publisher";
 const slugPattern = /^[a-z0-9][a-z0-9-]{0,99}$/;
 
@@ -89,7 +89,7 @@ async function listEditorCombos(ses, timeoutMs = 15000, onReset) {
     ses,
     "Catalog sign-in check",
     async (signal) => {
-      const result = await fetchEditorResponse(ses, editorListUrl, {
+      const result = await fetchEditorResponse(ses, editorListUrl(), {
         credentials: "include",
         redirect: "manual",
         cache: "no-store",
@@ -110,7 +110,7 @@ async function listEditorCombos(ses, timeoutMs = 15000, onReset) {
 async function isCatalogOwner(ses = publisherSession()) {
   try {
     return await publisherRequestWithTimeout("Catalog owner check", async (signal) => {
-      const response = await ses.fetch(ownerAccessUrl, {
+      const response = await ses.fetch(ownerAccessUrl(), {
         method: "GET",
         credentials: "include",
         redirect: "manual",
@@ -129,7 +129,7 @@ async function isCatalogOwner(ses = publisherSession()) {
   }
 }
 
-function signInToCatalog(ses, parent, verifyAccess = listEditorCombos, targetUrl = editorAppUrl) {
+function signInToCatalog(ses, parent, verifyAccess = listEditorCombos, targetUrl = editorAppUrl()) {
   return new Promise((resolve, reject) => {
     const authWindow = new BrowserWindow({
       width: 850,
@@ -163,7 +163,7 @@ function signInToCatalog(ses, parent, verifyAccess = listEditorCombos, targetUrl
         return;
       }
       if (
-        currentUrl.origin !== catalogOrigin ||
+        currentUrl.origin !== getCatalogOrigin() ||
         currentUrl.pathname !== new URL(targetUrl).pathname
       )
         return;
@@ -273,7 +273,7 @@ async function publishCombo(request, parent, onConnectionReset) {
   let response;
   try {
     response = await publisherRequestWithTimeout("Catalog publish request", (signal) =>
-      ses.fetch(`${editorListUrl}/${encodeURIComponent(combo.id)}`, {
+      ses.fetch(`${editorListUrl()}/${encodeURIComponent(combo.id)}`, {
         method: "PUT",
         credentials: "include",
         redirect: "error",
@@ -356,7 +356,7 @@ async function unpublishCombo(
   let response;
   try {
     response = await publisherRequestWithTimeout("Catalog delete request", (signal) =>
-      ses.fetch(`${editorListUrl}/${encodeURIComponent(id)}`, {
+      ses.fetch(`${editorListUrl()}/${encodeURIComponent(id)}`, {
         method: "DELETE",
         credentials: "include",
         redirect: "error",
@@ -411,5 +411,5 @@ module.exports = {
   readEditorResponse,
   fetchEditorResponse,
   isCancelledEditorRedirect,
-  catalogOrigin,
+  getCatalogOrigin,
 };

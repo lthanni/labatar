@@ -42,6 +42,19 @@ automatic recordings. Enabling automatic recording turns off the P2 crop in
 the managed game scene. Labatar keeps it off for automatic captures; the crop
 can be switched on again after automatic recording is stopped.
 
+The **Video source** control in Capture configuration and the OBS sidebar
+switches between **Game only** and **Monitor capture**. Labatar reuses a
+Display Capture source already in the game scene. On first use without one,
+it creates a Display Capture source and selects the first display reported by
+OBS. The monitor can be changed in that source's properties in OBS.
+The display is fitted inside the current canvas. Switching hides competing
+game, window, and display captures directly in the game scene, where they
+remain available in OBS. Monitor capture turns off the P2 crop, which can be
+switched on again in Game only. Audio switches apply in both modes. When OBS
+provides game sound only through the game capture source, monitor recordings
+can include game sound through desktop audio. OBS saves the selection as
+scene-item visibility.
+
 The P2 item layers a tight crop from the same game-capture source directly
 below the P1 framebar. The measured 2560×1441 OBS scene used a
 1377/1309/177/86 pixel crop (left/top/right/bottom) at position (175, 1355).
@@ -57,6 +70,21 @@ analysis.
 Each finalized recording manifest records the effective FPS, raw source/base
 dimensions, output dimensions, and whether even-dimension normalization was
 applied.
+
+The recording directory shown in Capture configuration can be changed with its
+folder picker in development and installed builds. When the current directory
+contains files, Labatar asks whether to copy its complete contents, including
+videos, clips, sidecars, and nested folders, to the new directory. It never
+overwrites a different file at the destination. Copying leaves the originals in
+place and updates the copied sidecars' absolute `outputPath` values. The folder
+choice is shared by development and installed builds and is saved after copying
+succeeds or the user chooses to switch without copying. When the other build
+next opens or regains focus, it asks separately whether to copy any recordings
+still in its previous folder before adopting the shared choice. Applying the
+Labatar OBS setup sets the directory on the managed OBS
+profile and reads it back. Manual and automatic recordings then use that
+directory. The Recordings view lists files from the currently configured
+directory.
 
 ## Automatic matches and lobby events
 
@@ -152,15 +180,24 @@ Nearby chapters may share a timeline tick.
 poller for the first connected Xbox-compatible controller. It does not require
 Labatar to keep focus while the game is being played. The recording's
 `.labatar.json` sidecar stores timestamped controller state changes: D-pad
-numpad direction, left-stick direction, physical buttons, and game actions inferred from the Player 1
-`data/button_config.ini` snapshot available when capture starts. If that file
-is unavailable, physical buttons are still saved. The pad button order used to
-infer game actions is the common Xbox A/B/X/Y, shoulder, trigger order and
-should be verified against the game's input display before relying on labels.
-The viewer labels the physical controller button separately from the game
-input: with the current Player 1 bindings, controller X maps to game A and
-controller Y maps to game B. A physical button label does not identify the
-move that occurred in the game.
+numpad direction, left-stick direction, physical buttons, and game actions from
+the saved controller binding snapshot. The **Controller bindings** button beside
+**+ Record local combo** changes the mapping used for future recordings. Its
+default is X=A, Y=B, B=C, A=F, RB=Dash (B+C), RT=Super (A+B+C),
+LB=Throw (A+F), and LT=Guard Reversal (C+F). This mapping interprets captured
+inputs; it does not change the game's own bindings. Verify it against the game's
+input display. The input inspector's **Edit bindings** control can reinterpret
+an existing recording and rebuild its processed route while preserving the
+saved physical states. A rendered input overlay must be rendered again to show
+the new labels. Unassigned buttons appear as `Controller <button>` in overlays.
+In either bindings dialog, **Set bindings with controller** lets the user choose
+a game action, release held buttons, and press a physical button to assign it.
+The dialog uses the same Windows XInput worker as combo capture, so this setup
+requires a controller visible to XInput. Detection waits for a fresh press and
+times out after 15 seconds. Assigning a game action this way replaces its prior
+physical button; assigning an already used physical button clears that button's
+old action. The user must save the dialog to apply these changes. The manual
+dropdowns remain available.
 
 Starting capture also creates a local personal combo draft using the character
 and support selected in the Combos tab. The combo entry and its MP4 link live
@@ -176,20 +213,21 @@ SHA-256 hash identifies the exact source capture used. The file is regenerated
 when the raw capture changes or the processor version changes. Processing never
 edits the raw capture. For example, down, down-forward, forward, then C pressed
 while holding forward is suggested as `236C`. The processor reads Atk1-4 as
-A/B/C/F, recognizes simple 236, 214, and 22 motions, and assumes the player
-faces right for the default route. Unmapped physical buttons remain in the
-processed press list without invented notation. It cannot infer side switches
+A/B/C/F, recognizes simple 236, 214, and 22 motions, and keeps Tiger Knee
+sequences as 2369 or 23698 (2147 or 21478 for the opposite facing). The
+default route assumes the player faces right. Unmapped physical buttons remain
+in the processed press list without invented notation. It cannot infer side switches
 or whether an attack connected. Processing defaults to facing right and
-grounded. Facing changes still require manual route correction.
+grounded. Use the chip controls to mark changes in facing and position.
 
 When a linked recording is submitted as a combo candidate, Labatar reads the
-current processed input artifact from that recording. If its selected facing
-route matches the combo and the upload JSON stays within the size limit, the
-candidate receives the processed events and source hashes. The backend derives
-the candidate's route text from the selected facing. If those conditions are
-not met, the candidate upload uses the combo's route text. The raw controller
-states and preserved full-session copy are not uploaded. Publishing that
-candidate retains its processed artifact in the public combo record so its
+current processed input artifact from that recording and sends its processed
+events and source hashes even if its selected facing route differs from the
+edited combo route. The submitted combo route remains unchanged. If the
+recording has controller capture but processing fails, or the upload JSON is
+too large, submission stops with an error instead of omitting the inputs.
+The raw controller states and preserved full-session copy are not uploaded.
+Publishing that candidate retains its processed artifact in the public combo record so its
 timed events remain available after the review queue is cleared.
 
 Direction changes record buttons that remain held. Releasing forward during a
@@ -206,11 +244,22 @@ flow; reprocessing does not rewrite it or the sidecar.
 Combo cards with a linked local capture show the editable facing-right input
 chips and a Reprocess clip inputs button directly. The Recordings player keeps
 the full raw and processed input inspector for detailed review.
+Combos linked to a local MP4 without controller input capture show a
+**No input recording** tag on their card and detail view. This tag is available
+in the combo tag filter and disappears if the linked recording gains a capture.
 The facing-right route in Processed events renders button presses as chips.
 Clicking a chip edits its track token; right-clicking it toggles a `~` follow-up
 or flips airborne/grounded from that chip onward, including the selected chip,
 brackets the pressed button as charged (for example `j.2[C]`), or marks it
 critical with a `!` suffix (for example `j.2[C]!`).
+**Toggle left/right from here** mirrors interpreted directions and motions
+starting at that chip. A later toggle flips them back. The raw directions,
+press timing, and explicit notation and direction overrides retain their values.
+Right-clicking a chip also offers **Hide input**. A hidden press stays in the raw
+capture and saved processed events, but is omitted from both suggested routes
+and newly rendered input overlays. **Show hidden inputs** reveals dimmed chips
+so they can be restored with **Show input**. Position and facing toggles on
+hidden presses still affect later moves.
 Delay adds `dl.` before that move (for example `dl.j.2[C]!`); it can be toggled
 off on the same chip.
 Any attack button (X) toggles A, B, or C to the generic X in the displayed
@@ -230,9 +279,10 @@ last chip edit (or when Apply pending edits now is clicked).
 The Chip shortcuts button lets the player configure local keyboard shortcuts.
 Hover a facing-right chip and press its assigned key to use the same edit path
 as the context menu. Defaults are backtick for a `~` follow-up, `j` for
-airborne/grounded from that chip, `r` to remove its direction, `x` for any A/B/C
-attack (`X`), `d` for delay (`dl.`), `[` for charged, and `1` for crit. Follow-up is unavailable on the
-first chip. These actions
+airborne/grounded from that chip, `l` for left/right from that chip, `r` to
+remove its direction, `x` for any A/B/C attack (`X`), `d` for delay (`dl.`),
+`[` for charged, and `1` for crit. Follow-up is unavailable on the first chip.
+These actions
 appear first in the right-click menu, with the current key before each action.
 Shortcuts do not fire while the inspector's edit dialogs are open or while holding Ctrl,
 Alt, or Command. Hovering a chip takes priority even if keyboard focus remains

@@ -3,6 +3,10 @@ import type { ProcessedComboInput } from "./recording-types";
 type Press = ProcessedComboInput["presses"][number];
 type PressEdit = NonNullable<Press["manualEdit"]>;
 
+function oppositeFacing(facing: Press["context"]["facing"]) {
+  return facing === "right" ? "left" : "right";
+}
+
 function withPosition(
   notation: string | null,
   position: Press["context"]["position"],
@@ -69,8 +73,12 @@ export function previewComboChipEdit(
   const previous = processed.presses[selectedIndex];
   const positionChanged =
     Boolean(previous.manualEdit?.togglePosition) !== Boolean(edit.togglePosition);
+  const facingChanged = Boolean(previous.manualEdit?.toggleFacing) !== Boolean(edit.toggleFacing);
   const presses = processed.presses.map((press, index) => {
-    if (index < selectedIndex || (index > selectedIndex && !positionChanged)) return press;
+    if (index < selectedIndex || (index > selectedIndex && !positionChanged && !facingChanged))
+      return press;
+    const selectedPress = index === selectedIndex;
+    const pressEdit = selectedPress ? edit : (press.manualEdit ?? {});
     const position = positionChanged
       ? press.context.position === "airborne"
         ? "grounded"
@@ -79,49 +87,59 @@ export function previewComboChipEdit(
     const interpretations = { ...press.interpretations };
     for (const facing of ["right", "left"] as const) {
       const prior = press.interpretations[facing];
+      const input = press.interpretations[facingChanged ? oppositeFacing(facing) : facing];
       const suggestedNotation = positionChanged
-        ? withPosition(prior.suggestedNotation ?? null, position)
-        : prior.suggestedNotation;
+        ? withPosition(input.suggestedNotation ?? null, position)
+        : input.suggestedNotation;
+      const manualNotation = facing === "right" ? pressEdit.notation : undefined;
+      const hasExplicitDirection = pressEdit.directionOverride !== undefined || manualNotation;
       const notation =
-        index === selectedIndex
+        selectedPress ||
+        (facingChanged && !hasExplicitDirection) ||
+        (positionChanged && manualNotation)
           ? withDecorations(
               withAnyAttackButton(
                 withDirectionOverride(
-                  facing === "right" && edit.notation
-                    ? withPosition(edit.notation, position)
+                  manualNotation
+                    ? `${position === "airborne" ? "j." : ""}${manualNotation.replace(/^j\./, "")}`
                     : (suggestedNotation ?? null),
-                  edit.directionOverride,
+                  pressEdit.directionOverride,
                   facing,
                 ),
-                Boolean(edit.anyAttack) && ["A", "B", "C"].includes(press.gameButton ?? ""),
+                Boolean(pressEdit.anyAttack) && ["A", "B", "C"].includes(press.gameButton ?? ""),
               ),
-              edit,
+              pressEdit,
             )
           : positionChanged
             ? withPosition(prior.notation, position)
             : prior.notation;
       interpretations[facing] = {
-        ...prior,
+        ...input,
         notation,
         suggestedNotation,
       };
     }
     return {
       ...press,
-      context: { ...press.context, position },
+      context: {
+        facing: facingChanged ? oppositeFacing(press.context.facing) : press.context.facing,
+        position,
+      },
       positionAfter:
         positionChanged && press.positionAfter
           ? press.positionAfter === "airborne"
             ? "grounded"
             : "airborne"
           : press.positionAfter,
-      manualEdit: index === selectedIndex ? edit : press.manualEdit,
+      manualEdit: selectedPress ? edit : press.manualEdit,
       interpretations,
     };
   });
   const routes = Object.fromEntries(
     (["right", "left"] as const).map((facing) => {
-      const tokens = presses.filter((press) => press.interpretations[facing].notation);
+      const tokens = presses.filter(
+        (press) => !press.manualEdit?.hidden && press.interpretations[facing].notation,
+      );
       return [
         facing,
         tokens

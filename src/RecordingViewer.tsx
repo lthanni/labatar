@@ -15,6 +15,7 @@ import {
   InputLabel,
   LinearProgress,
   List,
+  ListItem,
   ListItemButton,
   ListItemText,
   Menu,
@@ -83,14 +84,20 @@ import {
   collapseRecordingDisplayRows,
   countRecordingClips,
   descendantClipRanges,
+  isF10Clip,
+  isInRecordingsLibrary,
+  isPendingF10Clip,
   pageRecordingDisplayRows,
   recordingInheritedTags,
   recordingLibraryTab,
+  recordingMatchesSearch,
   recordingPageForId,
 } from "./recording-hierarchy";
 import { useObsRecording } from "./ObsRecordingContext";
 import { CalibrationNumberField } from "./CalibrationNumberField";
+import { FramebarLegend } from "./FramebarLegend";
 import { RecordingPortraitMatchupView } from "./RecordingPortraitMatchup";
+import type { ReplayUser } from "./replay-player-identity";
 import {
   YouTubeRecordingPlayer,
   youtubeVideoId,
@@ -103,7 +110,14 @@ import {
   readPendingYouTubeUploads,
   savePendingYouTubeUpload,
 } from "./youtube-pending-uploads";
-import { nextLocalEightAm } from "./youtube-schedule";
+import {
+  cancelScheduledRelease,
+  finishScheduledRelease,
+  nextAvailableLocalEightAm,
+  nextAvailableLocalTime,
+  readScheduledReleases,
+  reserveScheduledRelease,
+} from "./youtube-schedule";
 
 const RECORDINGS_PER_PAGE = 20;
 
@@ -162,7 +176,7 @@ function createRecordingSelectionStore() {
 
 type RecordingSelectionStore = ReturnType<typeof createRecordingSelectionStore>;
 
-function RecordingDeleteCheckbox({
+function RecordingSelectionCheckbox({
   store,
   recording,
   disabled,
@@ -182,7 +196,7 @@ function RecordingDeleteCheckbox({
       size="small"
       checked={checked}
       disabled={disabled}
-      slotProps={{ input: { "aria-label": `Select ${recording.name} for deletion` } }}
+      slotProps={{ input: { "aria-label": `Select ${recording.name}` } }}
       onClick={(event) => event.stopPropagation()}
       onChange={() => store.toggle(recording.id)}
       sx={{ p: 0.5, mr: 0.5, alignSelf: "center", flexShrink: 0 }}
@@ -194,20 +208,35 @@ function RecordingSelectionBar({
   store,
   shownIds,
   deleting,
+  replacing,
+  canReplaceParent,
+  onReplaceParents,
   onDelete,
 }: {
   store: RecordingSelectionStore;
   shownIds: string[];
   deleting: boolean;
+  replacing: boolean;
+  canReplaceParent: (id: string) => boolean;
+  onReplaceParents: (ids: ReadonlySet<string>) => void;
   onDelete: () => void;
 }) {
   const selected = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const selectedShownCount = shownIds.filter((id) => selected.has(id)).length;
+  const selectionBusy = deleting || replacing;
   return (
     <Stack
       direction="row"
       spacing={1}
-      sx={{ px: 1.5, py: 0.5, alignItems: "center", borderBottom: 1, borderColor: "divider" }}
+      useFlexGap
+      sx={{
+        px: 1.5,
+        py: 0.5,
+        alignItems: "center",
+        flexWrap: "wrap",
+        borderBottom: 1,
+        borderColor: "divider",
+      }}
     >
       <FormControlLabel
         sx={{ mr: 0 }}
@@ -217,7 +246,7 @@ function RecordingSelectionBar({
             aria-label="Select all shown recordings"
             checked={shownIds.length > 0 && selectedShownCount === shownIds.length}
             indeterminate={selectedShownCount > 0 && selectedShownCount < shownIds.length}
-            disabled={shownIds.length === 0 || deleting}
+            disabled={shownIds.length === 0 || selectionBusy}
             onChange={() => store.toggleAll(shownIds)}
           />
         }
@@ -225,14 +254,24 @@ function RecordingSelectionBar({
       />
       <Box sx={{ flex: 1 }} />
       {selected.size > 0 && (
-        <Button size="small" onClick={store.clear} disabled={deleting}>
+        <Button size="small" onClick={store.clear} disabled={selectionBusy}>
           Clear ({selected.size})
+        </Button>
+      )}
+      {[...selected].some(canReplaceParent) && (
+        <Button
+          size="small"
+          color="warning"
+          disabled={selectionBusy}
+          onClick={() => onReplaceParents(selected)}
+        >
+          Replace parents
         </Button>
       )}
       <Button
         size="small"
         color="error"
-        disabled={selected.size === 0 || deleting}
+        disabled={selected.size === 0 || selectionBusy}
         onClick={onDelete}
       >
         Delete selected ({selected.size})
@@ -730,6 +769,7 @@ export function RecordingViewer({
   seekToLastFrameRequest = null,
   youtubeReviewRequest = null,
   youtubeUploadJobs = [],
+  replayUser = null,
 }: {
   active?: boolean;
   refreshToken?: number;
@@ -741,6 +781,7 @@ export function RecordingViewer({
   seekToLastFrameRequest?: { recordingId: string; requestId: number } | null;
   youtubeReviewRequest?: { recordingId: string; url: string; requestId: number } | null;
   youtubeUploadJobs?: Array<{ recordingId: string; phase: "queued" | "uploading" }>;
+  replayUser?: ReplayUser | null;
 }) {
   const {
     state: obsState,
@@ -781,7 +822,13 @@ export function RecordingViewer({
   const [reviewLoading, setReviewLoading] = useState(false);
   const [clipRange, setClipRange] = useState<[number, number]>([0, 0]);
   const [clipMode, setClipMode] = useState(false);
-  const [exportingClipMode, setExportingClipMode] = useState<"fast" | "precise" | null>(null);
+  const [exportingClipMode, setExportingClipMode] = useState<"fast" | "precise" | "caption" | null>(
+    null,
+  );
+  const [captionOpen, setCaptionOpen] = useState(false);
+  const [captionDraft, setCaptionDraft] = useState("");
+  const caption = captionDraft.trim();
+  const captionHasTooManyLines = caption.split("\n").length > 4;
   const [renderingInputOverlay, setRenderingInputOverlay] = useState(false);
   const [overlayNeedsRefresh, setOverlayNeedsRefresh] = useState(false);
   const [overlayEditsPending, setOverlayEditsPending] = useState(false);
@@ -791,7 +838,9 @@ export function RecordingViewer({
   const [mediaRevision, setMediaRevision] = useState(0);
   const [clipExportNotice, setClipExportNotice] = useState<string | null>(null);
   const [clipExportError, setClipExportError] = useState<string | null>(null);
-  const [recordingListTab, setRecordingListTab] = useState<"matches" | "other">("matches");
+  const [recordingListTab, setRecordingListTab] = useState<"matches" | "other" | "f10">("matches");
+  const showF10Clips = mode === "recordings" && !panelOnly && recordingListTab === "f10";
+  const [recordingSearch, setRecordingSearch] = useState("");
   const [recordingListPage, setRecordingListPage] = useState(1);
   const [expandedRecordingIds, setExpandedRecordingIds] = useState<Set<string>>(() => new Set());
   const [selectedTagFilters, setSelectedTagFilters] = useState<RecordingTags>(emptyRecordingTags);
@@ -875,6 +924,16 @@ export function RecordingViewer({
   const [bulkDeleteTargets, setBulkDeleteTargets] = useState<RecordedVideo[] | null>(null);
   const [deletingBulkCount, setDeletingBulkCount] = useState<number | null>(null);
   const [bulkDeleteError, setBulkDeleteError] = useState<string | null>(null);
+  const [parentReplacement, setParentReplacement] = useState<Array<{
+    clip: RecordedVideo;
+    parent: RecordedVideo;
+  }> | null>(null);
+  const [parentReplacementError, setParentReplacementError] = useState<string | null>(null);
+  const [replacingParents, setReplacingParents] = useState(false);
+  const [parentReplacementNotice, setParentReplacementNotice] = useState<{
+    message: string;
+    severity: "success" | "warning";
+  } | null>(null);
   const [tagError, setTagError] = useState<string | null>(null);
   const [updatingTagsId, setUpdatingTagsId] = useState<string | null>(null);
   const [processingRecordingId, setProcessingRecordingId] = useState<string | null>(null);
@@ -968,9 +1027,7 @@ export function RecordingViewer({
         if (generation !== loadGeneration.current) return;
         const tabRecordings =
           mode === "recordings" && !panelOnly
-            ? result.recordings.filter(
-                (recording) => !recording.moveTake && !recording.id.startsWith("moves/"),
-              )
+            ? result.recordings.filter(isInRecordingsLibrary)
             : result.recordings;
         const pendingRecordingId =
           mode === "recordings" && !panelOnly
@@ -979,7 +1036,11 @@ export function RecordingViewer({
         const byId = new Map(tabRecordings.map((recording) => [recording.id, recording]));
         const pendingRecording = pendingRecordingId ? byId.get(pendingRecordingId) : null;
         if (pendingRecording) {
-          setRecordingListTab(recordingLibraryTab(pendingRecording, byId));
+          setRecordingListTab((current) =>
+            current === "f10" && isPendingF10Clip(pendingRecording)
+              ? current
+              : recordingLibraryTab(pendingRecording, byId),
+          );
           setSelectedTagFilters(emptyRecordingTags);
           setExpandedRecordingIds((current) => {
             const next = new Set(current);
@@ -1045,10 +1106,10 @@ export function RecordingViewer({
     };
   }, []);
 
-  const selectedRecording = useMemo(
-    () => recordings.find((recording) => recording.id === selectedId) ?? null,
-    [recordings, selectedId],
-  );
+  const selectedRecording = useMemo(() => {
+    const recording = recordings.find(({ id }) => id === selectedId);
+    return recording && (!showF10Clips || isPendingF10Clip(recording)) ? recording : null;
+  }, [recordings, selectedId, showF10Clips]);
   useEffect(() => {
     setOverlayNeedsRefresh(false);
     setOverlayEditsPending(false);
@@ -1227,17 +1288,19 @@ export function RecordingViewer({
     () =>
       panelOnly
         ? []
-        : mode === "recordings"
-          ? recordings.filter(
-              (recording) => recordingLibraryTab(recording, recordingById) === recordingListTab,
-            )
-          : recordings,
-    [mode, panelOnly, recordings, recordingById, recordingListTab],
+        : showF10Clips
+          ? recordings.filter(isPendingF10Clip)
+          : mode === "recordings"
+            ? recordings.filter(
+                (recording) => recordingLibraryTab(recording, recordingById) === recordingListTab,
+              )
+            : recordings,
+    [mode, panelOnly, recordings, recordingById, recordingListTab, showF10Clips],
   );
 
   const tagFilteredRecordings = useMemo(
     () =>
-      mode === "recordings" && recordingListTab === "matches"
+      mode === "recordings" && recordingListTab !== "other"
         ? visibleRecordings
         : visibleRecordings.filter((recording) => {
             const inheritedTags = recordingInheritedTags(recording, recordingById);
@@ -1264,9 +1327,25 @@ export function RecordingViewer({
     [mode, recordingById, recordingListTab, selectedTagFilters, visibleRecordings],
   );
 
+  const searchedRecordings = useMemo(
+    () =>
+      tagFilteredRecordings.filter((recording) =>
+        recordingMatchesSearch(
+          recording,
+          recordingSearch,
+          recordingLibraryTab(recording, recordingById) === "matches",
+          recordingById,
+        ),
+      ),
+    [recordingById, recordingSearch, tagFilteredRecordings],
+  );
+
   const groupedRecordingRows = useMemo(
-    () => buildRecordingDisplayRows(tagFilteredRecordings),
-    [tagFilteredRecordings],
+    () =>
+      showF10Clips
+        ? searchedRecordings.map((recording) => ({ recording, depth: 0 }))
+        : buildRecordingDisplayRows(searchedRecordings),
+    [searchedRecordings, showF10Clips],
   );
   const recordingClipCounts = useMemo(
     () => countRecordingClips(groupedRecordingRows),
@@ -1295,7 +1374,10 @@ export function RecordingViewer({
   );
   const recordingPageCount = Math.max(1, Math.ceil(rootRecordingCount / RECORDINGS_PER_PAGE));
   const currentRecordingPage = Math.min(recordingListPage, recordingPageCount);
-  useEffect(() => setRecordingListPage(1), [mode, recordingListTab, selectedTagFilters]);
+  useEffect(
+    () => setRecordingListPage(1),
+    [mode, recordingListTab, recordingSearch, selectedTagFilters],
+  );
   useEffect(() => {
     if (recordingListPage > recordingPageCount) setRecordingListPage(recordingPageCount);
   }, [recordingListPage, recordingPageCount]);
@@ -1328,7 +1410,11 @@ export function RecordingViewer({
       const byId = recordingById;
       const recording = byId.get(recordingId);
       if (recording && mode === "recordings") {
-        setRecordingListTab(recordingLibraryTab(recording, byId));
+        setRecordingListTab((current) =>
+          current === "f10" && isPendingF10Clip(recording)
+            ? current
+            : recordingLibraryTab(recording, byId),
+        );
       }
       setExpandedRecordingIds((current) => {
         const next = new Set(current);
@@ -1363,6 +1449,8 @@ export function RecordingViewer({
       setClipRange([0, 0]);
       setClipMode(false);
       setConfirmTrim(null);
+      setCaptionOpen(false);
+      setCaptionDraft("");
       restoredRecordingId.current = null;
       focusPlayerAfterSelection.current = true;
       setSelectedId(recordingId);
@@ -1452,13 +1540,16 @@ export function RecordingViewer({
   ]);
 
   const exportClip = useCallback(
-    async (mode: "fast" | "precise") => {
+    async (mode: "fast" | "precise" | "caption") => {
       const recordingsApi = window.electronAPI?.recordings;
+      const withCaption = mode === "caption";
       if (
         !recordingsApi ||
         !selectedRecording ||
         exportingClipMode ||
-        clipRange[1] <= clipRange[0]
+        trimmingClip ||
+        ((!withCaption || clipMode) && clipRange[1] <= clipRange[0]) ||
+        (withCaption && (!caption || captionHasTooManyLines))
       ) {
         return;
       }
@@ -1469,6 +1560,7 @@ export function RecordingViewer({
       setExportingClipMode(mode);
       setClipExportNotice(null);
       setClipExportError(null);
+      if (withCaption) setCaptionOpen(false);
       try {
         const request = {
           recordingId: selectedRecording.id,
@@ -1476,10 +1568,16 @@ export function RecordingViewer({
           endTime: clipRange[1],
         };
         const exported =
-          mode === "fast"
-            ? await recordingsApi.exportClipFast(request)
-            : await recordingsApi.exportClip(request);
-        if (selectedRecording.comboInputCapture && exported.comboInputCapture) {
+          mode === "caption"
+            ? await recordingsApi.exportCaption({
+                recordingId: selectedRecording.id,
+                caption,
+                ...(clipMode ? { startTime: request.startTime, endTime: request.endTime } : {}),
+              })
+            : mode === "fast"
+              ? await recordingsApi.exportClipFast(request)
+              : await recordingsApi.exportClip(request);
+        if (!withCaption && selectedRecording.comboInputCapture && exported.comboInputCapture) {
           window.dispatchEvent(
             new CustomEvent(comboClipExportedEvent, {
               detail: {
@@ -1499,6 +1597,12 @@ export function RecordingViewer({
           next.add(selectedRecording.id);
           return next;
         });
+        if (withCaption) {
+          setCaptionDraft("");
+          setSelectedId((current) => (current === selectedRecording.id ? exported.id : current));
+          setClipExportNotice(`Saved captioned video: ${exported.name}.`);
+          return;
+        }
         if (!embeddedCombo) setSelectedId(exported.id);
         const shift = clipRange[0] - (exported.clip?.startTime ?? clipRange[0]);
         setClipExportNotice(
@@ -1516,7 +1620,17 @@ export function RecordingViewer({
         setExportingClipMode(null);
       }
     },
-    [clipRange, embeddedCombo, exportingClipMode, loadRecordings, selectedRecording],
+    [
+      caption,
+      captionHasTooManyLines,
+      clipMode,
+      clipRange,
+      embeddedCombo,
+      exportingClipMode,
+      loadRecordings,
+      selectedRecording,
+      trimmingClip,
+    ],
   );
 
   const renderComboInputs = useCallback(async () => {
@@ -1642,6 +1756,14 @@ export function RecordingViewer({
 
   const finishRecordingRename = useCallback(
     async (renamed: RecordedVideo, previousId: string) => {
+      videoRef.current?.pause();
+      setIsPlaying(false);
+      setPlaybackError(null);
+      setCurrentTime(0);
+      setDuration(0);
+      setClipRange([0, 0]);
+      setClipMode(false);
+      restoredRecordingId.current = null;
       relinkTechRecording(previousId, renamed.id);
       window.dispatchEvent(
         new CustomEvent(comboRecordingRenamedEvent, {
@@ -1653,13 +1775,6 @@ export function RecordingViewer({
       );
       setSelectedId(renamed.id);
       await loadRecordings(true);
-      videoRef.current?.pause();
-      setIsPlaying(false);
-      setCurrentTime(0);
-      setDuration(0);
-      setClipRange([0, 0]);
-      setClipMode(false);
-      restoredRecordingId.current = null;
     },
     [loadRecordings],
   );
@@ -1861,8 +1976,8 @@ export function RecordingViewer({
       setYoutubeUploadTagsDraft(setHashtags.map((hashtag) => hashtag.slice(1)).join(", "));
       setYoutubeUploadPrivacy(destination === "sets" && isMatch ? "public" : "unlisted");
       setYoutubeUploadAudience("no");
-      setYoutubeScheduleEnabled(false);
-      setYoutubePublishLocal(destination === "sets" && isMatch ? nextLocalEightAm() : "");
+      setYoutubeScheduleEnabled(destination === "sets" && isMatch);
+      setYoutubePublishLocal(destination === "sets" && isMatch ? nextAvailableLocalEightAm() : "");
       setYoutubeUploadError(null);
       setYoutubeUploadedUrl(pendingYouTubeUploadUrl(recording.id));
       const requestId = ++youtubeStatusRequestId.current;
@@ -1891,8 +2006,8 @@ export function RecordingViewer({
       setYoutubeUploadStatus(null);
       setYoutubeUploadError(null);
       setYoutubeUploadPrivacy(destination === "sets" && isMatch ? "public" : "unlisted");
-      setYoutubeScheduleEnabled(false);
-      setYoutubePublishLocal(destination === "sets" && isMatch ? nextLocalEightAm() : "");
+      setYoutubeScheduleEnabled(destination === "sets" && isMatch);
+      setYoutubePublishLocal(destination === "sets" && isMatch ? nextAvailableLocalEightAm() : "");
       if (
         destination === "sets" &&
         isMatch &&
@@ -1961,7 +2076,27 @@ export function RecordingViewer({
       return;
     }
     const recording = youtubeUploadTarget;
+    if (publishAt) {
+      const available = nextAvailableLocalTime(
+        youtubePublishLocal,
+        readScheduledReleases().map((release) => release.publishAt),
+      );
+      if (available !== youtubePublishLocal) {
+        setYoutubePublishLocal(available);
+        setYoutubeUploadError(
+          "That release time is already scheduled. Review the next available day, then upload.",
+        );
+        return;
+      }
+      try {
+        reserveScheduledRelease(recording.id, publishAt);
+      } catch (error) {
+        setYoutubeUploadError(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
     setYoutubeUploadTarget(null);
+    let uploadCompleted = false;
     try {
       setYoutubeUploadError(null);
       const result = await window.electronAPI!.recordings.uploadToYouTube({
@@ -1975,12 +2110,15 @@ export function RecordingViewer({
         publishAt: publishAt ?? undefined,
         madeForKids: youtubeUploadAudience === "yes",
       });
+      uploadCompleted = true;
       savePendingYouTubeUpload({
         recordingId: recording.id,
         fileName: recording.name,
         url: result.url,
       });
+      if (publishAt) finishScheduledRelease(recording.id, publishAt);
     } catch (error) {
+      if (publishAt && !uploadCompleted) cancelScheduledRelease(recording.id, publishAt);
       setYoutubeUploadError(error instanceof Error ? error.message : String(error));
     }
   }, [
@@ -2323,6 +2461,107 @@ export function RecordingViewer({
       setDeletingBulkCount(null);
     }
   }, [bulkDeleteTargets, editingRecordingId, loadRecordings, recordingSelection, selectedId]);
+
+  const requestParentReplacement = (clipIds: Iterable<string>) => {
+    setContextMenu(null);
+    setParentReplacementNotice(null);
+    const selected = new Set(clipIds);
+    const targets = [];
+    const parents = new Set<string>();
+    let problem = null;
+    for (const id of selected) {
+      const clip = recordingById.get(id);
+      const parent = clip?.clip && recordingById.get(clip.clip.sourceRecordingId);
+      if (!clip || !parent || clip.mediaKind === "youtube" || parent.mediaKind === "youtube") {
+        problem = "Select local clips whose parent recordings are still in the library.";
+      } else if (parents.has(parent.id)) {
+        problem = "Choose one clip per parent recording.";
+      } else if (selected.has(parent.id)) {
+        problem = "A recording cannot be both a clip to keep and a parent to remove.";
+      } else if (parent.moveTake || parent.analysis || parent.framebarSequence) {
+        problem = `${parent.name} has linked move or analysis data.`;
+      } else {
+        parents.add(parent.id);
+        targets.push({ clip, parent });
+      }
+      if (problem) break;
+    }
+    setParentReplacementError(problem);
+    setParentReplacement(problem ? [] : targets);
+  };
+
+  const confirmParentReplacement = async () => {
+    const recordingsApi = window.electronAPI?.recordings;
+    if (!recordingsApi || !parentReplacement?.length || replacingParents) return;
+    const replacingSelected = parentReplacement.some(({ parent }) => parent.id === selectedId);
+    setReplacingParents(true);
+    setParentReplacementError(null);
+    try {
+      if (replacingSelected) {
+        if (selectedId && videoRef.current)
+          savePlaybackPosition(selectedId, videoRef.current.currentTime);
+        reviewRequestId.current += 1;
+        replaceReviewFrame(null);
+        await closeFrameReader();
+        videoRef.current?.pause();
+        videoRef.current?.removeAttribute("src");
+        videoRef.current?.load();
+        setIsPlaying(false);
+        restoredRecordingId.current = null;
+      }
+      const result = await recordingsApi.replaceClipParents(
+        parentReplacement.map(({ clip, parent }) => ({
+          clipId: clip.id,
+          parentId: parent.id,
+          clipModifiedAt: clip.modifiedAt,
+          parentModifiedAt: parent.modifiedAt,
+        })),
+      );
+      recordingSelection.remove(
+        new Set(result.replacements.flatMap(({ parentId, clipId }) => [parentId, clipId])),
+      );
+      for (const { parentId, clipId, clipName } of result.replacements) {
+        window.dispatchEvent(
+          new CustomEvent(comboRecordingRenamedEvent, {
+            detail: { previousId: parentId, recordingId: clipId, name: clipName },
+          }),
+        );
+      }
+      if (replacingSelected) {
+        setCurrentTime(0);
+        setDuration(0);
+        setClipRange([0, 0]);
+        setClipMode(false);
+        setSelectedId(
+          (id) => result.replacements.find(({ parentId }) => parentId === id)?.clipId ?? id,
+        );
+      }
+      setParentReplacement(null);
+      const count = result.replacements.length;
+      setParentReplacementNotice(
+        result.backupPath
+          ? {
+              severity: "warning",
+              message: `Kept ${count} ${count === 1 ? "clip" : "clips"}. The original files could not be moved to the Recycle Bin and are saved in ${result.backupPath}.`,
+            }
+          : {
+              severity: "success",
+              message:
+                count === 1
+                  ? "Kept the clip and moved its parent to the Recycle Bin."
+                  : `Kept ${count} clips and moved their parents to the Recycle Bin.`,
+            },
+      );
+      await loadRecordings(true);
+    } catch (replacementError) {
+      setParentReplacementError(
+        replacementError instanceof Error ? replacementError.message : String(replacementError),
+      );
+      if (replacingSelected) setMediaRevision((revision) => revision + 1);
+    } finally {
+      setReplacingParents(false);
+    }
+  };
 
   const sourceRecording = useMemo(
     () =>
@@ -2846,6 +3085,28 @@ export function RecordingViewer({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [active, beginRename, embeddedCombo, selectedRecording, stepFrame, togglePlayback]);
 
+  const captionButton =
+    mode === "recordings" &&
+    !embeddedCombo &&
+    selectedRecording &&
+    selectedRecording.mediaKind !== "youtube" &&
+    typeof window.electronAPI?.recordings?.exportCaption === "function" ? (
+      <Button
+        variant="outlined"
+        size="small"
+        onClick={() => setCaptionOpen(true)}
+        disabled={
+          !duration ||
+          Boolean(exportingClipMode) ||
+          trimmingClip ||
+          renderingInputOverlay ||
+          (clipMode && clipRange[1] <= clipRange[0])
+        }
+      >
+        {exportingClipMode === "caption" ? "Adding caption…" : "Add caption"}
+      </Button>
+    ) : null;
+
   return (
     <Stack
       ref={embeddedRootRef}
@@ -2853,7 +3114,8 @@ export function RecordingViewer({
       sx={{
         height: embeddedCombo ? "auto" : "100%",
         minHeight: 0,
-        overflow: embeddedCombo ? "visible" : "hidden",
+        overflowX: embeddedCombo ? "visible" : "hidden",
+        overflowY: embeddedCombo ? "visible" : "auto",
       }}
     >
       {error && <Alert severity="error">{error}</Alert>}
@@ -2862,6 +3124,14 @@ export function RecordingViewer({
       {gameChaptersNotice && <Alert severity="success">{gameChaptersNotice}</Alert>}
       {f10ClipsError && <Alert severity="error">{f10ClipsError}</Alert>}
       {f10ClipsNotice && <Alert severity="success">{f10ClipsNotice}</Alert>}
+      {parentReplacementNotice && (
+        <Alert
+          severity={parentReplacementNotice.severity}
+          onClose={() => setParentReplacementNotice(null)}
+        >
+          {parentReplacementNotice.message}
+        </Alert>
+      )}
       {youtubeError && <Alert severity="error">{youtubeError}</Alert>}
       {mode === "nerd-processing" && processingConfigError && (
         <Alert severity="error">{processingConfigError}</Alert>
@@ -3015,26 +3285,26 @@ export function RecordingViewer({
       )}
 
       <Stack
-        direction={{ xs: "column", md: "row" }}
+        direction={{ xs: "column", lg: "row" }}
         spacing={panelOnly ? 0 : 2}
         sx={{
           flex: 1,
-          minHeight: 0,
+          minHeight: { xs: 0, lg: 400 },
           minWidth: 0,
           alignItems: "stretch",
           overflowX: embeddedCombo ? "visible" : "hidden",
-          overflowY: embeddedCombo ? "visible" : { xs: "auto", md: "hidden" },
+          overflowY: embeddedCombo ? "visible" : { xs: "auto", lg: "hidden" },
         }}
       >
         <Paper
           variant="outlined"
           sx={{
-            width: { xs: "100%", md: "min(660px, 55%)" },
+            width: { xs: "100%", lg: "min(660px, 55%)" },
             flexShrink: 0,
             display: panelOnly ? "none" : "flex",
             flexDirection: "column",
-            height: { xs: "min(50vh, 440px)", md: "auto" },
-            minHeight: { xs: 260, md: 0 },
+            height: { xs: "min(50vh, 440px)", lg: "auto" },
+            minHeight: { xs: 260, lg: 0 },
           }}
         >
           <Stack
@@ -3067,15 +3337,26 @@ export function RecordingViewer({
           {mode === "recordings" && (
             <Tabs
               value={recordingListTab}
-              onChange={(_, value: "matches" | "other") => setRecordingListTab(value)}
+              onChange={(_, value: typeof recordingListTab) => setRecordingListTab(value)}
               variant="fullWidth"
               aria-label="Recording groups"
               sx={{ borderBottom: 1, borderColor: "divider" }}
             >
               <Tab label="Matches" value="matches" />
+              <Tab label="F10 clips" value="f10" />
               <Tab label="Other" value="other" />
             </Tabs>
           )}
+          <Box sx={{ p: 1.5, borderBottom: 1, borderColor: "divider" }}>
+            <TextField
+              fullWidth
+              size="small"
+              label={showF10Clips ? "Search F10 clips" : "Search recordings"}
+              placeholder={recordingListTab === "other" ? "Filename" : "Filename or player name"}
+              value={recordingSearch}
+              onChange={(event) => setRecordingSearch(event.target.value)}
+            />
+          </Box>
           {(mode !== "recordings" || recordingListTab === "other") && (
             <Stack sx={{ p: 1.5, borderBottom: 1, borderColor: "divider" }}>
               <Typography variant="subtitle2">Filter recordings</Typography>
@@ -3208,25 +3489,34 @@ export function RecordingViewer({
               </Stack>
             </Stack>
           )}
-          {mode === "recordings" && (
+          {mode === "recordings" && !showF10Clips && (
             <RecordingSelectionBar
               store={recordingSelection}
               shownIds={displayedRecordingIds}
               deleting={deletingBulkCount !== null}
+              replacing={replacingParents}
+              canReplaceParent={(id) => Boolean(recordingById.get(id)?.clip)}
+              onReplaceParents={requestParentReplacement}
               onDelete={requestBulkDelete}
             />
           )}
-          {recordings.length === 0 ? (
+          {showF10Clips && searchedRecordings.length === 0 ? (
+            <Typography color="text.secondary" sx={{ p: 2, textAlign: "left" }}>
+              {visibleRecordings.length
+                ? "No F10 clips match your search."
+                : "No F10 clips to review."}
+            </Typography>
+          ) : recordings.length === 0 ? (
             <Typography color="text.secondary" sx={{ p: 2, textAlign: "left" }}>
               No recordings found.
             </Typography>
-          ) : tagFilteredRecordings.length === 0 ? (
+          ) : searchedRecordings.length === 0 ? (
             <Typography color="text.secondary" sx={{ p: 2, textAlign: "left" }}>
               {visibleRecordings.length === 0
                 ? recordingListTab === "matches" && mode === "recordings"
                   ? "No match recordings found."
                   : "No other recordings found."
-                : "No recordings match the selected filters."}
+                : "No recordings match the selected filters or search."}
             </Typography>
           ) : (
             <List dense disablePadding sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
@@ -3271,7 +3561,13 @@ export function RecordingViewer({
                         return;
                       }
                       event.preventDefault();
-                      window.electronAPI.recordings.startDrag({ recordingId: recording.id });
+                      const checkedIds = recordingSelection.getSnapshot();
+                      window.electronAPI.recordings.startDrag({
+                        recordingId: recording.id,
+                        ...(!showF10Clips && checkedIds.has(recording.id) && checkedIds.size > 1
+                          ? { recordingIds: [...checkedIds] }
+                          : {}),
+                      });
                     }}
                     onContextMenu={(event) => {
                       event.preventDefault();
@@ -3283,7 +3579,7 @@ export function RecordingViewer({
                     }}
                     sx={{
                       alignItems: "flex-start",
-                      pl: 5 + depth * 2.5,
+                      pl: showF10Clips ? 2 : 5 + depth * 2.5,
                       cursor: editingRecordingId === recording.id ? "default" : "grab",
                       "&:active": {
                         cursor: editingRecordingId === recording.id ? "default" : "grabbing",
@@ -3318,11 +3614,11 @@ export function RecordingViewer({
                         : "Click to select · Right-click for actions · Drag to share"
                     }
                   >
-                    {mode === "recordings" && (
-                      <RecordingDeleteCheckbox
+                    {mode === "recordings" && !showF10Clips && (
+                      <RecordingSelectionCheckbox
                         store={recordingSelection}
                         recording={recording}
-                        disabled={deletingBulkCount !== null}
+                        disabled={deletingBulkCount !== null || replacingParents}
                       />
                     )}
                     {editingRecordingId === recording.id ? (
@@ -3338,7 +3634,9 @@ export function RecordingViewer({
                               ? "Name will be saved when trimming finishes."
                               : undefined
                           }
-                          aria-label={`New name for ${recording.name}`}
+                          slotProps={{
+                            htmlInput: { "aria-label": `New name for ${recording.name}` },
+                          }}
                           onChange={(event) => setEditingRecordingName(event.target.value)}
                           onClick={(event) => event.stopPropagation()}
                           onKeyDown={(event) => {
@@ -3386,9 +3684,10 @@ export function RecordingViewer({
                     ) : recording.portraitMatchup && mode === "recordings" ? (
                       <RecordingPortraitMatchupView
                         matchup={recording.portraitMatchup}
+                        replayUser={replayUser}
                         detail={formatModifiedAt(recording.modifiedAt)}
-                        fileName={
-                          recording.clip || recordingListTab === "other"
+                        label={
+                          recording.clip || recordingListTab !== "matches"
                             ? recording.name
                             : undefined
                         }
@@ -3398,7 +3697,7 @@ export function RecordingViewer({
                       <ListItemText
                         primary={
                           mode === "recordings"
-                            ? recording.clip || recordingListTab === "other"
+                            ? recording.clip || recordingListTab !== "matches"
                               ? recording.name
                               : "Recording"
                             : recording.name
@@ -3475,7 +3774,7 @@ export function RecordingViewer({
                 {`${(currentRecordingPage - 1) * RECORDINGS_PER_PAGE + 1}-${Math.min(
                   currentRecordingPage * RECORDINGS_PER_PAGE,
                   rootRecordingCount,
-                )} of ${rootRecordingCount} recordings`}
+                )} of ${rootRecordingCount} ${showF10Clips ? "clips" : "recordings"}`}
               </Typography>
               <Pagination
                 aria-label="Recording pages"
@@ -3499,7 +3798,20 @@ export function RecordingViewer({
           }
         >
           <MenuItem onClick={() => contextMenu && beginRename(contextMenu.recording)}>
-            Rename
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 3,
+                width: "100%",
+              }}
+            >
+              <span>Rename</span>
+              <Typography variant="body2" color="text.secondary">
+                F2
+              </Typography>
+            </Box>
           </MenuItem>
           {contextMenu?.recording.youtubeUrl ? (
             <MenuItem onClick={() => contextMenu && void openYouTubeVideo(contextMenu.recording)}>
@@ -3566,6 +3878,14 @@ export function RecordingViewer({
                   : "Create 30-second clips from manual chapters"}
               </MenuItem>
             )}
+          {mode === "recordings" && contextMenu?.recording.clip && (
+            <MenuItem
+              disabled={replacingParents || deletingBulkCount !== null}
+              onClick={() => requestParentReplacement([contextMenu.recording.id])}
+            >
+              Replace parent with clip…
+            </MenuItem>
+          )}
           <MenuItem
             sx={{ color: "error.main" }}
             onClick={() => contextMenu && requestDelete(contextMenu.recording)}
@@ -3676,7 +3996,12 @@ export function RecordingViewer({
                               if (event.target.checked) {
                                 setYoutubeUploadPrivacy("public");
                                 setYoutubePublishLocal((current) =>
-                                  scheduledYouTubePublishAt(current) ? current : nextLocalEightAm(),
+                                  scheduledYouTubePublishAt(current)
+                                    ? nextAvailableLocalTime(
+                                        current,
+                                        readScheduledReleases().map((release) => release.publishAt),
+                                      )
+                                    : nextAvailableLocalEightAm(),
                                 );
                               }
                             }}
@@ -3694,7 +4019,7 @@ export function RecordingViewer({
                             onChange={(event) => setYoutubePublishLocal(event.target.value)}
                             disabled={youtubeUploadBusy}
                             error={Boolean(youtubePublishLocal && !youtubePublishAt)}
-                            helperText="Defaults to the next local 8:00 AM. Existing YouTube schedules are not checked; choose a time after the upload will finish."
+                            helperText="Defaults to the next free local 8:00 AM based on uploads scheduled in Labatar on this device. Choose a time after the upload will finish."
                             slotProps={{ inputLabel: { shrink: true } }}
                             required
                             fullWidth
@@ -3927,6 +4252,60 @@ export function RecordingViewer({
           </DialogActions>
         </Dialog>
 
+        <Dialog
+          open={parentReplacement !== null}
+          onClose={() => !replacingParents && setParentReplacement(null)}
+          fullWidth
+          maxWidth="sm"
+        >
+          <DialogTitle>
+            {parentReplacement?.length === 1
+              ? "Replace parent with clip?"
+              : "Replace parent recordings?"}
+          </DialogTitle>
+          <DialogContent>
+            <Stack spacing={1.5} sx={{ pt: 0.5 }}>
+              {Boolean(parentReplacement?.length) && (
+                <>
+                  <Typography>
+                    The parent videos and their details will move to the Recycle Bin. The selected
+                    clips and their siblings will stay in the library as standalone recordings.
+                  </Typography>
+                  <List dense disablePadding>
+                    {parentReplacement?.map(({ clip, parent }) => (
+                      <ListItem key={clip.id} disableGutters>
+                        <ListItemText
+                          primary={`Keep ${clip.name}`}
+                          secondary={`Remove ${parent.name}`}
+                          sx={{ overflowWrap: "anywhere" }}
+                        />
+                      </ListItem>
+                    ))}
+                  </List>
+                </>
+              )}
+              {parentReplacementError && <Alert severity="error">{parentReplacementError}</Alert>}
+            </Stack>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setParentReplacement(null)} disabled={replacingParents}>
+              Cancel
+            </Button>
+            <Button
+              color="warning"
+              variant="contained"
+              disabled={!parentReplacement?.length || replacingParents}
+              onClick={() => void confirmParentReplacement()}
+            >
+              {replacingParents
+                ? "Replacing…"
+                : parentReplacement?.length === 1
+                  ? "Replace parent"
+                  : "Replace parents"}
+            </Button>
+          </DialogActions>
+        </Dialog>
+
         <Dialog open={Boolean(bulkDeleteTargets)} onClose={cancelBulkDelete}>
           <DialogTitle>Delete selected recordings?</DialogTitle>
           <DialogContent>
@@ -4006,6 +4385,41 @@ export function RecordingViewer({
           </DialogActions>
         </Dialog>
 
+        <Dialog open={captionOpen} onClose={() => setCaptionOpen(false)} fullWidth maxWidth="xs">
+          <DialogTitle>Add caption</DialogTitle>
+          <DialogContent>
+            <Stack spacing={2}>
+              <Typography variant="body2" color="text.secondary">
+                {clipMode
+                  ? `Burn the caption below the video from ${formatVideoTime(clipRange[0])} to ${formatVideoTime(clipRange[1])} and save that range as a separate MP4.`
+                  : "Burn the caption below the entire recording and save a separate MP4."}
+              </Typography>
+              <TextField
+                label="Caption"
+                autoFocus
+                multiline
+                minRows={2}
+                maxRows={4}
+                value={captionDraft}
+                onChange={(event) => setCaptionDraft(event.target.value)}
+                error={captionHasTooManyLines}
+                helperText={`${captionDraft.length}/240 characters · Up to four lines`}
+                slotProps={{ htmlInput: { maxLength: 240 } }}
+              />
+            </Stack>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setCaptionOpen(false)}>Cancel</Button>
+            <Button
+              variant="contained"
+              onClick={() => void exportClip("caption")}
+              disabled={!caption || captionHasTooManyLines}
+            >
+              Save captioned MP4
+            </Button>
+          </DialogActions>
+        </Dialog>
+
         <Dialog open={Boolean(confirmTrim)} onClose={() => !trimmingClip && setConfirmTrim(null)}>
           <DialogTitle>
             {confirmTrim === "fast" ? "Fast trim and replace?" : "Precise trim and replace?"}
@@ -4041,10 +4455,10 @@ export function RecordingViewer({
           variant="outlined"
           sx={{
             p: 2,
-            flex: embeddedCombo ? "1 1 auto" : { xs: "0 0 auto", md: 1 },
+            flex: embeddedCombo ? "1 1 auto" : { xs: "0 0 auto", lg: 1 },
             minWidth: 0,
-            minHeight: embeddedCombo ? "auto" : { xs: "auto", md: 0 },
-            overflow: embeddedCombo ? "visible" : { xs: "visible", md: "auto" },
+            minHeight: embeddedCombo ? "auto" : { xs: "auto", lg: 0 },
+            overflow: embeddedCombo ? "visible" : { xs: "visible", lg: "auto" },
             textAlign: "left",
             containerType: "inline-size",
           }}
@@ -4069,6 +4483,29 @@ export function RecordingViewer({
                         : formatFileSize(selectedRecording.size)}
                     </Typography>
                   </Stack>
+                  {showF10Clips && (
+                    <>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={() => {
+                          if (!searchedRecordings.some(({ id }) => id === selectedRecording.id)) {
+                            setRecordingSearch("");
+                          }
+                          beginRename(selectedRecording);
+                        }}
+                      >
+                        Rename
+                      </Button>
+                      <Button
+                        size="small"
+                        color="error"
+                        onClick={() => requestDelete(selectedRecording)}
+                      >
+                        Delete
+                      </Button>
+                    </>
+                  )}
                   {selectedRecording.youtubeUrl ? (
                     <Tooltip title="Open linked YouTube video">
                       <IconButton
@@ -4096,7 +4533,7 @@ export function RecordingViewer({
                     selectedRecording.name.toLowerCase().endsWith(".mp4") && (
                       <Button
                         size="small"
-                        variant="outlined"
+                        variant="contained"
                         disabled={Boolean(youtubeUploadJobById.get(selectedRecording.id))}
                         onClick={() => {
                           const pendingUrl = pendingYouTubeUploadById.get(selectedRecording.id);
@@ -4558,7 +4995,7 @@ export function RecordingViewer({
                 ) : (
                   <Box
                     component="video"
-                    key={selectedRecording.url}
+                    key={`${selectedRecording.url}?v=${mediaRevision}`}
                     ref={videoRef}
                     src={`${selectedRecording.url}?v=${mediaRevision}`}
                     tabIndex={0}
@@ -5117,6 +5554,15 @@ export function RecordingViewer({
                   </Button>
                 )}
               </Box>
+              {selectedRecording.mediaKind !== "youtube" &&
+                (mode === "nerd-processing" || selectedRecording.moveTake) && (
+                  <FramebarLegend
+                    colors={
+                      selectedRecording.analysis?.processingSnapshot?.configuration.framebar
+                        .colors ?? persistentConfig?.framebar.colors
+                    }
+                  />
+                )}
               <Stack spacing={0.5}>
                 {timelineChapters.length > 0 && (
                   <Box
@@ -5375,6 +5821,7 @@ export function RecordingViewer({
                       >
                         {exportingClipMode === "precise" ? "Exporting..." : "Precise export"}
                       </Button>
+                      {captionButton}
                       {canOfferTrim && (
                         <Tooltip
                           title={
@@ -5497,13 +5944,17 @@ export function RecordingViewer({
                             }}
                             disabled={!duration}
                           >
-                            {selectedRecording.clip
-                              ? "Create or trim clip"
-                              : "Create clip or trim recording"}
+                            {showF10Clips
+                              ? "Trim clip"
+                              : selectedRecording.clip
+                                ? "Create or trim clip"
+                                : "Create clip or trim recording"}
                           </Button>
                         )}
+                        {captionButton}
                         {selectedRecording?.name.toLowerCase().endsWith(".mp4") &&
                           selectedRecording.mediaKind !== "youtube" &&
+                          !isF10Clip(selectedRecording) &&
                           !selectedRecording.clip && (
                             <Button
                               variant="outlined"

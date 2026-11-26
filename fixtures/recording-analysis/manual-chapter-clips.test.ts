@@ -5,7 +5,80 @@ const require = createRequire(import.meta.url);
 const {
   planManualChapterClips,
   createMissingManualChapterClips,
+  isManualChapterClip,
+  manualChapterClipState,
 } = require("../../electron/manual-chapter-clips.cjs");
+
+describe("F10 clip origin", () => {
+  it("recognizes legacy marker metadata and keeps recognizing renamed or detached clips", () => {
+    expect(isManualChapterClip({ clip: { manualChapterStartMs: 45_000 } }, "renamed.mp4")).toBe(
+      true,
+    );
+    expect(isManualChapterClip({ f10Clip: true, clip: null }, "trimmed and renamed.mp4")).toBe(
+      true,
+    );
+  });
+
+  it("recovers older trims from generated filenames without including exports made from them", () => {
+    const stem = "set - F10 clip 00-00-15-000 to 00-00-45-000";
+    expect(isManualChapterClip({}, `${stem}.mp4`)).toBe(true);
+    expect(isManualChapterClip({}, `${stem} (2).mp4`)).toBe(true);
+    expect(isManualChapterClip({}, `${stem} - clip 00-00-00-000 to 00-00-05-000.mp4`)).toBe(false);
+    expect(isManualChapterClip(null, `${stem}.mp4`)).toBe(false);
+  });
+});
+
+describe("F10 clip edits", () => {
+  const generated = "Set - F10 clip 00-00-15-000 to 00-00-45-000.mp4";
+  const renamed = "Corner punish.mp4";
+  const clip = { startTime: 15, endTime: 45, manualChapterStartMs: 45_000 };
+  const original = { f10Clip: true, f10ClipTrimmed: false, clip };
+
+  it("recognizes each saved edit independently", () => {
+    const trimmed = { ...original, f10ClipTrimmed: true };
+    expect(manualChapterClipState(original, generated)).toEqual({ trimmed: false, renamed: false });
+    expect(manualChapterClipState({ ...original, outputFileName: renamed }, renamed)).toEqual({
+      trimmed: false,
+      renamed: true,
+    });
+    expect(manualChapterClipState(trimmed, generated)).toEqual({ trimmed: true, renamed: false });
+    expect(manualChapterClipState({ ...trimmed, outputFileName: renamed }, renamed)).toEqual({
+      trimmed: true,
+      renamed: true,
+    });
+    expect(manualChapterClipState({ ...trimmed, outputFileName: renamed }, generated)).toEqual({
+      trimmed: true,
+      renamed: false,
+    });
+  });
+
+  it("recognizes older start and end trims while keeping full clips available", () => {
+    const manifest = { f10Clip: true, outputFileName: renamed };
+    expect(manualChapterClipState({ ...manifest, clip }, renamed)?.trimmed).toBe(false);
+    expect(
+      manualChapterClipState({ ...manifest, clip: { ...clip, startTime: 21 } }, renamed)?.trimmed,
+    ).toBe(true);
+    expect(
+      manualChapterClipState({ ...manifest, clip: { startTime: 15, endTime: 36 } }, renamed)
+        ?.trimmed,
+    ).toBe(true);
+    expect(
+      manualChapterClipState(
+        { ...manifest, clip: { startTime: 0, endTime: 17, manualChapterStartMs: 17_000 } },
+        renamed,
+      )?.trimmed,
+    ).toBe(false);
+  });
+
+  it("preserves a recorded trim after the source link is removed", () => {
+    const detached = { f10Clip: true, clip: null, outputFileName: renamed };
+    expect(manualChapterClipState(detached, renamed)).toEqual({ trimmed: false, renamed: true });
+    expect(manualChapterClipState({ ...detached, f10ClipTrimmed: true }, renamed)).toEqual({
+      trimmed: true,
+      renamed: true,
+    });
+  });
+});
 
 describe("manual chapter clip planning", () => {
   it("clips the 30 seconds before each OBS F10 chapter", () => {

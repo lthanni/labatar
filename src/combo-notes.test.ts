@@ -24,6 +24,17 @@ describe("combo route normalization", () => {
     );
   });
 
+  it("accepts controller shortcut chords as one route token", () => {
+    expect(normalizeComboRoute("5b+c 2a+b+c 5a+f 5c+f")).toBe("5B+C 2A+B+C 5A+F 5C+F");
+    expect(comboRouteFormatError("5B+C 2A+B+C 5A+F 5C+F")).toBeNull();
+  });
+
+  it("formats Tiger Knee inputs without dropping their jump directions", () => {
+    const route = "2369C j.23698EX 2147[B] 21478A!";
+    expect(formatComboRoute("2369c j.23698ex 2147[b] 21478a!")).toBe(route);
+    expect(comboRouteFormatError(route)).toBeNull();
+  });
+
   it("keeps attached note ranges when a route is formatted", () => {
     const original = "2b! > 5c";
     const route = formatComboRoute(original);

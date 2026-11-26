@@ -1,8 +1,9 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
+const { validateComboInputBindings } = require("./combo-input-bindings.cjs");
 
-const PROCESSOR_VERSION = 10;
+const PROCESSOR_VERSION = 14;
 const EMPTY_EDITS = { schemaVersion: 1, presses: {} };
 const ACTION_LABELS = {
   Atk1: "A",
@@ -14,6 +15,10 @@ const ACTION_LABELS = {
   SUP: "SUP",
   Throw: "TH",
   TH: "TH",
+  DashShortcut: "B+C",
+  SuperShortcut: "A+B+C",
+  ThrowShortcut: "TH",
+  GuardReversalShortcut: "C+F",
 };
 
 function inputDirection(state) {
@@ -87,8 +92,8 @@ function recentMotion(states, index, facing) {
     .map((state) => relativeDirection(inputDirection(state), facing))
     .filter((direction, position, values) => position === 0 || direction !== values[position - 1]);
   const path = directions.join("");
-  if (/2(?:3)*3(?:6)*6$/.test(path)) return { notation: "236", path };
-  if (/2(?:1)*1(?:4)*4$/.test(path)) return { notation: "214", path };
+  const quarterCircle = /(?:236(?:98?)?|214(?:78?)?)$/.exec(path);
+  if (quarterCircle) return { notation: quarterCircle[0], path };
   if (/2(?:5)*2$/.test(path)) return { notation: "22", path };
   return null;
 }
@@ -114,6 +119,8 @@ function validateEdits(value) {
   ) {
     throw new Error("The combo input edits file is invalid.");
   }
+  if (value.bindings !== undefined)
+    validateComboInputBindings(value.bindings, { allowLegacy: true });
   for (const [key, edit] of Object.entries(value.presses)) {
     if (
       !/^\d+:[A-Za-z0-9]+$/.test(key) ||
@@ -140,6 +147,12 @@ function validateEdits(value) {
     }
     if (edit.togglePosition !== undefined && edit.togglePosition !== true) {
       throw new Error("A combo input edit has an invalid position toggle.");
+    }
+    if (edit.toggleFacing !== undefined && edit.toggleFacing !== true) {
+      throw new Error("A combo input edit has an invalid facing toggle.");
+    }
+    if (edit.hidden !== undefined && edit.hidden !== true) {
+      throw new Error("A combo input edit has an invalid hidden flag.");
     }
     if (edit.charged !== undefined && edit.charged !== true) {
       throw new Error("A combo input edit has an invalid charged flag.");
@@ -198,20 +211,20 @@ function processComboInputCapture(
     throw new Error("The raw combo input capture is invalid.");
   }
   const states = capture.states;
+  const bindings = edits.bindings ?? capture.bindings ?? {};
   const directionChanges = [];
   const presses = [];
   const routes = { right: [], left: [] };
+  const editsBeforeClip = Object.entries(edits.presses).filter(
+    ([key]) => Number(key.split(":")[0]) <= (rawStartMs ?? 0),
+  );
   let basePosition =
-    Object.entries(edits.presses)
-      .filter(([key, edit]) => edit.positionAfter && Number(key.split(":")[0]) <= (rawStartMs ?? 0))
+    editsBeforeClip
+      .filter(([, edit]) => edit.positionAfter)
       .sort(([left], [right]) => Number(left.split(":")[0]) - Number(right.split(":")[0]))
       .at(-1)?.[1].positionAfter ?? "grounded";
-  let positionFlipped =
-    Object.entries(edits.presses).filter(
-      ([key, edit]) => edit.togglePosition && Number(key.split(":")[0]) <= (rawStartMs ?? 0),
-    ).length %
-      2 ===
-    1;
+  let positionFlipped = editsBeforeClip.filter(([, edit]) => edit.togglePosition).length % 2 === 1;
+  let facingFlipped = editsBeforeClip.filter(([, edit]) => edit.toggleFacing).length % 2 === 1;
   for (let index = 0; index < states.length; index += 1) {
     const state = states[index];
     const previous = states[index - 1];
@@ -225,7 +238,7 @@ function processComboInputCapture(
         direction: inputDirection(state),
         heldButtons,
         heldGameButtons: heldButtons
-          .map((button) => ACTION_LABELS[capture.bindings?.[button]])
+          .map((button) => ACTION_LABELS[bindings[button]])
           .filter(Boolean),
       });
     }
@@ -234,18 +247,20 @@ function processComboInputCapture(
       ? (state.buttons ?? []).filter((button) => !previous.buttons?.includes(button))
       : [];
     for (const physicalButton of newButtons) {
-      const action = capture.bindings?.[physicalButton] ?? null;
+      const action = bindings[physicalButton] ?? null;
       const gameButton = ACTION_LABELS[action] ?? null;
       const rawTimeMs = (Number.isFinite(rawStartMs) ? rawStartMs : 0) + state.timeMs;
       const edit = edits.presses[pressEditKey(rawTimeMs, physicalButton)] ?? null;
       if (edit?.togglePosition) positionFlipped = !positionFlipped;
+      if (edit?.toggleFacing) facingFlipped = !facingFlipped;
       const position = positionFlipped ? oppositePosition(basePosition) : basePosition;
       const interpretations = {};
       for (const facing of ["right", "left"]) {
-        const motion = recentMotion(states, index, facing);
-        const direction = relativeDirection(inputDirection(state), facing);
+        const inputFacing = facingFlipped ? (facing === "right" ? "left" : "right") : facing;
+        const motion = recentMotion(states, index, inputFacing);
+        const direction = relativeDirection(inputDirection(state), inputFacing);
         const suggestedNotation = gameButton
-          ? `${position === "airborne" ? "j." : ""}${motion?.notation ?? direction}${gameButton}`
+          ? `${position === "airborne" ? "j." : ""}${gameButton === "TH" ? "" : (motion?.notation ?? direction)}${gameButton}`
           : null;
         const baseNotation =
           facing === "right" && edit?.notation
@@ -269,7 +284,7 @@ function processComboInputCapture(
           suggestedNotation,
           notation,
         };
-        if (notation)
+        if (notation && !edit?.hidden)
           routes[facing].push({
             notation,
             separator: facing === "right" ? (edit?.separator ?? " ") : " ",
@@ -281,7 +296,7 @@ function processComboInputCapture(
         physicalButton,
         gameAction: action,
         gameButton,
-        context: { facing: "right", position },
+        context: { facing: facingFlipped ? "left" : "right", position },
         positionAfter: edit?.positionAfter
           ? positionFlipped
             ? oppositePosition(edit.positionAfter)
